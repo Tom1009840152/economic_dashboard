@@ -9,6 +9,7 @@ const NAV_ITEMS = [
   { href: "/country/us", label: "美国" },
   { href: "/country/jp", label: "日本" },
   { href: "/country/eu", label: "欧盟" },
+  { href: "/country/kr", label: "韩国" },
 ];
 
 export function Sidebar() {

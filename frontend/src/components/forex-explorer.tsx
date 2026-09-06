@@ -9,6 +9,8 @@ import {
   type ForecastPoint,
 } from "@/lib/api";
 import { IndicatorDetail } from "@/components/indicator-detail";
+import { EconTheory } from "@/components/econ-theory";
+import { getForexTheory } from "@/lib/indicator-glossary";
 
 function formatAmount(n: number): string {
   return n.toLocaleString(undefined, { maximumFractionDigits: 4 });
@@ -184,6 +186,8 @@ export function ForexExplorer({
           <p className="text-sm text-muted-foreground">暂无该货币对的数据。</p>
         )}
       </div>
+
+      <EconTheory theory={getForexTheory(base, target)} />
     </div>
   );
 }

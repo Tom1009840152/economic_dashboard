@@ -79,6 +79,12 @@ def fetch_stoxx50() -> pd.DataFrame:
     return _clean(df, "date", "close")
 
 
+def fetch_kospi() -> pd.DataFrame:
+    # 同上，新浪接口只保留最近约4年数据
+    df = ak.index_global_hist_sina(symbol="首尔综合指数")
+    return _clean(df, "date", "close")
+
+
 def _fetch_boc_currency(cn_symbol: str, scale: float) -> pd.DataFrame:
     """常规刷新：只拉最近 CURRENCY_REFRESH_DAYS 天，补历史用 backfill_boc_currency()。"""
     end = dt.date.today()
@@ -138,14 +144,16 @@ def _make_currency_fetcher(cn_symbol: str, scale: float):
 
 
 def _all_fetchers() -> dict:
-    # 延迟导入 macro_source，避免它反过来导入本模块时出现循环导入
+    # 延迟导入，避免它们反过来导入本模块时出现循环导入
     from app.fetchers.macro_source import MACRO_FETCHERS
+    from app.fetchers.fred_source import FRED_FETCHERS
 
     return {
         "SSE": fetch_sse,
         "DJI": fetch_dji,
         "NKY": fetch_nikkei,
         "STOXX50": fetch_stoxx50,
+        "KOSPI": fetch_kospi,
         "GOLD": fetch_gold,
         "WTI": fetch_wti,
         **{
@@ -153,6 +161,7 @@ def _all_fetchers() -> dict:
             for code, (cn_symbol, scale) in BOC_CURRENCIES.items()
         },
         **MACRO_FETCHERS,
+        **FRED_FETCHERS,
     }
 
 

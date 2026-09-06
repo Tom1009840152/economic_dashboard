@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 def _clean_month_col(
-    df: pd.DataFrame, month_col: str, value_col: str, fmt: str = "%Y年%m月份"
+    df: pd.DataFrame, month_col: str, value_col: str, fmt: str = "%Y年%m月份", scale: float = 1.0
 ) -> pd.DataFrame:
     """处理"2026年07月份"（或 fmt 指定的其它格式，比如日本数据是"2026年07月"）这种月份字符串列。"""
     out = df[[month_col, value_col]].rename(columns={month_col: "date", value_col: "value"})
@@ -28,7 +28,7 @@ def _clean_month_col(
     out = out.dropna(subset=["date"])
     out["date"] = out["date"].dt.date
     out = out[out["date"] >= DATA_FLOOR_DATE]
-    out["value"] = out["value"].astype(float)
+    out["value"] = out["value"].astype(float) * scale
     return out.reset_index(drop=True).sort_values("date").reset_index(drop=True)
 
 
@@ -57,6 +57,108 @@ def fetch_cn_ppi() -> pd.DataFrame:
 def fetch_cn_pmi() -> pd.DataFrame:
     df = ak.macro_china_pmi()
     return _clean_month_col(df, "月份", "制造业-指数")
+
+
+def fetch_cn_retail() -> pd.DataFrame:
+    df = ak.macro_china_consumer_goods_retail()
+    return _clean_month_col(df, "月份", "同比增长")
+
+
+def fetch_cn_fai() -> pd.DataFrame:
+    df = ak.macro_china_gdzctz()
+    return _clean_month_col(df, "月份", "同比增长")
+
+
+def fetch_cn_exports() -> pd.DataFrame:
+    df = ak.macro_china_exports_yoy()
+    return _clean(df, "日期", "今值")
+
+
+def fetch_cn_exports_abs() -> pd.DataFrame:
+    # 海关总署原始单位是千美元，除以 1e5 换算成媒体常用的"亿美元"口径
+    df = ak.macro_china_hgjck()
+    return _clean_month_col(df, "月份", "当月出口额-金额", scale=1 / 1e5)
+
+
+def fetch_cn_hog() -> pd.DataFrame:
+    # 生猪现货价格指数，周频；是判断"猪周期"最常用的原始价格序列
+    df = ak.index_hog_spot_price()
+    return _clean(df, "日期", "指数")
+
+
+_money_supply_cache: dict = {"df": None, "ts": 0.0}
+_MONEY_SUPPLY_CACHE_TTL = 60  # M2/M1/M0/剪刀差四个指标共用同一个接口调用，用短TTL缓存合并成一次请求
+
+
+def _raw_money_supply_df() -> pd.DataFrame:
+    now = time.time()
+    if _money_supply_cache["df"] is None or now - _money_supply_cache["ts"] > _MONEY_SUPPLY_CACHE_TTL:
+        _money_supply_cache["df"] = ak.macro_china_money_supply()
+        _money_supply_cache["ts"] = now
+    return _money_supply_cache["df"]
+
+
+def fetch_cn_m2_abs() -> pd.DataFrame:
+    df = _raw_money_supply_df()
+    return _clean_month_col(df, "月份", "货币和准货币(M2)-数量(亿元)")
+
+
+def fetch_cn_m2_yoy() -> pd.DataFrame:
+    df = _raw_money_supply_df()
+    return _clean_month_col(df, "月份", "货币和准货币(M2)-同比增长")
+
+
+def fetch_cn_m2_mom() -> pd.DataFrame:
+    df = _raw_money_supply_df()
+    return _clean_month_col(df, "月份", "货币和准货币(M2)-环比增长")
+
+
+def fetch_cn_m1_abs() -> pd.DataFrame:
+    df = _raw_money_supply_df()
+    return _clean_month_col(df, "月份", "货币(M1)-数量(亿元)")
+
+
+def fetch_cn_m1_yoy() -> pd.DataFrame:
+    df = _raw_money_supply_df()
+    return _clean_month_col(df, "月份", "货币(M1)-同比增长")
+
+
+def fetch_cn_m1_mom() -> pd.DataFrame:
+    df = _raw_money_supply_df()
+    return _clean_month_col(df, "月份", "货币(M1)-环比增长")
+
+
+def fetch_cn_m0_abs() -> pd.DataFrame:
+    df = _raw_money_supply_df()
+    return _clean_month_col(df, "月份", "流通中的现金(M0)-数量(亿元)")
+
+
+def fetch_cn_m0_yoy() -> pd.DataFrame:
+    df = _raw_money_supply_df()
+    return _clean_month_col(df, "月份", "流通中的现金(M0)-同比增长")
+
+
+def fetch_cn_m0_mom() -> pd.DataFrame:
+    df = _raw_money_supply_df()
+    return _clean_month_col(df, "月份", "流通中的现金(M0)-环比增长")
+
+
+def fetch_cn_m1_m2_spread() -> pd.DataFrame:
+    # M1-M2剪刀差：反映企业资金活化程度，历史上领先投资/库存周期
+    df = _raw_money_supply_df().copy()
+    df["M1-M2剪刀差"] = df["货币(M1)-同比增长"] - df["货币和准货币(M2)-同比增长"]
+    return _clean_month_col(df, "月份", "M1-M2剪刀差")
+
+
+def fetch_cn_real_estate() -> pd.DataFrame:
+    # 国房景气指数，全国综合房地产市场冷热程度
+    df = ak.macro_china_real_estate()
+    return _clean(df, "日期", "最新值")
+
+
+def fetch_cn_energy() -> pd.DataFrame:
+    df = ak.macro_china_energy_index()
+    return _clean(df, "日期", "最新值")
 
 
 def fetch_cn_tsf() -> pd.DataFrame:
@@ -167,14 +269,48 @@ def fetch_eu_ecb() -> pd.DataFrame:
     return _clean(df, "日期", "今值")
 
 
+def fetch_cn_gdp() -> pd.DataFrame:
+    df = ak.macro_china_gdp_yearly()
+    return _clean(df, "日期", "今值")
+
+
+def fetch_us_gdp() -> pd.DataFrame:
+    df = ak.macro_usa_gdp_monthly()
+    return _clean(df, "日期", "今值")
+
+
+def fetch_eu_gdp() -> pd.DataFrame:
+    df = ak.macro_euro_gdp_yoy()
+    return _clean(df, "日期", "今值")
+
+
 MACRO_FETCHERS = {
     "CN_CPI": fetch_cn_cpi,
     "CN_PPI": fetch_cn_ppi,
     "CN_PMI": fetch_cn_pmi,
     "CN_TSF": fetch_cn_tsf,
+    "CN_GDP": fetch_cn_gdp,
+    "CN_RETAIL": fetch_cn_retail,
+    "CN_FAI": fetch_cn_fai,
+    "CN_EXPORTS": fetch_cn_exports,
+    "CN_EXPORTS_ABS": fetch_cn_exports_abs,
+    "CN_HOG": fetch_cn_hog,
+    "CN_M2_ABS": fetch_cn_m2_abs,
+    "CN_M2_YOY": fetch_cn_m2_yoy,
+    "CN_M2_MOM": fetch_cn_m2_mom,
+    "CN_M1_ABS": fetch_cn_m1_abs,
+    "CN_M1_YOY": fetch_cn_m1_yoy,
+    "CN_M1_MOM": fetch_cn_m1_mom,
+    "CN_M0_ABS": fetch_cn_m0_abs,
+    "CN_M0_YOY": fetch_cn_m0_yoy,
+    "CN_M0_MOM": fetch_cn_m0_mom,
+    "CN_M1M2": fetch_cn_m1_m2_spread,
+    "CN_REALESTATE": fetch_cn_real_estate,
+    "CN_ENERGY": fetch_cn_energy,
     "US_CPI": fetch_us_cpi,
     "US_NFP": fetch_us_nfp,
     "US_FFR": fetch_us_ffr,
+    "US_GDP": fetch_us_gdp,
     "CN_2Y": fetch_cn_2y,
     "CN_5Y": fetch_cn_5y,
     "CN_10Y": fetch_cn_10y,
@@ -189,4 +325,5 @@ MACRO_FETCHERS = {
     "JP_BOJ": fetch_jp_boj,
     "EU_CPI": fetch_eu_cpi,
     "EU_ECB": fetch_eu_ecb,
+    "EU_GDP": fetch_eu_gdp,
 }

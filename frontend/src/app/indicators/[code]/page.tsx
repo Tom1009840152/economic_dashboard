@@ -4,20 +4,17 @@ import { getIndicatorForecast, getIndicatorHistory } from "@/lib/api";
 import { IndicatorDetail } from "@/components/indicator-detail";
 import { EconTheory } from "@/components/econ-theory";
 import { getGlossaryEntry } from "@/lib/indicator-glossary";
-import type { ForecastPoint } from "@/lib/api";
+import { ABSOLUTE_COMPANION } from "@/lib/companion-indicators";
+import type { ForecastPoint, IndicatorHistory } from "@/lib/api";
 
 export const dynamic = "force-dynamic";
 
-export default async function IndicatorDetailPage(
-  props: PageProps<"/indicators/[code]">
-) {
-  const { code } = await props.params;
-
-  let history;
+async function loadIndicator(code: string): Promise<{ history: IndicatorHistory; forecast: ForecastPoint[] } | null> {
+  let history: IndicatorHistory;
   try {
     history = await getIndicatorHistory(code);
   } catch {
-    notFound();
+    return null;
   }
 
   let forecast: ForecastPoint[] = [];
@@ -27,6 +24,21 @@ export default async function IndicatorDetailPage(
   } catch {
     // 历史数据不够长时后端会拒绝预测，图表仍然只展示历史走势
   }
+
+  return { history, forecast };
+}
+
+export default async function IndicatorDetailPage(
+  props: PageProps<"/indicators/[code]">
+) {
+  const { code } = await props.params;
+
+  const primary = await loadIndicator(code);
+  if (!primary) notFound();
+  const { history, forecast } = primary;
+
+  const companionCode = ABSOLUTE_COMPANION[code];
+  const companion = companionCode ? await loadIndicator(companionCode) : null;
 
   const glossary = getGlossaryEntry(code);
 
@@ -50,8 +62,21 @@ export default async function IndicatorDetailPage(
       </p>
 
       <div className="mt-8">
+        {companion && <h2 className="mb-3 text-sm font-semibold text-muted-foreground">同比增速</h2>}
         <IndicatorDetail history={history.points} forecast={forecast} />
       </div>
+
+      {companion && (
+        <div className="mt-10">
+          <h2 className="mb-1 text-sm font-semibold text-muted-foreground">
+            绝对水平 · {companion.history.name}（{companion.history.unit}）
+          </h2>
+          <p className="mb-3 text-xs text-muted-foreground">
+            同比看的是增长动能，这里看的是规模本身——两者结合才是完整的图景
+          </p>
+          <IndicatorDetail history={companion.history.points} forecast={companion.forecast} />
+        </div>
+      )}
 
       {glossary && <EconTheory theory={glossary.theory} />}
     </main>
