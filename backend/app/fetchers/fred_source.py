@@ -83,3 +83,23 @@ FRED_FETCHERS = {
     for group, series_id in US_MONEY_SERIES.items()
     for view in ("ABS", "YOY", "MOM")
 }
+
+# 日本央行总资产（资产负债表规模）。日本的M1/M2在FRED上虽然查得到，
+# 但数据源（OECD转载）已经停止更新（M1停在2023年11月，M2停在2017年2月，
+# 相当于死数据），放弃使用；这个总资产序列是唯一还在持续更新的日本央行相关规模指标，
+# 原始单位是"亿日元"，跟真实的日本央行资产负债表规模（数百万亿日元级别）吻合。
+FRED_FETCHERS["JP_BOJ_ASSETS"] = _make_fetcher("JPNASSETS", "ABS")
+
+# 欧元区同样没有能持续更新的M1/M2：FRED上 MANMM101EZM189S（M1）停在2023年11月，
+# MYAGM2EZM189S（M2）根本查不到（404），月度口径的欧央行总资产 ECBASSETS 也已停更
+# （停在2020年1月）。唯一还在正常更新的是欧央行"周度金融报表"里的总资产
+# 序列 ECBASSETSW，每周五更新，原始单位是"百万欧元"，用它顶替观察欧央行的货币扩张力度。
+FRED_FETCHERS["EU_ECB_ASSETS"] = _make_fetcher("ECBASSETSW", "ABS")
+
+# 韩国的情况比日本、欧元区更差：FRED上M1（MANMM101KRM189S）停在2023年10月，
+# M2（MYAGM2KRM189S）停在2017年5月；连"央行总资产"这类替代指标都没找到能持续更新的
+# ——唯一查到的"央行总资产/GDP"（DDDI06KRA156NWDB）是年度数据且停在2021年，同样是死数据。
+# 韩国唯一还在新鲜更新的央行相关序列，是"外汇储备"（Reserves Excluding Gold），
+# 但这个概念上是外储规模，不是货币供给/央行扩表——展示时前端词条会明确写明这一点，
+# 不会把它包装成"韩国的M0/M1/M2替代品"来误导。原始单位是"百万美元"。
+FRED_FETCHERS["KR_RESERVES"] = _make_fetcher("TRESEGKRM052N", "ABS")

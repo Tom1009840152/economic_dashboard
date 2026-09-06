@@ -88,7 +88,18 @@ INDICATOR_DEFS = [
     {"code": "US_10Y2Y", "name": "美国10年-2年国债利差", "category": "bond", "unit": "pp", "sort_order": 71, "region": "US"},
     {"code": "JP_CPI", "name": "日本CPI同比", "category": "macro", "unit": "%", "sort_order": 72, "region": "JP"},
     {"code": "JP_BOJ", "name": "日本央行政策利率", "category": "macro", "unit": "%", "sort_order": 73, "region": "JP"},
-    {"code": "EU_CPI", "name": "欧元区CPI同比", "category": "macro", "unit": "%", "sort_order": 74, "region": "EU"},
-    {"code": "EU_ECB", "name": "欧洲央行利率", "category": "macro", "unit": "%", "sort_order": 75, "region": "EU"},
-    {"code": "EU_GDP", "name": "欧元区GDP同比", "category": "macro", "unit": "%", "sort_order": 76, "region": "EU"},
+    # 日本没有可用的M1/M2数据源（FRED上有但已停止更新，形同死数据），用日本央行总资产
+    # 代替观察日本的货币扩张力度——QQE/YCC框架下这个指标比M1/M2更贴合日本的政策传导机制，
+    # 数据源同样是 FRED（见 fred_source.py），不是 akshare
+    {"code": "JP_BOJ_ASSETS", "name": "日本央行总资产", "category": "macro", "unit": "亿日元", "sort_order": 74, "region": "JP"},
+    {"code": "EU_CPI", "name": "欧元区CPI同比", "category": "macro", "unit": "%", "sort_order": 75, "region": "EU"},
+    {"code": "EU_ECB", "name": "欧洲央行利率", "category": "macro", "unit": "%", "sort_order": 76, "region": "EU"},
+    # 欧元区没有可用的M1/M2数据源（FRED上有但已停止更新，形同死数据），用欧央行总资产
+    # （周度金融报表口径）代替观察欧元区的货币扩张力度，数据源是 FRED（见 fred_source.py）
+    {"code": "EU_ECB_ASSETS", "name": "欧洲央行总资产", "category": "macro", "unit": "百万欧元", "sort_order": 77, "region": "EU"},
+    {"code": "EU_GDP", "name": "欧元区GDP同比", "category": "macro", "unit": "%", "sort_order": 78, "region": "EU"},
+    # 韩国没有可用的M1/M2数据源，连央行资产负债表类的替代指标都没查到能持续更新的
+    # （详见 fred_source.py 注释），只能退而求其次用外汇储备顶位——但这不是货币供给概念，
+    # 前端经济学解读词条会明确说明这一点，不会包装成"韩国的M0/M1/M2"
+    {"code": "KR_RESERVES", "name": "韩国外汇储备", "category": "macro", "unit": "百万美元", "sort_order": 79, "region": "KR"},
 ]
