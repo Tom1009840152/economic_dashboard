@@ -1,11 +1,13 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { getIndicators, type IndicatorSummary } from "@/lib/api";
+import { getEmployment, getIndicators, getPopulation, type IndicatorSummary } from "@/lib/api";
 import { IndicatorCard } from "@/components/indicator-card";
 import { BondSummaryCard } from "@/components/bond-summary-card";
 import { MoneySupplySummaryCard } from "@/components/money-supply-summary-card";
 import { FadeIn } from "@/components/fade-in";
 import { COMPANION_CODES } from "@/lib/companion-indicators";
+import { PopulationSummaryCard } from "@/components/population-summary-card";
+import { EmploymentSummaryCard } from "@/components/employment-summary-card";
 
 export const dynamic = "force-dynamic";
 
@@ -27,7 +29,11 @@ export default async function CountryPage(props: PageProps<"/country/[region]">)
   const meta = REGION_META[region];
   if (!meta) notFound();
 
-  const indicators = await getIndicators(meta.code);
+  const [indicators, population, employment] = await Promise.all([
+    getIndicators(meta.code),
+    region === "cn" ? getPopulation("CN").catch(() => null) : Promise.resolve(null),
+    region === "cn" ? getEmployment("CN").catch(() => null) : Promise.resolve(null),
+  ]);
 
   // 国债收益率、货币供给这两类，一个国家会有好几个细分指标，不逐个铺卡片，
   // 各自合并成一张汇总卡，点进去再切换具体看哪个（国债看期限，货币供给看M0/M1/M2/口径）
@@ -74,23 +80,33 @@ export default async function CountryPage(props: PageProps<"/country/[region]">)
       )}
 
       <div className="mt-8 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        {population && (
+          <FadeIn delay={0}>
+            <PopulationSummaryCard data={population} />
+          </FadeIn>
+        )}
+        {employment && (
+          <FadeIn delay={population ? 0.05 : 0}>
+            <EmploymentSummaryCard data={employment} />
+          </FadeIn>
+        )}
         {cards.map((card, i) => {
           if (card.kind === "bond") {
             return (
-              <FadeIn key="bond" delay={i * 0.05}>
+              <FadeIn key="bond" delay={(i + (population ? 1 : 0) + (employment ? 1 : 0)) * 0.05}>
                 <BondSummaryCard region={meta.code} bonds={card.bonds} />
               </FadeIn>
             );
           }
           if (card.kind === "money") {
             return (
-              <FadeIn key="money" delay={i * 0.05}>
+              <FadeIn key="money" delay={(i + (population ? 1 : 0) + (employment ? 1 : 0)) * 0.05}>
                 <MoneySupplySummaryCard region={meta.code} indicators={card.indicators} />
               </FadeIn>
             );
           }
           return (
-            <FadeIn key={card.indicator.code} delay={i * 0.05}>
+            <FadeIn key={card.indicator.code} delay={(i + (population ? 1 : 0) + (employment ? 1 : 0)) * 0.05}>
               <IndicatorCard indicator={card.indicator} />
             </FadeIn>
           );

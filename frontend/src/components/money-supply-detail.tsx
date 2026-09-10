@@ -22,6 +22,11 @@ interface SeriesData {
   forecast: ForecastPoint[];
 }
 
+interface SeriesResult {
+  data: SeriesData | null;
+  error: string | null;
+}
+
 function codeFor(prefix: string, group: string, view: View): string {
   return `${prefix}_${group}_${view}`;
 }
@@ -47,54 +52,55 @@ export function MoneySupplyDetail({
   const [group, setGroup] = useState(initialGroup);
   const [view, setView] = useState<View>(initialView);
   const [showSpread, setShowSpread] = useState(false);
-  const [loading, setLoading] = useState(false);
-  const [cache, setCache] = useState<Record<string, SeriesData>>({
-    [codeFor(codePrefix, initialGroup, initialView)]: initialData,
+  const [cache, setCache] = useState<Record<string, SeriesResult>>({
+    [codeFor(codePrefix, initialGroup, initialView)]: { data: initialData, error: null },
   });
-  const [spreadData, setSpreadData] = useState<SeriesData | null>(null);
 
   const currentCode = codeFor(codePrefix, group, view);
-  const current = cache[currentCode];
+  const requestedCode = showSpread && spreadCode ? spreadCode : currentCode;
+  const currentResult = cache[requestedCode];
+  const displayed = currentResult?.data ?? null;
+  const loading = currentResult === undefined;
+  const loadError = currentResult?.error ?? null;
 
+  // 普通货币供应指标与剪刀差走同一个按 code 缓存的加载流程。
+  // loading 由缓存中是否已有结果推导，不需要在 effect 中同步设置。
   useEffect(() => {
-    if (showSpread || cache[currentCode]) return;
+    if (cache[requestedCode]) return;
     let cancelled = false;
-    setLoading(true);
     Promise.all([
-      getIndicatorHistory(currentCode),
-      getIndicatorForecast(currentCode).catch(() => ({ forecast: [] as ForecastPoint[] })),
+      getIndicatorHistory(requestedCode),
+      getIndicatorForecast(requestedCode).catch(() => ({ forecast: [] as ForecastPoint[] })),
     ]).then(([h, f]) => {
       if (cancelled) return;
       setCache((c) => ({
         ...c,
-        [currentCode]: { name: h.name, unit: h.unit, points: h.points, forecast: f.forecast },
+        [requestedCode]: {
+          data: { name: h.name, unit: h.unit, points: h.points, forecast: f.forecast },
+          error: null,
+        },
       }));
-      setLoading(false);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [currentCode, cache, showSpread]);
-
-  useEffect(() => {
-    if (!showSpread || !spreadCode || spreadData) return;
-    let cancelled = false;
-    setLoading(true);
-    Promise.all([
-      getIndicatorHistory(spreadCode),
-      getIndicatorForecast(spreadCode).catch(() => ({ forecast: [] as ForecastPoint[] })),
-    ]).then(([h, f]) => {
+    }).catch(() => {
       if (cancelled) return;
-      setSpreadData({ name: h.name, unit: h.unit, points: h.points, forecast: f.forecast });
-      setLoading(false);
+      setCache((c) => ({
+        ...c,
+        [requestedCode]: { data: null, error: "该指标暂时加载失败。" },
+      }));
     });
     return () => {
       cancelled = true;
     };
-  }, [showSpread, spreadData, spreadCode]);
+  }, [cache, requestedCode]);
 
-  const displayed = showSpread ? spreadData : current;
   const glossary = getGlossaryEntry(showSpread && spreadCode ? spreadCode : currentCode);
+
+  function retryRequestedCode() {
+    setCache((entries) => {
+      const next = { ...entries };
+      delete next[requestedCode];
+      return next;
+    });
+  }
 
   return (
     <div>
@@ -149,7 +155,14 @@ export function MoneySupplyDetail({
       )}
 
       <div className={`mt-6 transition-opacity ${loading ? "opacity-50" : ""}`}>
-        {displayed ? (
+        {loading ? (
+          <p className="text-sm text-muted-foreground">加载中…</p>
+        ) : loadError ? (
+          <div className="flex items-center gap-3 text-sm text-muted-foreground">
+            <span>{loadError}</span>
+            <button onClick={retryRequestedCode} className="underline underline-offset-2">重试</button>
+          </div>
+        ) : displayed ? (
           <>
             <h2 className="text-sm font-semibold text-muted-foreground">
               {showSpread ? spreadName : displayed.name}（{displayed.unit}）
@@ -165,7 +178,7 @@ export function MoneySupplyDetail({
             {glossary && <EconTheory theory={glossary.theory} />}
           </>
         ) : (
-          <p className="text-sm text-muted-foreground">加载中…</p>
+          <p className="text-sm text-muted-foreground">暂无该指标的数据。</p>
         )}
       </div>
     </div>

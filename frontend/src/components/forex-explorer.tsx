@@ -16,6 +16,20 @@ function formatAmount(n: number): string {
   return n.toLocaleString(undefined, { maximumFractionDigits: 4 });
 }
 
+interface PairData {
+  history: DataPoint[];
+  forecast: ForecastPoint[];
+}
+
+interface PairResult {
+  data: PairData | null;
+  error: string | null;
+}
+
+function pairKey(base: string, target: string): string {
+  return `${base}-${target}`;
+}
+
 export function ForexExplorer({
   currencies,
   initialBase,
@@ -31,74 +45,91 @@ export function ForexExplorer({
 }) {
   const [base, setBase] = useState(initialBase);
   const [target, setTarget] = useState(initialTarget);
-  const [amounts, setAmounts] = useState({ base: "1", target: "" });
+  const [inputAmount, setInputAmount] = useState("1");
   const [activeField, setActiveField] = useState<"base" | "target">("base");
-  const [loading, setLoading] = useState(false);
-  const [history, setHistory] = useState<DataPoint[]>(initialHistory);
-  const [forecast, setForecast] = useState<ForecastPoint[]>(initialForecast);
+  const [pairResults, setPairResults] = useState<Record<string, PairResult>>({
+    [pairKey(initialBase, initialTarget)]: {
+      data: { history: initialHistory, forecast: initialForecast },
+      error: null,
+    },
+  });
+
+  const currentPairKey = pairKey(base, target);
+  const currentResult = pairResults[currentPairKey];
+  const history = currentResult?.data?.history ?? [];
+  const forecast = currentResult?.data?.forecast ?? [];
+  const loading = base !== target && currentResult === undefined;
+  const loadError = currentResult?.error ?? null;
 
   const rate = history.length > 0 ? history[history.length - 1].value : null;
   const latestDate = history.length > 0 ? history[history.length - 1].date : null;
   const prevValue = history.length > 1 ? history[history.length - 2].value : null;
   const changePct = rate !== null && prevValue ? ((rate - prevValue) / prevValue) * 100 : null;
 
-  // 拉取新货币对的历史+预测（首屏那一对已经由服务端渲染好了，不用重复请求）
+  // 请求结果按货币对缓存。加载状态由当前货币对是否已有结果直接推导，
+  // 避免在 effect 开头同步 setState 造成额外渲染。
   useEffect(() => {
-    if (base === initialBase && target === initialTarget) return;
-    if (base === target) {
-      setHistory([]);
-      setForecast([]);
-      return;
-    }
+    if (base === target || pairResults[currentPairKey]) return;
 
     let cancelled = false;
-    setLoading(true);
     Promise.all([
       getForexHistory(base, target),
       getForexForecast(base, target).catch(() => ({ forecast: [] as ForecastPoint[] })),
     ]).then(([h, f]) => {
       if (cancelled) return;
-      setHistory(h.points);
-      setForecast(f.forecast);
-      setLoading(false);
+      setPairResults((results) => ({
+        ...results,
+        [currentPairKey]: {
+          data: { history: h.points, forecast: f.forecast },
+          error: null,
+        },
+      }));
+    }).catch(() => {
+      if (cancelled) return;
+      setPairResults((results) => ({
+        ...results,
+        [currentPairKey]: { data: null, error: "该货币对暂时加载失败。" },
+      }));
     });
 
     return () => {
       cancelled = true;
     };
-  }, [base, target, initialBase, initialTarget]);
+  }, [base, target, currentPairKey, pairResults]);
 
-  // 换了货币对、汇率变了之后，按上次是哪个输入框在编辑，重新算另一边的金额
-  useEffect(() => {
-    if (rate === null) return;
-    setAmounts((a) => {
-      if (activeField === "base") {
-        const n = parseFloat(a.base);
-        return { ...a, target: Number.isFinite(n) ? formatAmount(n * rate) : "" };
-      }
-      const n = parseFloat(a.target);
-      return { ...a, base: Number.isFinite(n) ? formatAmount(n / rate) : "" };
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rate]);
+  const numericInput = parseFloat(inputAmount);
+  const hasAmount = Number.isFinite(numericInput);
+  const amounts = {
+    base: activeField === "base"
+      ? inputAmount
+      : rate !== null && hasAmount ? formatAmount(numericInput / rate) : "",
+    target: activeField === "target"
+      ? inputAmount
+      : rate !== null && hasAmount ? formatAmount(numericInput * rate) : "",
+  };
 
   function handleBaseAmountChange(v: string) {
     setActiveField("base");
-    const n = parseFloat(v);
-    setAmounts({ base: v, target: rate !== null && Number.isFinite(n) ? formatAmount(n * rate) : "" });
+    setInputAmount(v);
   }
 
   function handleTargetAmountChange(v: string) {
     setActiveField("target");
-    const n = parseFloat(v);
-    setAmounts({ target: v, base: rate !== null && Number.isFinite(n) ? formatAmount(n / rate) : "" });
+    setInputAmount(v);
   }
 
   function handleSwap() {
     setBase(target);
     setTarget(base);
-    setAmounts((a) => ({ base: a.target, target: a.base }));
     setActiveField((f) => (f === "base" ? "target" : "base"));
+  }
+
+  function retryCurrentPair() {
+    setPairResults((results) => {
+      const next = { ...results };
+      delete next[currentPairKey];
+      return next;
+    });
   }
 
   const baseName = currencies.find((c) => c.code === base)?.name ?? base;
@@ -180,7 +211,14 @@ export function ForexExplorer({
       </div>
 
       <div className={`mt-6 transition-opacity ${loading ? "opacity-50" : ""}`}>
-        {history.length > 0 ? (
+        {loading ? (
+          <p className="text-sm text-muted-foreground">加载中…</p>
+        ) : loadError ? (
+          <div className="flex items-center gap-3 text-sm text-muted-foreground">
+            <span>{loadError}</span>
+            <button onClick={retryCurrentPair} className="underline underline-offset-2">重试</button>
+          </div>
+        ) : history.length > 0 ? (
           <IndicatorDetail key={`${base}-${target}`} history={history} forecast={forecast} />
         ) : (
           <p className="text-sm text-muted-foreground">暂无该货币对的数据。</p>
