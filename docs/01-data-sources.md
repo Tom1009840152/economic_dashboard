@@ -9,7 +9,13 @@
 | **akshare** | 中国股指/汇率/大宗商品/几乎所有中国宏观数据；美国部分宏观数据、中美国债收益率；日本/欧元区 CPI、政策利率、GDP | 免费、聚合了新浪财经/东方财富/国家统计局等多个源，中国数据覆盖最全 | 不需要 |
 | **FRED**（美联储圣路易斯分行） | 美国货币供给（M1/M2/货币基础）；日本央行总资产；欧洲央行总资产；韩国外汇储备 | akshare 完全没有这几个指标的接口；FRED 有公开的 CSV 端点，不需要注册/Key，本机网络环境实测可连通，历史数据最早到 1959 年 | 不需要（`https://fred.stlouisfed.org/graph/fredgraph.csv?id=<SERIES_ID>`） |
 | **国家统计局月度数据** | 中国城镇调查失业率、本地/外来户籍劳动力失业率 | 官方劳动力抽样调查，可用于判断就业周期；通过 akshare 的统计局接口封装获取 | 不需要 |
-| **World Bank WDI** | 中国人口规模、增速、年龄结构、生育死亡、迁移、劳动力、就业结构与实际GDP | API 无需 Key，跨指标年份容易对齐；人口序列底层主要来自联合国人口司 WPP，劳动力序列来自 ILO 模型估计 | 不需要（`https://api.worldbank.org/v2/`） |
+| **World Bank WDI** | 中国、美国、日本、欧盟、韩国的人口规模、增速、年龄结构、生育死亡、迁移、劳动力与实际GDP | API 无需 Key，跨指标年份容易对齐；人口序列底层主要来自联合国人口司 WPP，劳动力序列来自 ILO 模型估计 | 不需要（`https://api.worldbank.org/v2/`） |
+| **BLS / FRED** | 美国失业、劳动参与、非农就业、工资、工时和职位空缺 | BLS 是底层官方统计机构，FRED 提供无需 Key 的稳定 CSV 分发接口 | 不需要 |
+| **OECD（经 FRED 分发）** | 日本、韩国的15—64岁失业率、就业率、劳动参与率、青年失业和男女参与率 | 月度季调、年龄口径一致，适合跨国比较；不同序列发布时间可能错位 | 不需要 |
+| **Eurostat EU-LFS** | 欧盟EU27的失业、青年失业、就业率、参与率、男女就业率和劳动力市场闲置 | 月度与季度混合，使用 `EU27_2020` 聚合口径 | 不需要 |
+| **OECD Data Explorer** | 中美日韩综合领先指标；美日韩核心CPI | 直接使用新版SDMX接口，避免FRED中的旧OECD序列停更 | 不需要 |
+| **Eurostat STS / HICP** | 欧元区工业生产与核心HICP | 工业生产取EA20季调工作日调整指数并计算同比；核心HICP剔除食品、能源、酒精和烟草 | 不需要 |
+| **中国国家统计局发布页** | 中国规上工业增加值同比、核心CPI同比 | 核心CPI不在稳定数据表中，以月度官方解读稿为准；抓取最近滚动窗口并由数据库保留历史 | 不需要 |
 
 FRED 是本项目第一个非 akshare 数据源，后续凡是 akshare 查不到的指标，会优先去 FRED 找有没有免费、还在更新的替代序列，而不是接第三个数据源——保持数据源数量尽量少，方便维护。
 
@@ -17,8 +23,13 @@ FRED 是本项目第一个非 akshare 数据源，后续凡是 akshare 查不到
 - `backend/app/fetchers/akshare_source.py`（股指/汇率/大宗商品）
 - `backend/app/fetchers/macro_source.py`（中美日欧的宏观、国债、货币供给——虽然文件名是 macro，但也走 akshare）
 - `backend/app/fetchers/fred_source.py`（美国货币供给、日本/欧洲央行总资产、韩国外汇储备）
-- `backend/app/fetchers/world_bank_population.py`（中国人口与人口—增长核算专题）
+- `backend/app/fetchers/world_bank_population.py`（五个地区的人口与人口—增长核算专题）
 - `backend/app/fetchers/china_employment.py`（中国就业专题；国家统计局月度调查 + WDI/ILO年度结构）
+- `backend/app/fetchers/us_employment.py`（美国就业专题；BLS 就业形势报告 + JOLTS，经 FRED 分发）
+- `backend/app/fetchers/oecd_employment.py`（日本、韩国就业专题；国家劳动力调查经 OECD/FRED 统一口径）
+- `backend/app/fetchers/eu_employment.py`（欧盟就业专题；Eurostat EU-LFS）
+- `backend/app/fetchers/oecd_cycle.py`（工业生产、OECD综合领先指标与跨国核心通胀）
+- `backend/app/fetchers/nbs_cycle.py`（国家统计局发布页中的中国工业生产与核心CPI）
 
 ### 中国人口专题（World Bank WDI）
 
@@ -49,6 +60,39 @@ FRED 是本项目第一个非 akshare 数据源，后续凡是 akshare 查不到
 与此前口径存在断点。当前免费接口不能稳定提供这组完整历史序列，因此第一版只展示明确标注为
 ILO 模型估计的 15—24 岁年度序列，不伪造或拼接官方月度数据。
 
+### 美国人口与就业专题（World Bank WDI + BLS/FRED）
+
+`GET /api/population/US` 与中国人口专题采用同一批 WDI 指标和五岁年龄组，因此人口增长、
+年龄结构、金字塔和增长核算可以跨国比较。页面仍逐项显示年份，不把不同更新时间的指标视为
+同一时点。
+
+`GET /api/employment/US` 从 FRED 的免 Key CSV 接口获取 BLS 官方序列：
+
+- 家庭调查（CPS）：U-3 失业率、U-6 劳动利用不足率、16—24 岁失业率、劳动参与率、
+  就业人口比和失业人数。
+- 企业调查（CES）：非农就业人数、非农就业月度变化、私营部门平均工时、平均时薪及同比。
+- JOLTS：非农职位空缺，并与失业人数对齐计算 `职位空缺 / 失业人数`。
+
+家庭调查按人统计并包含自雇者，企业调查按工资单岗位统计且不含农场和非注册自雇；两者短期
+背离并非数据错误。页面使用同源家庭调查展示
+`就业人口比 = 劳动参与率 × (1 - U-3失业率)`，并明确提示非农就业和职位空缺会修订。
+
+### 日本、欧盟、韩国人口与就业专题
+
+`GET /api/population/JP|EU|KR` 与中美人口专题采用同一组 WDI 指标和五岁年龄组。欧盟使用
+世界银行 `EUU` 聚合地区代码；人口专题中的增长分解仍是
+`ln(Y/N) = ln(Y/L) + ln(L/W) + ln(W/N)`，用于定位人均增长来自生产率、劳动力利用还是年龄结构。
+
+`GET /api/employment/JP` 与 `GET /api/employment/KR` 使用 OECD Infra-Annual Labour
+Statistics 的月度季调序列，并统一为15—64岁口径。除总体和青年失业率外，还展示就业率、
+劳动参与率、男女参与率及其差距。页面以
+`隐含失业率 = 1 - 就业率 / 劳动参与率` 核对同年龄口径指标。
+
+`GET /api/employment/EU` 直接读取 Eurostat：`une_rt_m` 提供 EU27_2020 月度失业率，
+`lfsi_emp_q` 提供20—64岁季度就业率和参与率，`lfsi_sla_q` 提供更宽口径的劳动力市场闲置率。
+由于头条失业率覆盖15—74岁，而就业率/参与率覆盖20—64岁，恒等式隐含值只用于结构核对，
+不会与头条失业率机械混算；同时明确提示 EU27 总量可能遮蔽成员国分化。
+
 ## 2. 指标清单（按 region 分组）
 
 ### 股指 / 汇率 / 大宗商品（全球通用，akshare）
@@ -73,6 +117,10 @@ ILO 模型估计的 15—24 岁年度序列，不伪造或拼接官方月度数�
 | CN_CPI | CPI同比 | `ak.macro_china_cpi` | 月度，取"全国-同比增长" |
 | CN_PPI | PPI同比 | `ak.macro_china_ppi` | 月度，取"当月同比增长" |
 | CN_PMI | 制造业PMI | `ak.macro_china_pmi` | 月度，取"制造业-指数" |
+| CN_NMI | 非制造业商务活动指数 | `ak.macro_china_pmi` | 月度，取"非制造业-指数"；50为荣枯线 |
+| CN_IP | 规上工业增加值同比 | 国家统计局数据发布页 | 月度可比价同比，不等于全部工业企业产出 |
+| CN_CLI | 综合领先指标 | OECD Data Explorer `DF_CLI` | 月度，振幅调整，长期均值=100 |
+| CN_CORE_CPI | 核心CPI同比 | 国家统计局月度CPI/PPI解读稿 | 剔除食品和能源；官方发布值，不自行估算权重 |
 | CN_TSF | 社会融资规模增量 | `ak.macro_china_shrzgm` | 月度，YYYYMM 格式日期 |
 | CN_GDP | GDP同比 | `ak.macro_china_gdp_yearly` | 季度 |
 | CN_RETAIL | 社会消费品零售总额同比 | `ak.macro_china_consumer_goods_retail` | 月度 |
@@ -92,6 +140,9 @@ ILO 模型估计的 15—24 岁年度序列，不伪造或拼接官方月度数�
 | code | 名称 | 数据源 | 口径备注 |
 | --- | --- | --- | --- |
 | US_CPI | CPI同比 | akshare `ak.macro_usa_cpi_yoy` | |
+| US_CORE_CPI | 核心CPI同比 | OECD Data Explorer | 剔除食品和能源，同比 |
+| US_IP | 工业生产同比 | FRED `INDPRO` | 月度季调指数计算同比 |
+| US_CLI | 综合领先指标 | OECD Data Explorer `DF_CLI` | 振幅调整，长期均值=100 |
 | US_NFP | 非农就业变动 | akshare `ak.macro_usa_non_farm` | 单位：万人 |
 | US_FFR | 联邦基金利率 | akshare `ak.macro_bank_usa_interest_rate` | |
 | US_GDP | GDP环比折年率 | akshare `ak.macro_usa_gdp_monthly` | |
@@ -105,17 +156,26 @@ ILO 模型估计的 15—24 岁年度序列，不伪造或拼接官方月度数�
 | code | 名称 | 数据源 | 口径备注 |
 | --- | --- | --- | --- |
 | JP_CPI | 日本CPI同比 | akshare `ak.macro_japan_cpi_yearly` | |
+| JP_CORE_CPI | 日本核心CPI同比 | OECD Data Explorer（COICOP 2018） | 剔除食品和能源，同比 |
+| JP_IP | 日本工业生产同比 | OECD经FRED `JPNPRINTO01GYSAM` | 月度季调，同比 |
+| JP_CLI | 日本综合领先指标 | OECD Data Explorer `DF_CLI` | 振幅调整，长期均值=100 |
 | JP_BOJ | 日本央行政策利率 | akshare `ak.macro_bank_japan_interest_rate` | |
 | JP_BOJ_ASSETS | 日本央行总资产 | **FRED** `JPNASSETS` | M1/M2 替代指标，见专节 |
 | EU_CPI | 欧元区CPI同比（HICP） | akshare `ak.macro_euro_cpi_yoy` | |
+| EU_CORE_CPI | 欧元区核心HICP同比 | Eurostat经FRED `00XEFDEZ19M086NEST` | 剔除食品、能源、酒精和烟草，指数计算同比 |
+| EU_IP | 欧元区工业生产同比 | Eurostat `sts_inpr_m` | EA20、季调及工作日调整，指数计算同比 |
+| EU_CLI | 欧洲四大经济体领先指标（代理） | OECD Data Explorer `DF_CLI`，`G4E` | OECD无当前欧元区CLI；代理包含英国，界面明确标注 |
 | EU_ECB | 欧洲央行利率 | akshare `ak.macro_bank_euro_interest_rate` | |
 | EU_ECB_ASSETS | 欧洲央行总资产 | **FRED** `ECBASSETSW` | M1/M2 替代指标，见专节 |
 | EU_GDP | 欧元区GDP同比 | akshare `ak.macro_euro_gdp_yoy` | |
 | KOSPI | 韩国综合指数 | akshare（见上表） | |
 | KRWCNY | 韩元/人民币 | akshare（见上表） | |
 | KR_RESERVES | 韩国外汇储备 | **FRED** `TRESEGKRM052N` | **不是货币供给替代指标**，见专节 |
+| KR_CORE_CPI | 韩国核心CPI同比 | OECD Data Explorer | 剔除食品和能源，同比 |
+| KR_IP | 韩国工业生产同比 | OECD经FRED `KORPRINTO01GYSAM` | 月度季调，同比 |
+| KR_CLI | 韩国综合领先指标 | OECD Data Explorer `DF_CLI` | 振幅调整，长期均值=100 |
 
-**日本 GDP、韩国 CPI/利率/GDP 目前是空白**——akshare 没有对应的免费接口，不是本项目故意漏掉的。如果之后找到可用的免费数据源会补上。
+**日本 GDP、韩国政策利率/GDP 目前仍是空白**——现有免费接口没有找到稳定且持续更新的序列；韩国核心CPI已通过OECD补齐，但不能代替完整的整体CPI。
 
 ## 3. 汇率换算逻辑
 

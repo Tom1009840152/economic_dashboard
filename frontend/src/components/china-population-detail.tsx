@@ -254,7 +254,7 @@ export function ChinaPopulationDetail({ data }: { data: PopulationDashboard }) {
             <CardDescription>总人口看长期规模，增长率看拐点；人口是慢变量，应关注多年趋势。</CardDescription>
           </CardHeader>
           <CardContent>
-            <ChartContainer config={trendConfig} className="h-[330px] w-full">
+            <ChartContainer config={trendConfig} className="h-[330px] w-full" initialDimension={{ width: 760, height: 330 }}>
               <ComposedChart data={trendRows}>
                 <CartesianGrid vertical={false} />
                 <XAxis dataKey="year" tickLine={false} axisLine={false} minTickGap={30} />
@@ -304,7 +304,7 @@ export function ChinaPopulationDetail({ data }: { data: PopulationDashboard }) {
             <CardDescription>结构变化比总人口更早影响教育、就业、住房、医疗和养老需求。</CardDescription>
           </CardHeader>
           <CardContent>
-            <ChartContainer config={structureConfig} className="h-[340px] w-full">
+            <ChartContainer config={structureConfig} className="h-[340px] w-full" initialDimension={{ width: 760, height: 340 }}>
               <AreaChart data={structureRows}>
                 <CartesianGrid vertical={false} />
                 <XAxis dataKey="year" tickLine={false} axisLine={false} minTickGap={30} />

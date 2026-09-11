@@ -319,7 +319,7 @@ export function ChinaEmploymentDetail({ data }: { data: EmploymentDashboard }) {
             <CardDescription>失业率稳定时，就业走弱可能表现为劳动参与率下降。</CardDescription>
           </CardHeader>
           <CardContent>
-            <ChartContainer config={utilizationConfig} className="h-[320px] w-full">
+            <ChartContainer config={utilizationConfig} className="h-[320px] w-full" initialDimension={{ width: 760, height: 320 }}>
               <LineChart data={utilizationRows}>
                 <CartesianGrid vertical={false} />
                 <XAxis dataKey="year" tickLine={false} axisLine={false} minTickGap={28} />
@@ -339,7 +339,7 @@ export function ChinaEmploymentDetail({ data }: { data: EmploymentDashboard }) {
             <CardDescription>均为ILO年度模型估计，青年为15—24岁；适合长期与国际比较。</CardDescription>
           </CardHeader>
           <CardContent>
-            <ChartContainer config={unemploymentConfig} className="h-[320px] w-full">
+            <ChartContainer config={unemploymentConfig} className="h-[320px] w-full" initialDimension={{ width: 760, height: 320 }}>
               <LineChart data={unemploymentRows}>
                 <CartesianGrid vertical={false} />
                 <XAxis dataKey="year" tickLine={false} axisLine={false} minTickGap={28} />

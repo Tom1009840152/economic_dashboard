@@ -10,9 +10,10 @@ router = APIRouter(prefix="/api", tags=["population"])
 
 @router.get("/population/{region}", response_model=PopulationDashboardOut)
 def get_population_dashboard(region: str):
-    if region.upper() != "CN":
-        raise HTTPException(status_code=404, detail="population dashboard is currently available for CN only")
+    normalized = region.upper()
+    if normalized not in {"CN", "US", "JP", "EU", "KR"}:
+        raise HTTPException(status_code=404, detail="population dashboard is unavailable for this region")
     try:
-        return fetch_population_dashboard("CHN")
+        return fetch_population_dashboard(normalized)
     except (requests.RequestException, ValueError) as exc:
         raise HTTPException(status_code=502, detail="population data source unavailable") from exc

@@ -16,16 +16,19 @@ export function Sidebar() {
   const pathname = usePathname();
 
   return (
-    <nav className="w-40 shrink-0 border-r border-border px-3 py-10">
-      <div className="px-3 text-sm font-semibold">经济学看板</div>
-      <ul className="mt-6 space-y-1">
+    <nav
+      aria-label="地区导航"
+      className="sticky top-0 z-40 flex w-full shrink-0 items-center gap-3 border-b border-border bg-background px-4 py-3 sm:static sm:block sm:w-40 sm:border-r sm:border-b-0 sm:px-3 sm:py-10"
+    >
+      <div className="shrink-0 whitespace-nowrap text-sm font-semibold sm:px-3">经济学看板</div>
+      <ul className="no-scrollbar flex min-w-0 flex-1 gap-1 overflow-x-auto sm:mt-6 sm:block sm:space-y-1">
         {NAV_ITEMS.map((item) => {
           const active = pathname === item.href;
           return (
-            <li key={item.href}>
+            <li key={item.href} className="shrink-0">
               <Link
                 href={item.href}
-                className={`block rounded-md px-3 py-2 text-sm transition-colors ${
+                className={`block whitespace-nowrap rounded-md px-3 py-2 text-sm transition-colors ${
                   active
                     ? "bg-foreground text-background"
                     : "text-muted-foreground hover:bg-muted hover:text-foreground"

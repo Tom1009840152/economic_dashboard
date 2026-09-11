@@ -16,6 +16,14 @@ WORLD_BANK_API = "https://api.worldbank.org/v2"
 _CACHE_TTL = 24 * 60 * 60
 _cache: dict[str, tuple[float, dict]] = {}
 
+REGION_META = {
+    "CN": {"world_bank_code": "CHN", "country": "中国", "slug": "china"},
+    "US": {"world_bank_code": "USA", "country": "美国", "slug": "united-states"},
+    "JP": {"world_bank_code": "JPN", "country": "日本", "slug": "japan"},
+    "EU": {"world_bank_code": "EUU", "country": "欧盟", "slug": "european-union"},
+    "KR": {"world_bank_code": "KOR", "country": "韩国", "slug": "korea-rep"},
+}
+
 SERIES_META = {
     "total_population": ("SP.POP.TOTL", "总人口", "人"),
     "population_growth": ("SP.POP.GROW", "人口增长率", "%"),
@@ -64,8 +72,12 @@ def _point_map(records: list[dict]) -> dict[int, float]:
     }
 
 
-def fetch_population_dashboard(country_code: str = "CHN") -> dict:
-    cache_key = country_code.upper()
+def fetch_population_dashboard(region: str = "CN") -> dict:
+    cache_key = region.upper()
+    country_meta = REGION_META.get(cache_key)
+    if country_meta is None:
+        raise ValueError(f"unsupported population region: {region}")
+    country_code = country_meta["world_bank_code"]
     cached = _cache.get(cache_key)
     now = time.time()
     if cached and now - cached[0] < _CACHE_TTL:
@@ -78,7 +90,7 @@ def fetch_population_dashboard(country_code: str = "CHN") -> dict:
     ]
     support_codes = ["SP.POP.TOTL.MA.IN", "SP.POP.TOTL.FE.IN"]
     requested_codes = [meta[0] for meta in SERIES_META.values()] + pyramid_codes + support_codes
-    url = f"{WORLD_BANK_API}/country/{cache_key}/indicator/{';'.join(requested_codes)}"
+    url = f"{WORLD_BANK_API}/country/{country_code}/indicator/{';'.join(requested_codes)}"
     response = requests.get(
         url,
         params={
@@ -156,10 +168,10 @@ def fetch_population_dashboard(country_code: str = "CHN") -> dict:
             )
 
     result = {
-        "region": "CN",
-        "country": "中国",
+        "region": cache_key,
+        "country": country_meta["country"],
         "source": "世界银行 WDI（主要底层来源为联合国人口司 WPP 与国际劳工组织）",
-        "source_url": "https://data.worldbank.org/country/china",
+        "source_url": f"https://data.worldbank.org/country/{country_meta['slug']}",
         "last_updated": meta.get("lastupdated"),
         "series": series,
         "pyramid_year": pyramid_year,

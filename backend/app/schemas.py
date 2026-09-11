@@ -136,3 +136,12 @@ class EmploymentDashboardOut(BaseModel):
     official_snapshot: EmploymentSnapshotOut
     sources: list[EmploymentSourceOut]
     warnings: list[str]
+
+
+class InternationalEmploymentDashboardOut(BaseModel):
+    region: str
+    country: str
+    latest_month: str | None = None
+    series: list[EmploymentSeriesOut]
+    sources: list[EmploymentSourceOut]
+    warnings: list[str]

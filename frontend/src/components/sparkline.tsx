@@ -11,7 +11,7 @@ export function Sparkline({ data, isUp }: { data: number[]; isUp: boolean }) {
 
   return (
     <div className="h-10 w-24">
-      <ResponsiveContainer width="100%" height="100%">
+      <ResponsiveContainer width="100%" height="100%" initialDimension={{ width: 96, height: 40 }}>
         <LineChart data={chartData}>
           <Line
             type="monotone"

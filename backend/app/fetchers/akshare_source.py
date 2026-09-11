@@ -147,6 +147,8 @@ def _all_fetchers() -> dict:
     # 延迟导入，避免它们反过来导入本模块时出现循环导入
     from app.fetchers.macro_source import MACRO_FETCHERS
     from app.fetchers.fred_source import FRED_FETCHERS
+    from app.fetchers.nbs_cycle import NBS_CYCLE_FETCHERS
+    from app.fetchers.oecd_cycle import CYCLE_FETCHERS
 
     return {
         "SSE": fetch_sse,
@@ -162,6 +164,8 @@ def _all_fetchers() -> dict:
         },
         **MACRO_FETCHERS,
         **FRED_FETCHERS,
+        **NBS_CYCLE_FETCHERS,
+        **CYCLE_FETCHERS,
     }
 
 

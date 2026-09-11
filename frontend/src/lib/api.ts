@@ -170,3 +170,22 @@ export interface EmploymentDashboard {
 export function getEmployment(region: string): Promise<EmploymentDashboard> {
   return apiFetch(`/api/employment/${region}`);
 }
+
+export interface InternationalEmploymentDashboard {
+  region: string;
+  country: string;
+  latest_month: string | null;
+  series: EmploymentSeries[];
+  sources: EmploymentSource[];
+  warnings: string[];
+}
+
+export type USEmploymentDashboard = InternationalEmploymentDashboard;
+
+export function getInternationalEmployment(region: string): Promise<InternationalEmploymentDashboard> {
+  return apiFetch(`/api/employment/${region}`);
+}
+
+export function getUSEmployment(): Promise<InternationalEmploymentDashboard> {
+  return getInternationalEmployment("US");
+}

@@ -59,6 +59,12 @@ def fetch_cn_pmi() -> pd.DataFrame:
     return _clean_month_col(df, "月份", "制造业-指数")
 
 
+def fetch_cn_non_manufacturing_pmi() -> pd.DataFrame:
+    # 与制造业 PMI 来自同一张国家统计局月表，避免额外请求和商业 PMI 授权问题。
+    df = ak.macro_china_pmi()
+    return _clean_month_col(df, "月份", "非制造业-指数")
+
+
 def fetch_cn_retail() -> pd.DataFrame:
     df = ak.macro_china_consumer_goods_retail()
     return _clean_month_col(df, "月份", "同比增长")
@@ -288,6 +294,7 @@ MACRO_FETCHERS = {
     "CN_CPI": fetch_cn_cpi,
     "CN_PPI": fetch_cn_ppi,
     "CN_PMI": fetch_cn_pmi,
+    "CN_NMI": fetch_cn_non_manufacturing_pmi,
     "CN_TSF": fetch_cn_tsf,
     "CN_GDP": fetch_cn_gdp,
     "CN_RETAIL": fetch_cn_retail,
