@@ -10,6 +10,8 @@ export interface IndicatorSummary {
   latest_value: number | null;
   change_pct: number | null;
   recent_values: number[];
+  freshness: "current" | "event" | "delayed" | "stale" | "missing";
+  freshness_label: string;
 }
 
 export interface DataPoint {
@@ -34,6 +36,7 @@ export interface ForecastPoint {
 export interface ForecastOut {
   code: string;
   name: string;
+  forecast_unit: string;
   history: DataPoint[];
   forecast: ForecastPoint[];
 }
@@ -54,8 +57,9 @@ export function getIndicatorHistory(code: string): Promise<IndicatorHistory> {
   return apiFetch(`/api/indicators/${code}/history`);
 }
 
-export function getIndicatorForecast(code: string, horizon = 30): Promise<ForecastOut> {
-  return apiFetch(`/api/indicators/${code}/forecast?horizon=${horizon}`);
+export function getIndicatorForecast(code: string, horizon?: number): Promise<ForecastOut> {
+  const query = horizon ? `?horizon=${horizon}` : "";
+  return apiFetch(`/api/indicators/${code}/forecast${query}`);
 }
 
 export interface CurrencyOption {
@@ -72,6 +76,7 @@ export interface ForexHistory {
 export interface ForexForecast {
   base: string;
   target: string;
+  forecast_unit: string;
   history: DataPoint[];
   forecast: ForecastPoint[];
 }
@@ -84,8 +89,9 @@ export function getForexHistory(base: string, target: string): Promise<ForexHist
   return apiFetch(`/api/forex/history?base=${base}&target=${target}`);
 }
 
-export function getForexForecast(base: string, target: string, horizon = 30): Promise<ForexForecast> {
-  return apiFetch(`/api/forex/forecast?base=${base}&target=${target}&horizon=${horizon}`);
+export function getForexForecast(base: string, target: string, horizon?: number): Promise<ForexForecast> {
+  const horizonQuery = horizon ? `&horizon=${horizon}` : "";
+  return apiFetch(`/api/forex/forecast?base=${base}&target=${target}${horizonQuery}`);
 }
 
 export interface PopulationPoint {
@@ -188,4 +194,45 @@ export function getInternationalEmployment(region: string): Promise<Internationa
 
 export function getUSEmployment(): Promise<InternationalEmploymentDashboard> {
   return getInternationalEmployment("US");
+}
+
+export interface AnalysisPoint {
+  period: string;
+  value: number;
+}
+
+export interface AnalysisSeries {
+  key: string;
+  name: string;
+  unit: string;
+  points: AnalysisPoint[];
+}
+
+export interface MonetaryTransmissionSignal {
+  key: string;
+  name: string;
+  value: number;
+  unit: string;
+  period: string;
+  state: string;
+  interpretation: string;
+  formula: string;
+}
+
+export interface MonetaryTransmissionDashboard {
+  region: string;
+  country: string;
+  title: string;
+  status: string;
+  tone: "positive" | "neutral" | "caution";
+  summary: string;
+  as_of: string;
+  signals: MonetaryTransmissionSignal[];
+  series: AnalysisSeries[];
+  sources: EmploymentSource[];
+  warnings: string[];
+}
+
+export function getChinaMonetaryTransmission(): Promise<MonetaryTransmissionDashboard> {
+  return apiFetch("/api/analysis/cn/monetary-transmission");
 }

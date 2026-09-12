@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.db import SessionLocal
-from app.routers import employment, forecast, forex, indicators, population
+from app.routers import analysis, employment, forecast, forex, indicators, population
 from app.scheduler import scheduled_refresh, start_scheduler
 from app.services.indicator_service import ensure_indicators_seeded
 
@@ -26,6 +26,7 @@ app.include_router(forecast.router)
 app.include_router(forex.router)
 app.include_router(population.router)
 app.include_router(employment.router)
+app.include_router(analysis.router)
 
 
 @app.on_event("startup")

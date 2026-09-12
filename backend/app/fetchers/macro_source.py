@@ -76,14 +76,25 @@ def fetch_cn_fai() -> pd.DataFrame:
 
 
 def fetch_cn_exports() -> pd.DataFrame:
-    df = ak.macro_china_exports_yoy()
-    return _clean(df, "日期", "今值")
+    return _clean_month_col(_raw_cn_trade_df(), "月份", "当月出口额-同比增长")
 
 
 def fetch_cn_exports_abs() -> pd.DataFrame:
     # 海关总署原始单位是千美元，除以 1e5 换算成媒体常用的"亿美元"口径
-    df = ak.macro_china_hgjck()
-    return _clean_month_col(df, "月份", "当月出口额-金额", scale=1 / 1e5)
+    return _clean_month_col(_raw_cn_trade_df(), "月份", "当月出口额-金额", scale=1 / 1e5)
+
+
+_cn_trade_cache: dict = {"df": None, "ts": 0.0}
+_CN_TRADE_CACHE_TTL = 60
+
+
+def _raw_cn_trade_df() -> pd.DataFrame:
+    """海关总署月表；出口金额与同比共用一次网络请求。"""
+    now = time.time()
+    if _cn_trade_cache["df"] is None or now - _cn_trade_cache["ts"] > _CN_TRADE_CACHE_TTL:
+        _cn_trade_cache["df"] = ak.macro_china_hgjck()
+        _cn_trade_cache["ts"] = now
+    return _cn_trade_cache["df"]
 
 
 def fetch_cn_hog() -> pd.DataFrame:
@@ -276,8 +287,29 @@ def fetch_eu_ecb() -> pd.DataFrame:
 
 
 def fetch_cn_gdp() -> pd.DataFrame:
-    df = ak.macro_china_gdp_yearly()
-    return _clean(df, "日期", "今值")
+    # 国家统计局季度表当前使用“2026年1-2季度 / 2026年1季度”格式。
+    # 直接读取表中的GDP累计同比，并把季度定位到季度首月。
+    df = ak.macro_china_gdp()
+    out = df[["季度", "国内生产总值-同比增长"]].rename(
+        columns={"季度": "period", "国内生产总值-同比增长": "value"}
+    )
+    parts = out["period"].astype(str).str.extract(
+        r"(?P<year>\d{4})年(?:第)?(?:1-)?(?P<quarter>[1-4])季度"
+    )
+    out["date"] = pd.to_datetime(
+        parts["year"] + "-" + parts["quarter"].map({"1": "01", "2": "04", "3": "07", "4": "10"}),
+        format="%Y-%m",
+        errors="coerce",
+    )
+    out["value"] = pd.to_numeric(out["value"], errors="coerce")
+    out = out.dropna(subset=["date", "value"])
+    out["date"] = out["date"].dt.date
+    return (
+        out.loc[out["date"] >= DATA_FLOOR_DATE, ["date", "value"]]
+        .drop_duplicates("date", keep="last")
+        .sort_values("date")
+        .reset_index(drop=True)
+    )
 
 
 def fetch_us_gdp() -> pd.DataFrame:
@@ -330,7 +362,5 @@ MACRO_FETCHERS = {
     "US_10Y2Y": fetch_us_10y_2y,
     "JP_CPI": fetch_jp_cpi,
     "JP_BOJ": fetch_jp_boj,
-    "EU_CPI": fetch_eu_cpi,
     "EU_ECB": fetch_eu_ecb,
-    "EU_GDP": fetch_eu_gdp,
 }

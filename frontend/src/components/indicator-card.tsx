@@ -28,6 +28,7 @@ export function IndicatorCard({
   const isUp = (change ?? 0) >= 0;
   // 本身已经是百分比的指标，涨跌幅是"变动了几个百分点"，不是相对涨跌幅，单位要用 pp 区分开
   const changeUnit = indicator.unit === "%" ? "pp" : "%";
+  const showFreshnessWarning = ["delayed", "stale", "missing"].includes(indicator.freshness);
 
   return (
     <Link href={`/indicators/${indicator.code}`} className="block h-full">
@@ -45,6 +46,18 @@ export function IndicatorCard({
                   ? `更新至 ${formatUpdateDate(indicator.latest_date)}`
                   : "等待数据更新"}
               </div>
+            )}
+            {showFreshnessWarning && (
+              <Badge
+                variant="outline"
+                className={`mt-1 ${
+                  indicator.freshness === "stale" || indicator.freshness === "missing"
+                    ? "border-red-300 text-red-700"
+                    : "border-amber-300 text-amber-700"
+                }`}
+              >
+                {indicator.freshness_label}
+              </Badge>
             )}
           </div>
         </CardHeader>

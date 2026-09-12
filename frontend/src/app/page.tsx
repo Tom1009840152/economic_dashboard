@@ -11,7 +11,7 @@ export const dynamic = "force-dynamic";
 type CardItem = { kind: "indicator"; indicator: IndicatorSummary } | { kind: "forex" };
 
 export default async function DashboardPage() {
-  // 已经归到具体国家/地区(中国/美国/日本/欧盟)的指标只在对应页展示，这里只放没有归属的
+  // 已经归到具体国家/地区的指标只在对应页展示，这里只放没有归属的
   // 全球性指标（除美元/日元/欧元外的其它汇率、黄金、原油），避免和国家页重复
   const indicators = await getIndicators("GLOBAL");
   const forex = indicators.filter((i) => i.category === "forex");
@@ -35,7 +35,7 @@ export default async function DashboardPage() {
     <main className="mx-auto w-full max-w-5xl flex-1 px-6 py-10">
       <h1 className="text-2xl font-semibold">经济学看板</h1>
       <p className="mt-1 text-sm text-muted-foreground">
-        全球性指标一览，中国/美国/日本/欧盟各自的指标见左侧对应国家页
+        全球性指标一览，各主要经济体的指标见左侧对应国家或地区页
       </p>
 
       <div className="mt-8 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">

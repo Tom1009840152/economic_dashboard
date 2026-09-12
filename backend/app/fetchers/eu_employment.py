@@ -1,4 +1,4 @@
-"""EU-27 labour-market dashboard from the Eurostat dissemination API."""
+"""Euro-area labour-market dashboard from the Eurostat dissemination API."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ _cache: tuple[float, dict[str, Any]] | None = None
 SERIES_META = {
     "unemployment": (
         "une_rt_m",
-        {"geo": "EU27_2020", "s_adj": "SA", "sex": "T", "age": "TOTAL", "unit": "PC_ACT", "sinceTimePeriod": "2000-01"},
+        {"geo": "EA21", "s_adj": "SA", "sex": "T", "age": "TOTAL", "unit": "PC_ACT", "sinceTimePeriod": "2000-01"},
         "失业率",
         "%",
         "月度",
@@ -25,7 +25,7 @@ SERIES_META = {
     ),
     "youth_unemployment": (
         "une_rt_m",
-        {"geo": "EU27_2020", "s_adj": "SA", "sex": "T", "age": "Y_LT25", "unit": "PC_ACT", "sinceTimePeriod": "2000-01"},
+        {"geo": "EA21", "s_adj": "SA", "sex": "T", "age": "Y_LT25", "unit": "PC_ACT", "sinceTimePeriod": "2000-01"},
         "青年失业率",
         "%",
         "月度",
@@ -34,7 +34,7 @@ SERIES_META = {
     ),
     "labor_participation": (
         "lfsi_emp_q",
-        {"geo": "EU27_2020", "indic_em": "ACT", "s_adj": "SA", "sex": "T", "age": "Y20-64", "unit": "PC_POP", "sinceTimePeriod": "2000-Q1"},
+        {"geo": "EA21", "indic_em": "ACT", "s_adj": "SA", "sex": "T", "age": "Y20-64", "unit": "PC_POP", "sinceTimePeriod": "2000-Q1"},
         "劳动参与率",
         "%",
         "季度",
@@ -43,7 +43,7 @@ SERIES_META = {
     ),
     "employment_ratio": (
         "lfsi_emp_q",
-        {"geo": "EU27_2020", "indic_em": "EMP_LFS", "s_adj": "SA", "sex": "T", "age": "Y20-64", "unit": "PC_POP", "sinceTimePeriod": "2000-Q1"},
+        {"geo": "EA21", "indic_em": "EMP_LFS", "s_adj": "SA", "sex": "T", "age": "Y20-64", "unit": "PC_POP", "sinceTimePeriod": "2000-Q1"},
         "就业率",
         "%",
         "季度",
@@ -52,7 +52,7 @@ SERIES_META = {
     ),
     "female_employment": (
         "lfsi_emp_q",
-        {"geo": "EU27_2020", "indic_em": "EMP_LFS", "s_adj": "SA", "sex": "F", "age": "Y20-64", "unit": "PC_POP", "sinceTimePeriod": "2000-Q1"},
+        {"geo": "EA21", "indic_em": "EMP_LFS", "s_adj": "SA", "sex": "F", "age": "Y20-64", "unit": "PC_POP", "sinceTimePeriod": "2000-Q1"},
         "女性就业率",
         "%",
         "季度",
@@ -61,7 +61,7 @@ SERIES_META = {
     ),
     "male_employment": (
         "lfsi_emp_q",
-        {"geo": "EU27_2020", "indic_em": "EMP_LFS", "s_adj": "SA", "sex": "M", "age": "Y20-64", "unit": "PC_POP", "sinceTimePeriod": "2000-Q1"},
+        {"geo": "EA21", "indic_em": "EMP_LFS", "s_adj": "SA", "sex": "M", "age": "Y20-64", "unit": "PC_POP", "sinceTimePeriod": "2000-Q1"},
         "男性就业率",
         "%",
         "季度",
@@ -70,7 +70,7 @@ SERIES_META = {
     ),
     "labour_slack": (
         "lfsi_sla_q",
-        {"geo": "EU27_2020", "wstatus": "SLACK", "s_adj": "SA", "sex": "T", "age": "Y20-64", "unit": "PC_ELF", "sinceTimePeriod": "2000-Q1"},
+        {"geo": "EA21", "wstatus": "SLACK", "s_adj": "SA", "sex": "T", "age": "Y20-64", "unit": "PC_ELF", "sinceTimePeriod": "2000-Q1"},
         "劳动力市场闲置率",
         "%",
         "季度",
@@ -180,14 +180,14 @@ def fetch_eu_employment_dashboard() -> dict[str, Any]:
     unemployment = point_sets["unemployment"]
     result = {
         "region": "EU",
-        "country": "欧盟",
+        "country": "欧元区",
         "latest_month": unemployment[-1]["period"] if unemployment else None,
         "series": series,
         "sources": [
             {
                 "name": "Eurostat：月度失业率",
                 "url": "https://ec.europa.eu/eurostat/databrowser/view/une_rt_m/default/table",
-                "description": "EU27_2020聚合口径，失业率覆盖15—74岁，青年失业率覆盖15—24岁。",
+                "description": "EA21欧元区聚合口径，失业率覆盖15—74岁，青年失业率覆盖15—24岁。",
             },
             {
                 "name": "Eurostat：季度就业与劳动力闲置",
@@ -195,7 +195,7 @@ def fetch_eu_employment_dashboard() -> dict[str, Any]:
                 "description": "EU-LFS季调数据；参与率和就业率覆盖20—64岁，闲置率采用扩展劳动力口径。",
             },
         ],
-        "warnings": ["欧盟为27个成员国的加总值；总量改善可能与成员国之间的分化同时存在。"],
+        "warnings": ["欧元区为21个成员国的聚合值；总量改善可能与成员国之间的分化同时存在。"],
     }
     _cache = (now, result)
     return result

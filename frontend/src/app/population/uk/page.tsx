@@ -4,21 +4,21 @@ import { getPopulation } from "@/lib/api";
 
 export const dynamic = "force-dynamic";
 
-export default async function USPopulationPage() {
-  const population = await getPopulation("US");
+export default async function UKPopulationPage() {
+  const population = await getPopulation("GB");
 
   return (
     <main className="mx-auto w-full max-w-6xl flex-1 px-6 py-10">
-      <Link href="/country/us/people" className="text-sm text-muted-foreground hover:underline">
-        ← 返回美国看板
+      <Link href="/country/uk/people" className="text-sm text-muted-foreground hover:underline">
+        ← 返回英国看板
       </Link>
       <div className="mt-3 flex flex-wrap items-end justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-semibold">美国人口与经济结构</h1>
+          <h1 className="text-2xl font-semibold">英国人口与经济结构</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            从人口年龄、移民、劳动年龄队列和抚养比理解美国长期增长与需求
+            从老龄化、净迁移、劳动年龄人口和抚养比观察英国的长期供给能力
           </p>
-          <Link href="/employment/us" className="mt-2 inline-block text-sm text-muted-foreground hover:underline">
+          <Link href="/employment/uk" className="mt-2 inline-block text-sm text-muted-foreground hover:underline">
             继续看人口如何转化为就业与产出 →
           </Link>
         </div>

@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.schemas import CurrencyOption, DataPointOut, ForexForecastOut, ForexHistoryOut
-from app.services.forecast_service import forecast_series
+from app.services.forecast_service import forecast_series, infer_forecast_cadence
 from app.services.forex_service import CURRENCY_NAMES, cross_rate_history, list_currencies
 
 router = APIRouter(prefix="/api/forex", tags=["forex"])
@@ -36,7 +36,7 @@ def get_history(base: str, target: str, db: Session = Depends(get_db)):
 def get_forecast(
     base: str,
     target: str,
-    horizon: int = Query(default=30, ge=1, le=180),
+    horizon: int | None = Query(default=None, ge=1, le=180),
     db: Session = Depends(get_db),
 ):
     _validate(base, target)
@@ -46,11 +46,14 @@ def get_forecast(
 
     dates = [d for d, _ in points]
     values = [v for _, v in points]
-    forecast_points = forecast_series(dates, values, horizon=horizon)
+    cadence = infer_forecast_cadence(dates)
+    steps = horizon or cadence.default_horizon
+    forecast_points = forecast_series(dates, values, horizon=steps)
 
     return ForexForecastOut(
         base=base,
         target=target,
+        forecast_unit=cadence.label,
         history=[DataPointOut(date=d, value=v) for d, v in points],
         forecast=forecast_points,
     )

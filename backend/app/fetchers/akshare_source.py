@@ -85,6 +85,12 @@ def fetch_kospi() -> pd.DataFrame:
     return _clean(df, "date", "close")
 
 
+def fetch_ftse100() -> pd.DataFrame:
+    # 新浪全球指数接口保留最近约4年；名称明确对应英国富时100，而非泛欧洲指数。
+    df = ak.index_global_hist_sina(symbol="英国富时100指数")
+    return _clean(df, "date", "close")
+
+
 def _fetch_boc_currency(cn_symbol: str, scale: float) -> pd.DataFrame:
     """常规刷新：只拉最近 CURRENCY_REFRESH_DAYS 天，补历史用 backfill_boc_currency()。"""
     end = dt.date.today()
@@ -147,8 +153,10 @@ def _all_fetchers() -> dict:
     # 延迟导入，避免它们反过来导入本模块时出现循环导入
     from app.fetchers.macro_source import MACRO_FETCHERS
     from app.fetchers.fred_source import FRED_FETCHERS
+    from app.fetchers.china_cycle_data import CHINA_CYCLE_FETCHERS
     from app.fetchers.nbs_cycle import NBS_CYCLE_FETCHERS
     from app.fetchers.oecd_cycle import CYCLE_FETCHERS
+    from app.fetchers.uk_source import UK_MACRO_FETCHERS
 
     return {
         "SSE": fetch_sse,
@@ -156,6 +164,7 @@ def _all_fetchers() -> dict:
         "NKY": fetch_nikkei,
         "STOXX50": fetch_stoxx50,
         "KOSPI": fetch_kospi,
+        "FTSE100": fetch_ftse100,
         "GOLD": fetch_gold,
         "WTI": fetch_wti,
         **{
@@ -163,9 +172,11 @@ def _all_fetchers() -> dict:
             for code, (cn_symbol, scale) in BOC_CURRENCIES.items()
         },
         **MACRO_FETCHERS,
+        **CHINA_CYCLE_FETCHERS,
         **FRED_FETCHERS,
         **NBS_CYCLE_FETCHERS,
         **CYCLE_FETCHERS,
+        **UK_MACRO_FETCHERS,
     }
 
 

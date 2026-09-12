@@ -9,7 +9,7 @@ export default async function USEmploymentPage() {
 
   return (
     <main className="mx-auto w-full max-w-6xl flex-1 px-6 py-10">
-      <Link href="/country/us" className="text-sm text-muted-foreground hover:underline">
+      <Link href="/country/us/people" className="text-sm text-muted-foreground hover:underline">
         ← 返回美国看板
       </Link>
       <div className="mt-3 flex flex-wrap items-end justify-between gap-4">

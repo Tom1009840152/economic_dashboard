@@ -20,10 +20,15 @@ export function InternationalEmploymentSummaryCard({ data }: { data: Internation
     ? unemployment?.points.find((point) => point.period === yearAgoPeriod(latest.period))
     : undefined;
   const change = latest && yearAgo ? latest.value - yearAgo.value : null;
-  const badge = data.region === "EU" ? "Eurostat EU27" : "OECD可比口径";
+  const badge = data.region === "EU"
+    ? "Eurostat EA21"
+    : data.region === "GB"
+      ? "英国ONS"
+      : "OECD可比口径";
+  const regionSlug = data.region === "GB" ? "uk" : data.region.toLowerCase();
 
   return (
-    <Link href={`/employment/${data.region.toLowerCase()}`}>
+    <Link href={`/employment/${regionSlug}`}>
       <Card className="h-full transition-colors hover:border-foreground/30">
         <CardHeader className="flex flex-row items-start justify-between gap-2 space-y-0">
           <div>

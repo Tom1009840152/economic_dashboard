@@ -13,9 +13,10 @@ export function PopulationSummaryCard({ data }: { data: PopulationDashboard }) {
   const growth = byKey(data, "population_growth")?.points.at(-1);
   const oldShare = byKey(data, "old_share")?.points.at(-1);
   const latest = total?.points.at(-1);
+  const regionSlug = data.region === "GB" ? "uk" : data.region.toLowerCase();
 
   return (
-    <Link href={`/population/${data.region.toLowerCase()}`}>
+    <Link href={`/population/${regionSlug}`}>
       <Card className="h-full transition-colors hover:border-foreground/30">
         <CardHeader className="flex flex-row items-start justify-between gap-2 space-y-0">
           <div>

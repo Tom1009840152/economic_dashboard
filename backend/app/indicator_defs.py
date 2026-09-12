@@ -1,5 +1,5 @@
 """指标元信息定义，category 取值：index / forex / commodity / macro / bond / money。
-region 取值：CN / US / JP / EU / KR / GLOBAL，用于左侧国家 tab 分组；跨国的汇率/大宗商品
+region 取值：CN / US / JP / EU / GB / KR / GLOBAL，其中 EU 专指欧元区、GB 专指英国；跨国的汇率/大宗商品
 （除了直接代表某国/地区货币的那几个）归为 GLOBAL，只在"综合"页和汇率换算器里出现。
 
 bond 类是国债收益率，同一国家会有多个期限（2Y/5Y/10Y/30Y）+ 10年-2年利差，
@@ -13,7 +13,7 @@ sort_order 决定看板展示顺序：index/commodity 按品类分组在前后�
 forex 组内按各经济体名义 GDP 排名排序（数据源为中国银行外汇牌价，
 覆盖不到印度、巴西、俄罗斯等 GDP 靠前但该接口不提供报价的国家；
 港币/澳门元因为是地区而非主权国家不选用），
-macro/bond 组是月度/日度的宏观经济数据，中国的在前、美国、日本、欧盟、韩国依次在后。
+macro/bond 组是月度/日度的宏观经济数据，中国的在前、美国、日本、欧元区、英国、韩国依次在后。
 """
 
 INDICATOR_DEFS = [
@@ -21,11 +21,12 @@ INDICATOR_DEFS = [
     {"code": "DJI", "name": "道琼斯工业指数", "category": "index", "unit": "点", "sort_order": 1, "region": "US"},
     {"code": "NKY", "name": "日经225指数", "category": "index", "unit": "点", "sort_order": 2, "region": "JP"},
     {"code": "STOXX50", "name": "欧洲斯托克50指数", "category": "index", "unit": "点", "sort_order": 3, "region": "EU"},
-    {"code": "KOSPI", "name": "韩国综合指数", "category": "index", "unit": "点", "sort_order": 4, "region": "KR"},
+    {"code": "FTSE100", "name": "英国富时100指数", "category": "index", "unit": "点", "sort_order": 4, "region": "GB"},
+    {"code": "KOSPI", "name": "韩国综合指数", "category": "index", "unit": "点", "sort_order": 5, "region": "KR"},
     {"code": "USDCNY", "name": "美元/人民币", "category": "forex", "unit": "CNY", "sort_order": 10, "region": "US"},
     {"code": "EURCNY", "name": "欧元/人民币", "category": "forex", "unit": "CNY", "sort_order": 11, "region": "EU"},
     {"code": "JPYCNY", "name": "日元/人民币", "category": "forex", "unit": "CNY/100日元", "sort_order": 12, "region": "JP"},
-    {"code": "GBPCNY", "name": "英镑/人民币", "category": "forex", "unit": "CNY", "sort_order": 13, "region": "GLOBAL"},
+    {"code": "GBPCNY", "name": "英镑/人民币", "category": "forex", "unit": "CNY", "sort_order": 13, "region": "GB"},
     {"code": "CADCNY", "name": "加元/人民币", "category": "forex", "unit": "CNY", "sort_order": 14, "region": "GLOBAL"},
     {"code": "AUDCNY", "name": "澳元/人民币", "category": "forex", "unit": "CNY", "sort_order": 15, "region": "GLOBAL"},
     {"code": "KRWCNY", "name": "韩元/人民币", "category": "forex", "unit": "CNY/100韩元", "sort_order": 16, "region": "KR"},
@@ -70,13 +71,66 @@ INDICATOR_DEFS = [
     {"code": "CN_10Y", "name": "中国10年期国债收益率", "category": "bond", "unit": "%", "sort_order": 61, "region": "CN"},
     {"code": "CN_30Y", "name": "中国30年期国债收益率", "category": "bond", "unit": "%", "sort_order": 62, "region": "CN"},
     {"code": "CN_10Y2Y", "name": "中国10年-2年国债利差", "category": "bond", "unit": "pp", "sort_order": 63, "region": "CN"},
+    # 周期模型底层数据：先进入版本化数据层，不直接铺成国家页卡片。
+    # 后续综合分析栏只消费这些原始序列及其组合信号。
+    {"code": "CN_PMI_PRODUCTION", "name": "制造业PMI生产指数", "category": "cycle_input", "unit": "点", "source": "NBS", "frequency": "monthly", "is_visible": False, "sort_order": 200, "region": "CN"},
+    {"code": "CN_PMI_NEW_ORDERS", "name": "制造业PMI新订单指数", "category": "cycle_input", "unit": "点", "source": "NBS", "frequency": "monthly", "is_visible": False, "sort_order": 201, "region": "CN"},
+    {"code": "CN_PMI_NEW_EXPORT_ORDERS", "name": "制造业PMI新出口订单指数", "category": "cycle_input", "unit": "点", "source": "NBS", "frequency": "monthly", "is_visible": False, "sort_order": 202, "region": "CN"},
+    {"code": "CN_PMI_EMPLOYMENT", "name": "制造业PMI从业人员指数", "category": "cycle_input", "unit": "点", "source": "NBS", "frequency": "monthly", "is_visible": False, "sort_order": 203, "region": "CN"},
+    {"code": "CN_PMI_RAW_MATERIAL_INVENTORY", "name": "制造业PMI原材料库存指数", "category": "cycle_input", "unit": "点", "source": "NBS", "frequency": "monthly", "is_visible": False, "sort_order": 204, "region": "CN"},
+    {"code": "CN_PMI_FINISHED_GOODS_INVENTORY", "name": "制造业PMI产成品库存指数", "category": "cycle_input", "unit": "点", "source": "NBS", "frequency": "monthly", "is_visible": False, "sort_order": 205, "region": "CN"},
+    {"code": "CN_PMI_EXPECTATIONS", "name": "制造业PMI生产经营活动预期", "category": "cycle_input", "unit": "点", "source": "NBS", "frequency": "monthly", "is_visible": False, "sort_order": 206, "region": "CN"},
+    {"code": "CN_NMI_NEW_ORDERS", "name": "非制造业PMI新订单指数", "category": "cycle_input", "unit": "点", "source": "NBS", "frequency": "monthly", "is_visible": False, "sort_order": 207, "region": "CN"},
+    {"code": "CN_NMI_EMPLOYMENT", "name": "非制造业PMI从业人员指数", "category": "cycle_input", "unit": "点", "source": "NBS", "frequency": "monthly", "is_visible": False, "sort_order": 208, "region": "CN"},
+    {"code": "CN_NMI_EXPECTATIONS", "name": "非制造业PMI业务活动预期", "category": "cycle_input", "unit": "点", "source": "NBS", "frequency": "monthly", "is_visible": False, "sort_order": 209, "region": "CN"},
+    {"code": "CN_IND_REVENUE_YTD", "name": "规上工业企业营业收入累计", "category": "cycle_input", "unit": "亿元", "source": "NBS", "frequency": "monthly", "is_visible": False, "sort_order": 210, "region": "CN"},
+    {"code": "CN_IND_REVENUE_YTD_YOY", "name": "规上工业企业营业收入累计同比", "category": "cycle_input", "unit": "%", "source": "NBS", "frequency": "monthly", "is_visible": False, "sort_order": 211, "region": "CN"},
+    {"code": "CN_IND_PROFIT_YTD", "name": "规上工业企业利润累计", "category": "cycle_input", "unit": "亿元", "source": "NBS", "frequency": "monthly", "is_visible": False, "sort_order": 212, "region": "CN"},
+    {"code": "CN_IND_PROFIT_YTD_YOY", "name": "规上工业企业利润累计同比", "category": "cycle_input", "unit": "%", "source": "NBS", "frequency": "monthly", "is_visible": False, "sort_order": 213, "region": "CN"},
+    {"code": "CN_IND_PROFIT_MONTHLY_YOY", "name": "规上工业企业利润当月同比", "category": "cycle_input", "unit": "%", "source": "NBS", "frequency": "monthly", "is_visible": False, "sort_order": 214, "region": "CN"},
+    {"code": "CN_IND_FINISHED_INVENTORY_YOY", "name": "规上工业企业产成品存货同比", "category": "cycle_input", "unit": "%", "source": "NBS", "frequency": "monthly", "is_visible": False, "sort_order": 215, "region": "CN"},
+    {"code": "CN_IND_INVENTORY_DAYS", "name": "规上工业企业产成品存货周转天数", "category": "cycle_input", "unit": "天", "source": "NBS", "frequency": "monthly", "is_visible": False, "sort_order": 216, "region": "CN"},
+    {"code": "CN_TSF_STOCK_YOY", "name": "社会融资规模存量同比", "category": "cycle_input", "unit": "%", "source": "PBOC", "frequency": "monthly", "is_visible": False, "sort_order": 220, "region": "CN"},
+    {"code": "CN_TSF_RMB_LOAN_STOCK_YOY", "name": "社融口径人民币贷款余额同比", "category": "cycle_input", "unit": "%", "source": "PBOC", "frequency": "monthly", "is_visible": False, "sort_order": 221, "region": "CN"},
+    {"code": "CN_TSF_RMB_LOANS_FLOW", "name": "社融口径人民币贷款增量", "category": "cycle_input", "unit": "亿元", "source": "PBOC", "frequency": "monthly", "is_visible": False, "sort_order": 222, "region": "CN"},
+    {"code": "CN_CORP_BOND_FINANCING", "name": "企业债券净融资", "category": "cycle_input", "unit": "亿元", "source": "PBOC", "frequency": "monthly", "is_visible": False, "sort_order": 223, "region": "CN"},
+    {"code": "CN_GOV_BOND_FINANCING_YTD", "name": "政府债券净融资累计", "category": "cycle_input", "unit": "亿元", "source": "PBOC", "frequency": "monthly", "is_visible": False, "sort_order": 224, "region": "CN"},
+    {"code": "CN_GOV_BOND_FINANCING", "name": "政府债券净融资当月", "category": "cycle_input", "unit": "亿元", "source": "PBOC", "frequency": "monthly", "is_visible": False, "sort_order": 225, "region": "CN"},
+    {"code": "CN_GDP_NOMINAL_YTD", "name": "中国名义GDP累计", "category": "cycle_input", "unit": "亿元", "source": "NBS", "frequency": "quarterly", "is_visible": False, "sort_order": 226, "region": "CN"},
+    {"code": "CN_CREDIT_INTENSITY", "name": "中国信用强度", "category": "cycle_input", "unit": "% GDP", "source": "derived", "frequency": "monthly", "is_visible": False, "sort_order": 227, "region": "CN"},
+    {"code": "CN_CREDIT_IMPULSE", "name": "中国标准信用脉冲", "category": "cycle_input", "unit": "pp", "source": "derived", "frequency": "monthly", "is_visible": False, "sort_order": 228, "region": "CN"},
+    {"code": "CN_RE_INVEST_YTD", "name": "房地产开发投资累计", "category": "cycle_input", "unit": "亿元", "source": "NBS", "frequency": "monthly", "is_visible": False, "sort_order": 230, "region": "CN"},
+    {"code": "CN_RE_INVEST_YTD_YOY", "name": "房地产开发投资累计同比", "category": "cycle_input", "unit": "%", "source": "NBS", "frequency": "monthly", "is_visible": False, "sort_order": 231, "region": "CN"},
+    {"code": "CN_RE_SALES_AREA_YTD", "name": "新建商品房销售面积累计", "category": "cycle_input", "unit": "万平方米", "source": "NBS", "frequency": "monthly", "is_visible": False, "sort_order": 232, "region": "CN"},
+    {"code": "CN_RE_SALES_AREA_YTD_YOY", "name": "新建商品房销售面积累计同比", "category": "cycle_input", "unit": "%", "source": "NBS", "frequency": "monthly", "is_visible": False, "sort_order": 233, "region": "CN"},
+    {"code": "CN_RE_SALES_VALUE_YTD", "name": "新建商品房销售额累计", "category": "cycle_input", "unit": "亿元", "source": "NBS", "frequency": "monthly", "is_visible": False, "sort_order": 234, "region": "CN"},
+    {"code": "CN_RE_SALES_VALUE_YTD_YOY", "name": "新建商品房销售额累计同比", "category": "cycle_input", "unit": "%", "source": "NBS", "frequency": "monthly", "is_visible": False, "sort_order": 235, "region": "CN"},
+    {"code": "CN_RE_STARTS_YTD", "name": "房屋新开工面积累计", "category": "cycle_input", "unit": "万平方米", "source": "NBS", "frequency": "monthly", "is_visible": False, "sort_order": 236, "region": "CN"},
+    {"code": "CN_RE_STARTS_YTD_YOY", "name": "房屋新开工面积累计同比", "category": "cycle_input", "unit": "%", "source": "NBS", "frequency": "monthly", "is_visible": False, "sort_order": 237, "region": "CN"},
+    {"code": "CN_RE_CONSTRUCTION", "name": "房屋施工面积", "category": "cycle_input", "unit": "万平方米", "source": "NBS", "frequency": "monthly", "is_visible": False, "sort_order": 238, "region": "CN"},
+    {"code": "CN_RE_CONSTRUCTION_YOY", "name": "房屋施工面积同比", "category": "cycle_input", "unit": "%", "source": "NBS", "frequency": "monthly", "is_visible": False, "sort_order": 239, "region": "CN"},
+    {"code": "CN_RE_PRICE_RISING_SHARE", "name": "70城新房环比上涨城市占比", "category": "cycle_input", "unit": "%", "source": "eastmoney", "frequency": "monthly", "is_visible": False, "sort_order": 240, "region": "CN"},
+    {"code": "CN_RE_PRICE_MOM_MEDIAN", "name": "70城新房价格环比中位数", "category": "cycle_input", "unit": "%", "source": "eastmoney", "frequency": "monthly", "is_visible": False, "sort_order": 241, "region": "CN"},
+    {"code": "CN_FISCAL_GENERAL_SPEND_YTD", "name": "全国一般公共预算支出累计", "category": "cycle_input", "unit": "亿元", "source": "MOF", "frequency": "monthly", "is_visible": False, "sort_order": 250, "region": "CN"},
+    {"code": "CN_FISCAL_GENERAL_SPEND_YOY", "name": "全国一般公共预算支出累计同比", "category": "cycle_input", "unit": "%", "source": "MOF", "frequency": "monthly", "is_visible": False, "sort_order": 251, "region": "CN"},
+    {"code": "CN_FISCAL_FUND_EXPENDITURE_YTD", "name": "全国政府性基金预算支出累计", "category": "cycle_input", "unit": "亿元", "source": "MOF", "frequency": "monthly", "is_visible": False, "sort_order": 252, "region": "CN"},
+    {"code": "CN_FISCAL_FUND_EXPENDITURE_YOY", "name": "全国政府性基金预算支出累计同比", "category": "cycle_input", "unit": "%", "source": "MOF", "frequency": "monthly", "is_visible": False, "sort_order": 253, "region": "CN"},
+    {"code": "CN_FISCAL_BROAD_EXPENDITURE_YTD", "name": "广义财政支出累计", "category": "cycle_input", "unit": "亿元", "source": "MOF", "frequency": "monthly", "is_visible": False, "sort_order": 254, "region": "CN"},
+    {"code": "CN_FISCAL_BROAD_EXPENDITURE_YOY", "name": "广义财政支出累计同比", "category": "cycle_input", "unit": "%", "source": "MOF", "frequency": "monthly", "is_visible": False, "sort_order": 255, "region": "CN"},
+    {"code": "CN_LOCAL_SPECIAL_BOND_ISSUANCE", "name": "新增地方专项债当月发行", "category": "cycle_input", "unit": "亿元", "source": "MOF", "frequency": "monthly", "is_visible": False, "sort_order": 256, "region": "CN"},
+    {"code": "CN_FISCAL_SPEND_INTENSITY", "name": "广义财政支出强度", "category": "cycle_input", "unit": "% GDP", "source": "derived", "frequency": "quarterly", "is_visible": False, "sort_order": 257, "region": "CN"},
+    {"code": "CN_FISCAL_IMPULSE_PROXY", "name": "财政脉冲代理", "category": "cycle_input", "unit": "pp", "source": "derived", "frequency": "quarterly", "is_visible": False, "sort_order": 258, "region": "CN"},
+    {"code": "CN_CONSUMER_CONFIDENCE", "name": "消费者信心指数", "category": "cycle_input", "unit": "点", "source": "eastmoney", "frequency": "monthly", "is_visible": False, "sort_order": 260, "region": "CN"},
+    {"code": "CN_CONSUMER_SATISFACTION", "name": "消费者满意指数", "category": "cycle_input", "unit": "点", "source": "eastmoney", "frequency": "monthly", "is_visible": False, "sort_order": 261, "region": "CN"},
+    {"code": "CN_CONSUMER_EXPECTATIONS", "name": "消费者预期指数", "category": "cycle_input", "unit": "点", "source": "eastmoney", "frequency": "monthly", "is_visible": False, "sort_order": 262, "region": "CN"},
+    {"code": "CN_ENTERPRISE_BOOM", "name": "企业景气指数", "category": "cycle_input", "unit": "点", "source": "eastmoney", "frequency": "quarterly", "is_visible": False, "sort_order": 263, "region": "CN"},
     {"code": "US_CPI", "name": "美国CPI同比", "category": "macro", "unit": "%", "sort_order": 70, "region": "US"},
     {"code": "US_CORE_CPI", "name": "美国核心CPI同比", "category": "macro", "unit": "%", "sort_order": 71, "region": "US"},
     {"code": "US_IP", "name": "美国工业生产同比", "category": "macro", "unit": "%", "sort_order": 72, "region": "US"},
     {"code": "US_CLI", "name": "美国综合领先指标", "category": "macro", "unit": "点", "sort_order": 73, "region": "US"},
-    {"code": "US_NFP", "name": "美国非农就业变动", "category": "macro", "unit": "万人", "sort_order": 74, "region": "US"},
-    {"code": "US_FFR", "name": "美联储联邦基金利率", "category": "macro", "unit": "%", "sort_order": 75, "region": "US"},
-    {"code": "US_GDP", "name": "美国GDP环比折年率", "category": "macro", "unit": "%", "sort_order": 76, "region": "US"},
+    {"code": "US_NFP", "name": "美国非农就业变动", "category": "macro", "unit": "万人", "source": "fred", "sort_order": 74, "region": "US"},
+    {"code": "US_FFR", "name": "美国有效联邦基金利率", "category": "macro", "unit": "%", "source": "fred", "sort_order": 75, "region": "US"},
+    {"code": "US_GDP", "name": "美国GDP环比折年率", "category": "macro", "unit": "%", "source": "fred", "sort_order": 76, "region": "US"},
     # 美国货币供给数据源是 FRED（美联储官方，见 fred_source.py），不是 akshare；美国没有官方
     # 常规发布的"M0"，用"货币基础"顶替；也没有对应中国"M1-M2剪刀差"的惯用指标，不加这个 tab
     {"code": "US_BASE_ABS", "name": "美国货币基础数量", "category": "money", "unit": "十亿美元", "sort_order": 77, "region": "US"},
@@ -97,25 +151,32 @@ INDICATOR_DEFS = [
     {"code": "JP_CORE_CPI", "name": "日本核心CPI同比", "category": "macro", "unit": "%", "sort_order": 91, "region": "JP"},
     {"code": "JP_IP", "name": "日本工业生产同比", "category": "macro", "unit": "%", "sort_order": 92, "region": "JP"},
     {"code": "JP_CLI", "name": "日本综合领先指标", "category": "macro", "unit": "点", "sort_order": 93, "region": "JP"},
-    {"code": "JP_BOJ", "name": "日本央行政策利率", "category": "macro", "unit": "%", "sort_order": 94, "region": "JP"},
+    {"code": "JP_BOJ", "name": "日本隔夜拆借利率（月均）", "category": "macro", "unit": "%", "source": "fred", "sort_order": 94, "region": "JP"},
     # 日本没有可用的M1/M2数据源（FRED上有但已停止更新，形同死数据），用日本央行总资产
     # 代替观察日本的货币扩张力度——QQE/YCC框架下这个指标比M1/M2更贴合日本的政策传导机制，
     # 数据源同样是 FRED（见 fred_source.py），不是 akshare
     {"code": "JP_BOJ_ASSETS", "name": "日本央行总资产", "category": "macro", "unit": "亿日元", "sort_order": 95, "region": "JP"},
-    {"code": "EU_CPI", "name": "欧元区CPI同比", "category": "macro", "unit": "%", "sort_order": 100, "region": "EU"},
+    {"code": "EU_CPI", "name": "欧元区HICP同比", "category": "macro", "unit": "%", "sort_order": 100, "region": "EU"},
     {"code": "EU_CORE_CPI", "name": "欧元区核心HICP同比", "category": "macro", "unit": "%", "sort_order": 101, "region": "EU"},
     {"code": "EU_IP", "name": "欧元区工业生产同比", "category": "macro", "unit": "%", "sort_order": 102, "region": "EU"},
-    {"code": "EU_CLI", "name": "欧洲四大经济体领先指标（代理）", "category": "macro", "unit": "点", "sort_order": 103, "region": "EU"},
-    {"code": "EU_ECB", "name": "欧洲央行利率", "category": "macro", "unit": "%", "sort_order": 104, "region": "EU"},
+    {"code": "EU_CLI", "name": "欧元区经济景气指数（ESI）", "category": "macro", "unit": "点", "sort_order": 103, "region": "EU"},
+    {"code": "EU_ECB", "name": "欧洲央行主要再融资利率", "category": "macro", "unit": "%", "source": "fred", "sort_order": 104, "region": "EU"},
     # 欧元区没有可用的M1/M2数据源（FRED上有但已停止更新，形同死数据），用欧央行总资产
     # （周度金融报表口径）代替观察欧元区的货币扩张力度，数据源是 FRED（见 fred_source.py）
     {"code": "EU_ECB_ASSETS", "name": "欧洲央行总资产", "category": "macro", "unit": "百万欧元", "sort_order": 105, "region": "EU"},
     {"code": "EU_GDP", "name": "欧元区GDP同比", "category": "macro", "unit": "%", "sort_order": 106, "region": "EU"},
+    {"code": "GB_CPI", "name": "英国CPI同比", "category": "macro", "unit": "%", "sort_order": 107, "region": "GB"},
+    {"code": "GB_CORE_CPI", "name": "英国核心CPI同比", "category": "macro", "unit": "%", "sort_order": 108, "region": "GB"},
+    {"code": "GB_IP", "name": "英国工业生产同比", "category": "macro", "unit": "%", "sort_order": 109, "region": "GB"},
+    {"code": "GB_CLI", "name": "英国综合领先指标", "category": "macro", "unit": "点", "sort_order": 110, "region": "GB"},
+    {"code": "GB_GDP", "name": "英国GDP同比", "category": "macro", "unit": "%", "sort_order": 111, "region": "GB"},
+    {"code": "GB_BOE", "name": "英格兰银行利率", "category": "macro", "unit": "%", "sort_order": 112, "region": "GB"},
+    {"code": "GB_M3", "name": "英国广义货币M3同比", "category": "macro", "unit": "%", "sort_order": 113, "region": "GB"},
     # 韩国没有可用的M1/M2数据源，连央行资产负债表类的替代指标都没查到能持续更新的
     # （详见 fred_source.py 注释），只能退而求其次用外汇储备顶位——但这不是货币供给概念，
     # 前端经济学解读词条会明确说明这一点，不会包装成"韩国的M0/M1/M2"
-    {"code": "KR_CORE_CPI", "name": "韩国核心CPI同比", "category": "macro", "unit": "%", "sort_order": 110, "region": "KR"},
-    {"code": "KR_IP", "name": "韩国工业生产同比", "category": "macro", "unit": "%", "sort_order": 111, "region": "KR"},
-    {"code": "KR_CLI", "name": "韩国综合领先指标", "category": "macro", "unit": "点", "sort_order": 112, "region": "KR"},
-    {"code": "KR_RESERVES", "name": "韩国外汇储备", "category": "macro", "unit": "百万美元", "sort_order": 113, "region": "KR"},
+    {"code": "KR_CORE_CPI", "name": "韩国核心CPI同比", "category": "macro", "unit": "%", "sort_order": 120, "region": "KR"},
+    {"code": "KR_IP", "name": "韩国工业生产同比", "category": "macro", "unit": "%", "sort_order": 121, "region": "KR"},
+    {"code": "KR_CLI", "name": "韩国综合领先指标", "category": "macro", "unit": "点", "sort_order": 122, "region": "KR"},
+    {"code": "KR_RESERVES", "name": "韩国外汇储备", "category": "macro", "unit": "百万美元", "sort_order": 123, "region": "KR"},
 ]

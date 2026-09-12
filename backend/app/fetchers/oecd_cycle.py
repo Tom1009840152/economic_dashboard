@@ -15,7 +15,7 @@ from app.fetchers.fred_source import _fred_abs, _fred_yoy
 
 OECD_CLI_URL = (
     "https://sdmx.oecd.org/public/rest/data/"
-    "OECD.SDD.STES,DSD_STES@DF_CLI,/CHN+USA+JPN+KOR+G4E.M.LI...AA...H"
+    "OECD.SDD.STES,DSD_STES@DF_CLI,/CHN+USA+JPN+KOR.M.LI...AA...H"
 )
 OECD_CORE_1999_URL = (
     "https://sdmx.oecd.org/public/rest/data/"
@@ -25,7 +25,7 @@ OECD_CORE_2018_URL = (
     "https://sdmx.oecd.org/public/rest/data/"
     "OECD.SDD.TPS,DSD_PRICES_COICOP2018@DF_PRICES_C2018_N_TXCP01_NRG,1.0/JPN.M......"
 )
-EUROSTAT_IP_URL = "https://ec.europa.eu/eurostat/api/dissemination/statistics/1.0/data/sts_inpr_m"
+EUROSTAT_API = "https://ec.europa.eu/eurostat/api/dissemination/statistics/1.0/data"
 
 _HEADERS = {"User-Agent": "economic-dashboard/1.0"}
 _CACHE_TTL = 60 * 60
@@ -64,19 +64,12 @@ def _make_oecd_fetcher(dataset: str, url: str, area: str):
     return _fetch
 
 
-def fetch_eu_industrial_production() -> pd.DataFrame:
-    """Euro area industrial production index, SA/WDA, converted to year-on-year."""
+def _eurostat_series(dataset: str, params: dict[str, str], date_format: str) -> pd.DataFrame:
     response = requests.get(
-        EUROSTAT_IP_URL,
-        params={
-            "geo": "EA20",
-            "s_adj": "SCA",
-            "unit": "I21",
-            "indic_bt": "PRD",
-            "nace_r2": "B-D",
-        },
+        f"{EUROSTAT_API}/{dataset}",
+        params=params,
         headers=_HEADERS,
-        timeout=30,
+        timeout=45,
     )
     response.raise_for_status()
     payload = response.json()
@@ -84,11 +77,64 @@ def fetch_eu_industrial_production() -> pd.DataFrame:
     values = payload.get("value", {})
     rows = [(period, values.get(str(position))) for period, position in time_index.items()]
     out = pd.DataFrame(rows, columns=["date", "value"])
-    out["date"] = pd.to_datetime(out["date"], format="%Y-%m", errors="coerce").dt.date
+    if date_format == "quarter":
+        parts = out["date"].str.extract(r"^(\d{4})-Q([1-4])$")
+        quarter_month = {"1": "01", "2": "04", "3": "07", "4": "10"}
+        out["date"] = pd.to_datetime(
+            parts[0] + "-" + parts[1].map(quarter_month),
+            format="%Y-%m",
+            errors="coerce",
+        ).dt.date
+    else:
+        out["date"] = pd.to_datetime(out["date"], format=date_format, errors="coerce").dt.date
     out["value"] = pd.to_numeric(out["value"], errors="coerce")
-    out = out.dropna().sort_values("date").reset_index(drop=True)
+    return out.dropna().sort_values("date").reset_index(drop=True)
+
+
+def fetch_eu_industrial_production() -> pd.DataFrame:
+    """EA21 industrial production index, SA/WDA, converted to year-on-year."""
+    out = _eurostat_series(
+        "sts_inpr_m",
+        {
+            "geo": "EA21",
+            "s_adj": "SCA",
+            "unit": "I21",
+            "indic_bt": "PRD",
+            "nace_r2": "B-D",
+        },
+        "%Y-%m",
+    )
     out["value"] = out["value"].pct_change(12) * 100
     return out.dropna().reset_index(drop=True)
+
+
+def fetch_eu_economic_sentiment() -> pd.DataFrame:
+    """European Commission ESI for the 21-country euro area, long-run mean=100."""
+    return _eurostat_series(
+        "ei_bssi_m_r2",
+        {
+            "geo": "EA21",
+            "indic": "BS-ESI-I",
+            "s_adj": "SA",
+            "sinceTimePeriod": "2000-01",
+        },
+        "%Y-%m",
+    )
+
+
+def fetch_eu_gdp() -> pd.DataFrame:
+    """EA21 real GDP change from the same quarter a year earlier."""
+    return _eurostat_series(
+        "namq_10_gdp",
+        {
+            "geo": "EA21",
+            "s_adj": "SCA",
+            "unit": "CLV_PCH_SM",
+            "na_item": "B1GQ",
+            "sinceTimePeriod": "2000-Q1",
+        },
+        "quarter",
+    )
 
 
 CYCLE_FETCHERS = {
@@ -101,12 +147,13 @@ CYCLE_FETCHERS = {
     "CN_CLI": _make_oecd_fetcher("cli", OECD_CLI_URL, "CHN"),
     "US_CLI": _make_oecd_fetcher("cli", OECD_CLI_URL, "USA"),
     "JP_CLI": _make_oecd_fetcher("cli", OECD_CLI_URL, "JPN"),
-    # G4E is an explicit proxy because OECD does not publish a current euro-area CLI.
-    "EU_CLI": _make_oecd_fetcher("cli", OECD_CLI_URL, "G4E"),
+    # 欧元区使用欧盟委员会ESI，不再用包含英国的“欧洲四国”代理。
+    "EU_CLI": fetch_eu_economic_sentiment,
+    "EU_GDP": fetch_eu_gdp,
     "KR_CLI": _make_oecd_fetcher("cli", OECD_CLI_URL, "KOR"),
     # National CPI excluding food and energy, year-on-year.
     "US_CORE_CPI": _make_oecd_fetcher("core_1999", OECD_CORE_1999_URL, "USA"),
     "JP_CORE_CPI": _make_oecd_fetcher("core_2018", OECD_CORE_2018_URL, "JPN"),
     "KR_CORE_CPI": _make_oecd_fetcher("core_1999", OECD_CORE_1999_URL, "KOR"),
-    "EU_CORE_CPI": lambda: _fred_yoy("00XEFDEZ19M086NEST"),
+    "EU_CORE_CPI": lambda: _fred_yoy("00XEFDEZCCM086NEST"),
 }

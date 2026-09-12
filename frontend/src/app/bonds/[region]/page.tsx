@@ -49,7 +49,7 @@ export default async function BondsPage(props: PageProps<"/bonds/[region]">) {
 
   return (
     <main className="mx-auto w-full max-w-5xl flex-1 px-6 py-10">
-      <Link href={`/country/${region}`} className="text-sm text-muted-foreground hover:underline">
+      <Link href={`/country/${region}/monetary`} className="text-sm text-muted-foreground hover:underline">
         ← 返回{meta.label}
       </Link>
       <h1 className="mt-2 text-2xl font-semibold">{meta.label}国债收益率</h1>

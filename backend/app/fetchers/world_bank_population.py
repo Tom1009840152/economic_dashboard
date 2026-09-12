@@ -20,7 +20,8 @@ REGION_META = {
     "CN": {"world_bank_code": "CHN", "country": "中国", "slug": "china"},
     "US": {"world_bank_code": "USA", "country": "美国", "slug": "united-states"},
     "JP": {"world_bank_code": "JPN", "country": "日本", "slug": "japan"},
-    "EU": {"world_bank_code": "EUU", "country": "欧盟", "slug": "european-union"},
+    "EU": {"world_bank_code": "EMU", "country": "欧元区", "slug": "euro-area"},
+    "GB": {"world_bank_code": "GBR", "country": "英国", "slug": "united-kingdom"},
     "KR": {"world_bank_code": "KOR", "country": "韩国", "slug": "korea-rep"},
 }
 

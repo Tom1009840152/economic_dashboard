@@ -11,7 +11,7 @@ router = APIRouter(prefix="/api", tags=["population"])
 @router.get("/population/{region}", response_model=PopulationDashboardOut)
 def get_population_dashboard(region: str):
     normalized = region.upper()
-    if normalized not in {"CN", "US", "JP", "EU", "KR"}:
+    if normalized not in {"CN", "US", "JP", "EU", "GB", "KR"}:
         raise HTTPException(status_code=404, detail="population dashboard is unavailable for this region")
     try:
         return fetch_population_dashboard(normalized)

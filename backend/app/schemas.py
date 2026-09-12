@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 
 from pydantic import BaseModel
 
@@ -13,6 +13,8 @@ class IndicatorSummary(BaseModel):
     latest_value: float | None = None
     change_pct: float | None = None
     recent_values: list[float] = []
+    freshness: str = "missing"
+    freshness_label: str = "等待数据更新"
 
     model_config = {"from_attributes": True}
 
@@ -20,6 +22,12 @@ class IndicatorSummary(BaseModel):
 class DataPointOut(BaseModel):
     date: date
     value: float
+    release_date: date | None = None
+    available_at: datetime | None = None
+    retrieved_at: datetime | None = None
+    source_url: str | None = None
+    status: str | None = None
+    version: int = 1
 
     model_config = {"from_attributes": True}
 
@@ -29,6 +37,10 @@ class IndicatorHistory(BaseModel):
     name: str
     unit: str
     points: list[DataPointOut]
+
+
+class DataPointVintageOut(DataPointOut):
+    indicator_code: str
 
 
 class ForecastPoint(BaseModel):
@@ -41,6 +53,7 @@ class ForecastPoint(BaseModel):
 class ForecastOut(BaseModel):
     code: str
     name: str
+    forecast_unit: str
     history: list[DataPointOut]
     forecast: list[ForecastPoint]
 
@@ -59,6 +72,7 @@ class ForexHistoryOut(BaseModel):
 class ForexForecastOut(BaseModel):
     base: str
     target: str
+    forecast_unit: str
     history: list[DataPointOut]
     forecast: list[ForecastPoint]
 
@@ -143,5 +157,42 @@ class InternationalEmploymentDashboardOut(BaseModel):
     country: str
     latest_month: str | None = None
     series: list[EmploymentSeriesOut]
+    sources: list[EmploymentSourceOut]
+    warnings: list[str]
+
+
+class AnalysisPointOut(BaseModel):
+    period: str
+    value: float
+
+
+class AnalysisSeriesOut(BaseModel):
+    key: str
+    name: str
+    unit: str
+    points: list[AnalysisPointOut]
+
+
+class MonetaryTransmissionSignalOut(BaseModel):
+    key: str
+    name: str
+    value: float
+    unit: str
+    period: str
+    state: str
+    interpretation: str
+    formula: str
+
+
+class MonetaryTransmissionDashboardOut(BaseModel):
+    region: str
+    country: str
+    title: str
+    status: str
+    tone: str
+    summary: str
+    as_of: str
+    signals: list[MonetaryTransmissionSignalOut]
+    series: list[AnalysisSeriesOut]
     sources: list[EmploymentSourceOut]
     warnings: list[str]

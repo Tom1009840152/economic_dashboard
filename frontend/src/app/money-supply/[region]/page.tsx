@@ -60,7 +60,7 @@ export default async function MoneySupplyPage(props: PageProps<"/money-supply/[r
 
   return (
     <main className="mx-auto w-full max-w-5xl flex-1 px-6 py-10">
-      <Link href={`/country/${region}`} className="text-sm text-muted-foreground hover:underline">
+      <Link href={`/country/${region}/monetary`} className="text-sm text-muted-foreground hover:underline">
         ← 返回{meta.label}
       </Link>
       <h1 className="mt-2 text-2xl font-semibold">{meta.label}货币供给</h1>
