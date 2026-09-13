@@ -8,39 +8,57 @@ the rolling social-financing flow.
 
 from __future__ import annotations
 
-import re
 import time
-from datetime import date
 from typing import Any
 
 import akshare as ak
 import pandas as pd
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models import DataPoint
-
-
-_CACHE_TTL = 6 * 60 * 60
-_cache: tuple[float, dict[str, Any]] | None = None
-
-# Month-end policy-rate settings.  The 2024 Q3 PBOC report documents both
-# 2024 changes; the PBOC 2025 monetary-policy chronicle documents the May cut.
-# A baseline point is included so the monthly real-rate series starts cleanly.
-POLICY_RATE_CHANGES = (
-    (date(2024, 1, 1), 1.80),
-    (date(2024, 7, 22), 1.70),
-    (date(2024, 9, 27), 1.50),
-    (date(2025, 5, 8), 1.40),
+from app.services.derived_metrics import (
+    DERIVED_METRIC_SPECS,
+    PBOC_7D_REVERSE_REPO,
+    calculate_credit_metrics,
+    policy_rate_for_periods,
 )
 
 
-def _database_series(db: Session, code: str) -> pd.Series:
+_CACHE_TTL = 6 * 60 * 60
+_cache: tuple[float, tuple[tuple[str, object], ...], dict[str, Any]] | None = None
+
+_CACHE_INPUT_CODES = (
+    "CN_CORE_CPI",
+    "CN_TSF",
+    "CN_GDP_NOMINAL_YTD",
+    "CN_CREDIT_INTENSITY",
+    "CN_CREDIT_IMPULSE",
+)
+
+
+def _database_signature(db: Session) -> tuple[tuple[str, object], ...]:
     rows = db.execute(
-        select(DataPoint.date, DataPoint.value)
-        .where(DataPoint.indicator_code == code)
-        .order_by(DataPoint.date)
+        select(DataPoint.indicator_code, func.max(DataPoint.retrieved_at))
+        .where(DataPoint.indicator_code.in_(_CACHE_INPUT_CODES))
+        .group_by(DataPoint.indicator_code)
+        .order_by(DataPoint.indicator_code)
     ).all()
+    return tuple((row.indicator_code, row[1]) for row in rows)
+
+
+def _database_series(
+    db: Session,
+    code: str,
+    *,
+    formula_version: str | None = None,
+) -> pd.Series:
+    query = select(DataPoint.date, DataPoint.value).where(
+        DataPoint.indicator_code == code
+    )
+    if formula_version is not None:
+        query = query.where(DataPoint.formula_version == formula_version)
+    rows = db.execute(query.order_by(DataPoint.date)).all()
     if not rows:
         raise ValueError(f"{code} has no stored observations")
     series = pd.Series(
@@ -52,17 +70,7 @@ def _database_series(db: Session, code: str) -> pd.Series:
     return series.groupby(level=0).last().sort_index()
 
 
-def _policy_rate(periods: pd.PeriodIndex) -> pd.Series:
-    changes = [(pd.Timestamp(day), rate) for day, rate in POLICY_RATE_CHANGES]
-    values = []
-    for period in periods:
-        month_end = period.to_timestamp(how="end")
-        applicable = [rate for change_date, rate in changes if change_date <= month_end]
-        values.append(applicable[-1] if applicable else float("nan"))
-    return pd.Series(values, index=periods, dtype="float64")
-
-
-def _fetch_fdr007() -> tuple[pd.Series, str]:
+def _fetch_fdr007() -> tuple[pd.Series, pd.Series, str]:
     frame = ak.repo_rate_query(symbol="银银间回购定盘利率").copy()
     if frame.empty or "date" not in frame or "FDR007" not in frame:
         raise ValueError("FDR007 source returned no usable observations")
@@ -73,51 +81,60 @@ def _fetch_fdr007() -> tuple[pd.Series, str]:
         raise ValueError("FDR007 source returned no numeric observations")
     last_day = frame["date"].iloc[-1].date().isoformat()
     frame["period"] = frame["date"].dt.to_period("M")
-    return frame.groupby("period")["FDR007"].mean().sort_index(), last_day
-
-
-def _fetch_nominal_gdp_ttm() -> pd.Series:
-    frame = ak.macro_china_gdp().copy()
-    if frame.empty:
-        raise ValueError("GDP source returned no observations")
-
-    period_column = frame.columns[0]
-    value_column = next(
-        (column for column in frame.columns if "国内生产总值" in str(column) and "绝对值" in str(column)),
-        frame.columns[1],
+    daily_periods = pd.PeriodIndex(frame["date"], freq="D")
+    frame["policy_rate"] = policy_rate_for_periods(daily_periods).to_numpy()
+    grouped = frame.groupby("period")
+    return (
+        grouped["FDR007"].mean().sort_index(),
+        grouped["policy_rate"].mean().sort_index(),
+        last_day,
     )
-    cumulative: dict[tuple[int, int], float] = {}
-    for raw_period, raw_value in zip(frame[period_column], frame[value_column]):
-        match = re.search(r"(\d{4}).*?([1-4])季度", str(raw_period))
-        if not match:
-            continue
-        value = pd.to_numeric(raw_value, errors="coerce")
-        if pd.isna(value):
-            continue
-        cumulative[(int(match.group(1)), int(match.group(2)))] = float(value)
-
-    quarterly: dict[pd.Period, float] = {}
-    for (year, quarter), value in sorted(cumulative.items()):
-        previous = cumulative.get((year, quarter - 1), 0.0) if quarter > 1 else 0.0
-        individual = value - previous
-        if individual > 0:
-            quarterly[pd.Period(year=year, quarter=quarter, freq="Q-DEC")] = individual
-    if len(quarterly) < 4:
-        raise ValueError("GDP source has insufficient quarterly observations")
-    return pd.Series(quarterly, dtype="float64").sort_index().rolling(4, min_periods=4).sum().dropna()
 
 
-def _credit_metrics(tsf: pd.Series, gdp_ttm: pd.Series) -> tuple[pd.Series, pd.Series]:
-    rolling_tsf = tsf.rolling(12, min_periods=12).sum()
-    ratios: dict[pd.Period, float] = {}
-    for month, flow in rolling_tsf.dropna().items():
-        completed_quarters = gdp_ttm[gdp_ttm.index.end_time <= month.end_time]
-        if completed_quarters.empty:
-            continue
-        ratios[month] = float(flow / completed_quarters.iloc[-1] * 100)
-    ratio = pd.Series(ratios, dtype="float64").sort_index()
-    impulse = ratio - ratio.shift(12)
-    return ratio.dropna(), impulse.dropna()
+def _credit_metrics_from_database(db: Session) -> tuple[pd.Series, pd.Series, str]:
+    """Prefer the versioned stored outputs; use the same canonical formula as fallback."""
+
+    try:
+        intensity = _database_series(
+            db,
+            "CN_CREDIT_INTENSITY",
+            formula_version=DERIVED_METRIC_SPECS["CN_CREDIT_INTENSITY"].version,
+        )
+        impulse = _database_series(
+            db,
+            "CN_CREDIT_IMPULSE",
+            formula_version=DERIVED_METRIC_SPECS["CN_CREDIT_IMPULSE"].version,
+        )
+        tsf_latest = db.scalar(
+            select(func.max(DataPoint.date)).where(DataPoint.indicator_code == "CN_TSF")
+        )
+        gdp_latest = db.scalar(
+            select(func.max(DataPoint.date)).where(
+                DataPoint.indicator_code == "CN_GDP_NOMINAL_YTD"
+            )
+        )
+        latest_input_period = (
+            pd.Period(tsf_latest, freq="M") if tsf_latest is not None else None
+        )
+        if (
+            not intensity.empty
+            and not impulse.empty
+            and gdp_latest is not None
+            and intensity.index[-1] == latest_input_period
+            and impulse.index[-1] == latest_input_period
+        ):
+            return intensity, impulse, "stored"
+    except ValueError:
+        pass
+
+    tsf = _database_series(db, "CN_TSF")
+    nominal_gdp_ytd = _database_series(db, "CN_GDP_NOMINAL_YTD")
+    calculated_intensity, calculated_impulse = calculate_credit_metrics(
+        tsf, nominal_gdp_ytd
+    )
+    if calculated_intensity.empty or calculated_impulse.empty:
+        raise ValueError("stored inputs are insufficient for canonical credit impulse")
+    return calculated_intensity, calculated_impulse, "calculated_fallback"
 
 
 def _points(series: pd.Series, digits: int = 3) -> list[dict[str, Any]]:
@@ -156,22 +173,20 @@ def _credit_state(value: float) -> tuple[str, str]:
 def fetch_china_monetary_transmission(db: Session) -> dict[str, Any]:
     global _cache
     now = time.time()
-    if _cache and now - _cache[0] < _CACHE_TTL:
-        return _cache[1]
+    signature = _database_signature(db)
+    if _cache and now - _cache[0] < _CACHE_TTL and _cache[1] == signature:
+        return _cache[2]
 
     core_cpi = _database_series(db, "CN_CORE_CPI")
-    tsf = _database_series(db, "CN_TSF")
-    fdr007, fdr_last_day = _fetch_fdr007()
-    gdp_ttm = _fetch_nominal_gdp_ttm()
+    fdr007, policy_for_liquidity, fdr_last_day = _fetch_fdr007()
 
     real_periods = core_cpi.index[core_cpi.index >= pd.Period("2024-01", freq="M")]
-    policy_for_real = _policy_rate(real_periods)
+    policy_for_real = policy_rate_for_periods(real_periods)
     real_rate = policy_for_real - core_cpi.reindex(real_periods)
 
-    policy_for_liquidity = _policy_rate(fdr007.index)
     liquidity_gap_bps = (fdr007 - policy_for_liquidity) * 100
 
-    credit_ratio, credit_impulse = _credit_metrics(tsf, gdp_ttm)
+    credit_ratio, credit_impulse, credit_origin = _credit_metrics_from_database(db)
     if real_rate.dropna().empty or liquidity_gap_bps.dropna().empty or credit_impulse.empty:
         raise ValueError("insufficient observations for monetary-transmission diagnostics")
 
@@ -182,6 +197,9 @@ def fetch_china_monetary_transmission(db: Session) -> dict[str, Any]:
     liquidity_state, liquidity_text = _liquidity_state(latest_gap)
     credit_state, credit_text = _credit_state(latest_impulse)
 
+    policy_stale = (
+        pd.Timestamp(fdr_last_day).date() > PBOC_7D_REVERSE_REPO.verified_through
+    )
     if latest_impulse > 0 and latest_gap <= 10:
         status = "宽货币正向信用传导"
         tone = "positive"
@@ -192,10 +210,19 @@ def fetch_china_monetary_transmission(db: Session) -> dict[str, Any]:
         status = "传导信号仍有分化"
         tone = "neutral"
 
+    if policy_stale:
+        status = "政策利率日程待核验"
+        tone = "caution"
+
     summary = (
         f"实际政策利率{real_state}，银行间流动性{liquidity_state}；"
         f"信用脉冲{credit_state}。三项信号分开判断，不合成为黑箱分数。"
     )
+    if policy_stale:
+        summary = (
+            f"政策利率相关判断仅核验至 {PBOC_7D_REVERSE_REPO.verified_through.isoformat()}；"
+            f"信用脉冲{credit_state}。更新政策日程前不输出当前综合松紧结论。"
+        )
     result = {
         "region": "CN",
         "country": "中国",
@@ -203,7 +230,9 @@ def fetch_china_monetary_transmission(db: Session) -> dict[str, Any]:
         "status": status,
         "tone": tone,
         "summary": summary,
-        "as_of": fdr_last_day,
+        "as_of": min(
+            pd.Timestamp(fdr_last_day).date(), PBOC_7D_REVERSE_REPO.verified_through
+        ).isoformat(),
         "signals": [
             {
                 "key": "real_policy_rate",
@@ -223,7 +252,7 @@ def fetch_china_monetary_transmission(db: Session) -> dict[str, Any]:
                 "period": str(liquidity_gap_bps.dropna().index[-1]),
                 "state": liquidity_state,
                 "interpretation": liquidity_text,
-                "formula": "FDR007月均 − 7天逆回购利率",
+                "formula": "FDR007与同日7天逆回购利率之差的月均值",
             },
             {
                 "key": "credit_impulse",
@@ -233,7 +262,9 @@ def fetch_china_monetary_transmission(db: Session) -> dict[str, Any]:
                 "period": str(credit_impulse.index[-1]),
                 "state": credit_state,
                 "interpretation": credit_text,
-                "formula": "滚动12个月社融/GDP − 一年前该比重",
+                "formula": DERIVED_METRIC_SPECS["CN_CREDIT_IMPULSE"].formula,
+                "formula_version": DERIVED_METRIC_SPECS["CN_CREDIT_IMPULSE"].version,
+                "data_origin": credit_origin,
             },
         ],
         "series": [
@@ -241,7 +272,11 @@ def fetch_china_monetary_transmission(db: Session) -> dict[str, Any]:
                 "key": "policy_rate",
                 "name": "7天逆回购利率（月末）",
                 "unit": "%",
-                "points": _points(_policy_rate(real_periods), 2),
+                "points": _points(policy_rate_for_periods(real_periods), 2),
+                "maintenance": PBOC_7D_REVERSE_REPO.maintenance,
+                "verified_through": PBOC_7D_REVERSE_REPO.verified_through.isoformat(),
+                "source": PBOC_7D_REVERSE_REPO.source_name,
+                "source_url": PBOC_7D_REVERSE_REPO.source_url,
             },
             {
                 "key": "core_cpi",
@@ -263,7 +298,7 @@ def fetch_china_monetary_transmission(db: Session) -> dict[str, Any]:
             },
             {
                 "key": "liquidity_policy_rate",
-                "name": "同期7天逆回购利率",
+                "name": "同期7天逆回购利率（日度对齐月均）",
                 "unit": "%",
                 "points": _points(policy_for_liquidity, 2),
             },
@@ -288,14 +323,13 @@ def fetch_china_monetary_transmission(db: Session) -> dict[str, Any]:
         ],
         "sources": [
             {
-                "name": "中国人民银行货币政策执行报告",
-                "url": "https://www.pbc.gov.cn/zhengcehuobisi/125207/125227/125957/5347949/afbfa5df25ee45889d916a2819b60a43/2024110815410752868.pdf",
-                "description": "7天逆回购政策利率定位与2024年调整记录。",
-            },
-            {
-                "name": "中国人民银行2025年前三季度货币政策大事记",
-                "url": "https://www.pbc.gov.cn/goutongjiaoliu/113456/113469/5896228/index.html",
-                "description": "2025年5月政策利率由1.50%降至1.40%的官方记录。",
+                "name": PBOC_7D_REVERSE_REPO.source_name,
+                "url": PBOC_7D_REVERSE_REPO.source_url,
+                "description": (
+                    "人工维护的7天期逆回购利率日程；"
+                    f"目录更新于 {PBOC_7D_REVERSE_REPO.catalog_updated_at.isoformat()}，"
+                    f"当前核验截至 {PBOC_7D_REVERSE_REPO.verified_through.isoformat()}。"
+                ),
             },
             {
                 "name": "中国外汇交易中心 FDR 定盘利率",
@@ -315,9 +349,18 @@ def fetch_china_monetary_transmission(db: Session) -> dict[str, Any]:
         ],
         "warnings": [
             "实际利率使用当期核心CPI，是事后实际政策利率，不等同于使用通胀预期的前瞻实际利率。",
+            (
+                "政策利率来自人工维护日程，不是动态行情；"
+                f"最后核验至 {PBOC_7D_REVERSE_REPO.verified_through.isoformat()}，"
+                "超过该日期的政策利率、实际利率与流动性偏离不参与当前判断。"
+            ),
             f"FDR007为DR007定盘代理；最新月份是截至 {fdr_last_day} 的月内均值，并非完整月均。",
-            f"信用脉冲最新至 {credit_impulse.index[-1]}，受社融与GDP发布时滞、口径调整和季节性影响。",
+            (
+                f"信用脉冲最新至 {credit_impulse.index[-1]}，来自"
+                f"{'版本化存库序列' if credit_origin == 'stored' else '存库原始数据的即时兜底计算'}；"
+                "受社融与GDP发布时滞、口径调整和季节性影响。"
+            ),
         ],
     }
-    _cache = (now, result)
+    _cache = (now, signature, result)
     return result

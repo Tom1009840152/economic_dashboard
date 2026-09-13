@@ -6,6 +6,7 @@ from app.db import get_db
 from app.models import DataPoint, Indicator
 from app.schemas import DataPointOut, ForecastOut
 from app.services.forecast_service import forecast_series, infer_forecast_cadence
+from app.services.indicator_series import constrain_current_series
 
 router = APIRouter(prefix="/api", tags=["forecast"])
 
@@ -27,9 +28,9 @@ def get_forecast(
             detail="event-driven policy rates are not suitable for mechanical ARIMA forecasts",
         )
 
-    points = db.execute(
-        select(DataPoint).where(DataPoint.indicator_code == code).order_by(DataPoint.date)
-    ).scalars().all()
+    query = select(DataPoint).where(DataPoint.indicator_code == code)
+    query = constrain_current_series(query, code).order_by(DataPoint.date)
+    points = db.execute(query).scalars().all()
 
     if len(points) < 10:
         raise HTTPException(status_code=422, detail="not enough history to forecast yet")

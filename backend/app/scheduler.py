@@ -10,10 +10,10 @@ logger = logging.getLogger(__name__)
 scheduler = BackgroundScheduler()
 
 
-def scheduled_refresh():
+def scheduled_refresh(trigger: str = "scheduled"):
     db = SessionLocal()
     try:
-        results = refresh_all_indicators(db)
+        results = refresh_all_indicators(db, trigger=trigger)
         logger.info("scheduled refresh done: %s", results)
     except Exception:
         logger.exception("scheduled refresh failed")

@@ -90,6 +90,39 @@ class IndicatorVintageTests(unittest.TestCase):
         self.assertEqual(point.source_url, "https://example.test/release")
         self.assertEqual(self.vintage_count(), 1)
 
+    def test_equal_sparse_published_row_does_not_clear_metadata(self) -> None:
+        upsert_points(self.db, "TEST", self.frame(1.0))
+        sparse = pd.DataFrame(
+            [
+                {
+                    "date": dt.date(2026, 1, 1),
+                    "value": 1.0,
+                    "release_date": None,
+                    "available_at": None,
+                    "source_url": None,
+                    "status": "published",
+                }
+            ]
+        )
+
+        self.assertEqual(upsert_points(self.db, "TEST", sparse), 0)
+        point = self.db.scalar(select(DataPoint))
+        self.assertEqual(point.release_date, dt.date(2026, 2, 1))
+        self.assertEqual(point.available_at, dt.datetime(2026, 2, 1, 9, 30))
+        self.assertEqual(point.source_url, "https://example.test/release")
+        self.assertEqual(self.vintage_count(), 1)
+
+    def test_formula_version_is_persisted_in_current_and_vintage_rows(self) -> None:
+        frame = self.frame(1.0)
+        frame["status"] = "derived_backfill"
+        frame["formula_version"] = "1.0.0"
+
+        self.assertEqual(upsert_points(self.db, "TEST", frame), 1)
+        point = self.db.scalar(select(DataPoint))
+        vintage = self.db.scalar(select(DataPointVintage))
+        self.assertEqual(point.formula_version, "1.0.0")
+        self.assertEqual(vintage.formula_version, "1.0.0")
+
 
 if __name__ == "__main__":
     unittest.main()

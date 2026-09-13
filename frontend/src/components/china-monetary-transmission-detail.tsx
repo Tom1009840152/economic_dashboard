@@ -138,6 +138,14 @@ function SignalCard({
         </div>
         <div className="mt-4 rounded-lg bg-muted/65 px-3 py-2 font-mono text-xs leading-5">
           {signal.formula}
+          {signal.formula_version ? (
+            <div className="mt-1 font-sans text-[11px] text-muted-foreground">
+              公式 v{signal.formula_version}
+              {signal.data_origin
+                ? ` · ${signal.data_origin === "stored" ? "版本化存库结果" : "按存库原始数据即时重算"}`
+                : ""}
+            </div>
+          ) : null}
         </div>
         <p className="mt-3 text-xs leading-5 text-muted-foreground">
           {signal.interpretation}

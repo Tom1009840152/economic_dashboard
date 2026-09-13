@@ -2,10 +2,12 @@ import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 import {
   getEmployment,
+  getChinaActivityMatrix,
   getChinaMonetaryTransmission,
   getIndicators,
   getInternationalEmployment,
   getPopulation,
+  type ActivityMatrixDashboard,
   type EmploymentDashboard,
   type IndicatorSummary,
   type InternationalEmploymentDashboard,
@@ -22,6 +24,7 @@ import { EmploymentSummaryCard } from "@/components/employment-summary-card";
 import { USEmploymentSummaryCard } from "@/components/us-employment-summary-card";
 import { InternationalEmploymentSummaryCard } from "@/components/international-employment-summary-card";
 import { MonetaryTransmissionSummaryCard } from "@/components/monetary-transmission-summary-card";
+import { ChinaActivityMatrixSummaryCard } from "@/components/china-activity-matrix-summary-card";
 import {
   COUNTRY_SECTIONS,
   defaultSectionForRegion,
@@ -182,12 +185,20 @@ export default async function CountryPage(props: PageProps<"/country/[region]">)
   const needsPeople = countrySection === "people";
   const needsAnalysis = region === "cn" && countrySection === "analysis";
 
-  const [indicators, population, employment, internationalEmployment, monetaryTransmission] = await Promise.all([
+  const [
+    indicators,
+    population,
+    employment,
+    internationalEmployment,
+    monetaryTransmission,
+    activityMatrix,
+  ] = await Promise.all([
     needsIndicators ? getIndicators(meta.code) : Promise.resolve([]),
     needsPeople ? getPopulation(meta.code).catch(() => null) : Promise.resolve(null),
     needsPeople && region === "cn" ? getEmployment("CN").catch(() => null) : Promise.resolve(null),
     needsPeople && region !== "cn" ? getInternationalEmployment(meta.code).catch(() => null) : Promise.resolve(null),
     needsAnalysis ? getChinaMonetaryTransmission().catch(() => null) : Promise.resolve(null),
+    needsAnalysis ? getChinaActivityMatrix(24).catch(() => null) : Promise.resolve(null),
   ]);
 
   // 国债收益率、货币供给这两类，一个国家会有好几个细分指标，不逐个铺卡片，
@@ -250,7 +261,7 @@ export default async function CountryPage(props: PageProps<"/country/[region]">)
     ? sections.filter((group) => group.id === selectedGroup)
     : sections;
   const entryCount = countrySection === "analysis"
-    ? (monetaryTransmission ? 1 : 0)
+    ? Number(Boolean(activityMatrix)) + Number(Boolean(monetaryTransmission))
     : visibleSections.reduce((total, current) => total + current.cards.length, 0);
 
   return (
@@ -314,7 +325,7 @@ export default async function CountryPage(props: PageProps<"/country/[region]">)
       )}
 
       <div className="space-y-12 pb-8">
-        {monetaryTransmission && countrySection === "analysis" && (
+        {(activityMatrix || monetaryTransmission) && countrySection === "analysis" && (
           <section id="analysis" className="scroll-mt-24 pt-10">
             {!countrySection && (
               <div className="mb-4 flex items-start gap-3">
@@ -329,11 +340,22 @@ export default async function CountryPage(props: PageProps<"/country/[region]">)
                 </div>
               </div>
             )}
-            <FadeIn>
-              <MonetaryTransmissionSummaryCard
-                data={monetaryTransmission as MonetaryTransmissionDashboard}
-              />
-            </FadeIn>
+            <div className="space-y-4">
+              {activityMatrix && (
+                <FadeIn>
+                  <ChinaActivityMatrixSummaryCard
+                    data={activityMatrix as ActivityMatrixDashboard}
+                  />
+                </FadeIn>
+              )}
+              {monetaryTransmission && (
+                <FadeIn delay={0.04}>
+                  <MonetaryTransmissionSummaryCard
+                    data={monetaryTransmission as MonetaryTransmissionDashboard}
+                  />
+                </FadeIn>
+              )}
+            </div>
           </section>
         )}
 

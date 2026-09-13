@@ -118,11 +118,11 @@ Statistics 的月度季调序列，并统一为15—64岁口径。除总体和�
 | CN_PPI | PPI同比 | `ak.macro_china_ppi` | 月度，取"当月同比增长" |
 | CN_PMI | 制造业PMI | `ak.macro_china_pmi` | 月度，取"制造业-指数" |
 | CN_NMI | 非制造业商务活动指数 | `ak.macro_china_pmi` | 月度，取"非制造业-指数"；50为荣枯线 |
-| CN_IP | 规上工业增加值同比 | 国家统计局数据发布页 | 月度可比价同比，不等于全部工业企业产出 |
+| CN_IP | 规上工业增加值同比 | 国家统计局数据发布页；`ak.macro_china_gyzjz`（东方财富镜像）补历史 | 月度可比价同比，不等于全部工业企业产出；官方近期值优先，镜像补至 2008-02 且发布时点未知；1—2 月合并值记在 2 月，1 月不插值 |
 | CN_CLI | 综合领先指标 | OECD Data Explorer `DF_CLI` | 月度，振幅调整，长期均值=100 |
 | CN_CORE_CPI | 核心CPI同比 | 国家统计局月度CPI/PPI解读稿 | 剔除食品和能源；官方发布值，不自行估算权重 |
-| CN_TSF | 社会融资规模增量 | `ak.macro_china_shrzgm` | 月度，YYYYMM 格式日期 |
-| CN_GDP | GDP同比 | `ak.macro_china_gdp_yearly` | 季度 |
+| CN_TSF | 社会融资规模增量 | 人民银行月度发布页；商务部镜像补历史 | 当前官方累计值按相邻月份差分，历史镜像明确标记；覆盖至2026-07 |
+| CN_GDP | GDP累计同比 | `ak.macro_china_gdp` | 季度末定位的年内累计实际GDP同比，不是单季同比；A3主验证需另构造单季同比或季调环比 |
 | CN_RETAIL | 社会消费品零售总额同比 | `ak.macro_china_consumer_goods_retail` | 月度 |
 | CN_FAI | 固定资产投资同比 | `ak.macro_china_gdzctz` | 月度 |
 | CN_EXPORTS | 出口同比 | `ak.macro_china_exports_yoy` | 日频发布节奏，海关总署 |
@@ -133,7 +133,7 @@ Statistics 的月度季调序列，并统一为15—64岁口径。除总体和�
 | CN_2Y/5Y/10Y/30Y | 国债收益率 | `ak.bond_zh_us_rate` | 见下方"国债收益率数据清洗"专节 |
 | CN_10Y2Y | 10年-2年利差 | 同上接口直接取列 | 经典衰退先行信号 |
 | CN_M0/M1/M2（各带 _ABS/_YOY/_MOM） | 货币供给 | `ak.macro_china_money_supply` | 四个指标（M0/M1/M2/剪刀差）共用一次接口调用，见下方"货币供给"专节 |
-| CN_M1M2 | M1-M2剪刀差 | 同上，`M1同比 - M2同比` 现场计算 | 反映企业资金活化程度 |
+| CN_M1M2 | M1-M2剪刀差 | 人民银行2024年新M1可比回溯 + 同表M2，统一公式服务 `M1同比 - M2同比` | 仅2024-01起可比；处理版本1.1.0；反映企业资金活化程度 |
 
 ### 美国宏观（akshare + FRED 混用）
 
@@ -143,9 +143,9 @@ Statistics 的月度季调序列，并统一为15—64岁口径。除总体和�
 | US_CORE_CPI | 核心CPI同比 | OECD Data Explorer | 剔除食品和能源，同比 |
 | US_IP | 工业生产同比 | FRED `INDPRO` | 月度季调指数计算同比 |
 | US_CLI | 综合领先指标 | OECD Data Explorer `DF_CLI` | 振幅调整，长期均值=100 |
-| US_NFP | 非农就业变动 | akshare `ak.macro_usa_non_farm` | 单位：万人 |
-| US_FFR | 联邦基金利率 | akshare `ak.macro_bank_usa_interest_rate` | |
-| US_GDP | GDP环比折年率 | akshare `ak.macro_usa_gdp_monthly` | |
+| US_NFP | 非农就业变动 | FRED `PAYEMS` | 月度一阶差分并由千人换算为万人 |
+| US_FFR | 联邦基金利率 | FRED `FEDFUNDS` | 月度有效联邦基金利率 |
+| US_GDP | GDP环比折年率 | FRED `A191RL1Q225SBEA` | 季度实际GDP环比折年率，不是同比 |
 | US_2Y/5Y/10Y/30Y、US_10Y2Y | 国债收益率+利差 | akshare `ak.bond_zh_us_rate`（和中国共用同一个接口，分不同列） | |
 | US_BASE_ABS/YOY/MOM | 货币基础（顶替"美国M0"） | **FRED** `BOGMBASE` | 见下方"美国货币供给"专节 |
 | US_M1_ABS/YOY/MOM | M1 | **FRED** `M1SL` | 2020-05 有统计口径断层，见专节 |
@@ -195,7 +195,7 @@ Statistics 的月度季调序列，并统一为15—64岁口径。除总体和�
 
 ## 5. 中国货币供给（M0/M1/M2）
 
-数据源：`ak.macro_china_money_supply()`，一次调用能拿到 M0/M1/M2 的数量（亿元）、同比、环比，所以 `CN_M0_ABS/YOY/MOM`、`CN_M1_*`、`CN_M2_*`、`CN_M1M2`（M1-M2剪刀差，两个同比相减现场算）这10个指标共用同一份原始数据，用60秒 TTL 内存缓存合并成一次网络请求，避免每次刷新发10次重复请求（`_raw_money_supply_df()`）。
+数据源：`ak.macro_china_money_supply()`，一次调用能拿到 M0/M1/M2 的数量（亿元）、同比、环比，所以 `CN_M0_ABS/YOY/MOM`、`CN_M1_*`、`CN_M2_*`、`CN_M1M2` 共用同一份原始数据，用60秒 TTL 内存缓存合并成一次网络请求，避免每次刷新发10次重复请求（`_raw_money_supply_df()`）。人民银行自2025-01启用加入个人活期存款和非银支付机构客户备付金的新M1定义；因聚合表曾出现2024余额已回溯、同比仍为旧口径的混合状态，采集器固定用[人民银行公布的2024可比回溯表](https://www.pbc.gov.cn/diaochatongjisi/attachDir/2025/11/2025111913535682666.pdf)覆盖M1余额和同比，并由可比余额重算2024-02至12月环比；2024-01环比因缺少新口径2023-12余额而不输出。`CN_M1M2` 只从2024-01起构造，2023及以前旧定义数据不进入新口径模型校准。
 
 前端把这10个指标合并展示成一张"货币供给"汇总卡：点进去顶部切换 M0/M1/M2 + 剪刀差，图内切换绝对值/同比/环比，经济学解读文案在切换 M0/M1/M2 时不换（因为讲的是同一套传导机制），只在切到剪刀差 tab 时换成剪刀差专属的解读。
 

@@ -1,6 +1,18 @@
 from datetime import date, datetime
 
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, Numeric, String, UniqueConstraint, func
+from sqlalchemy import (
+    Boolean,
+    Date,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -40,6 +52,7 @@ class DataPoint(Base):
     retrieved_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     source_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
     status: Mapped[str] = mapped_column(String(32), default="published")
+    formula_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
     version: Mapped[int] = mapped_column(Integer, default=1)
 
     indicator: Mapped["Indicator"] = relationship(back_populates="data_points")
@@ -59,6 +72,13 @@ class DataPointVintage(Base):
     __tablename__ = "data_point_vintages"
     __table_args__ = (
         UniqueConstraint("data_point_id", "version", name="uq_data_point_vintage_version"),
+        Index(
+            "ix_vintages_as_of_lookup",
+            "indicator_code",
+            "available_at",
+            "date",
+            "version",
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
@@ -73,7 +93,56 @@ class DataPointVintage(Base):
     retrieved_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     source_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
     status: Mapped[str] = mapped_column(String(32), default="published")
+    formula_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
     version: Mapped[int] = mapped_column(Integer)
 
     data_point: Mapped["DataPoint"] = relationship(back_populates="vintages")
     indicator: Mapped["Indicator"] = relationship(back_populates="data_point_vintages")
+
+
+class RefreshRun(Base):
+    """One manual, scheduled, or startup refresh attempt."""
+
+    __tablename__ = "refresh_runs"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    trigger: Mapped[str] = mapped_column(String(16))
+    status: Mapped[str] = mapped_column(String(24), default="running", index=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), index=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    total_indicators: Mapped[int] = mapped_column(Integer, default=0)
+    success_count: Mapped[int] = mapped_column(Integer, default=0)
+    no_change_count: Mapped[int] = mapped_column(Integer, default=0)
+    failed_count: Mapped[int] = mapped_column(Integer, default=0)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    results: Mapped[list["RefreshResult"]] = relationship(
+        back_populates="run", cascade="all, delete-orphan", order_by="RefreshResult.id"
+    )
+
+
+class RefreshResult(Base):
+    """Per-indicator outcome, including validation failures that were not written."""
+
+    __tablename__ = "refresh_results"
+    __table_args__ = (
+        UniqueConstraint("run_id", "indicator_code", name="uq_refresh_result_run_indicator"),
+        Index("ix_refresh_results_indicator_finished", "indicator_code", "finished_at"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    run_id: Mapped[int] = mapped_column(
+        ForeignKey("refresh_runs.id", ondelete="CASCADE"), index=True
+    )
+    indicator_code: Mapped[str] = mapped_column(String(32), index=True)
+    status: Mapped[str] = mapped_column(String(16), index=True)
+    row_count: Mapped[int] = mapped_column(Integer, default=0)
+    changed_count: Mapped[int] = mapped_column(Integer, default=0)
+    duration_ms: Mapped[int] = mapped_column(Integer, default=0)
+    started_at: Mapped[datetime] = mapped_column(DateTime)
+    finished_at: Mapped[datetime] = mapped_column(DateTime)
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    quality_issues: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    run: Mapped["RefreshRun"] = relationship(back_populates="results")

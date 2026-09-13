@@ -2,8 +2,9 @@
 
 Core CPI is stated in the monthly NBS commentary but is not exposed as a stable
 series in the public data table, so this fetcher reads the official releases.
-Only a rolling recent window is requested; the dashboard database retains older
-observations after each upsert.
+Only a rolling recent official window is requested. CN_IP joins that window to
+an explicitly labelled transport-mirror backfill; other series retain older
+observations in the dashboard database after each upsert.
 """
 
 import datetime as dt
@@ -134,7 +135,13 @@ def _load_core_cpi() -> pd.DataFrame:
 
 
 def fetch_cn_industrial_production() -> pd.DataFrame:
-    return _cached("industrial", _load_industrial).reset_index(drop=True)
+    # The NBS archive is deliberately a rolling official window. Join it to
+    # the long transport-mirror history while retaining official precedence on
+    # overlaps and leaving mirror publication time unknown.
+    from app.fetchers.china_cycle_data import _merge_cn_ip_history
+
+    official = _cached("industrial", _load_industrial).reset_index(drop=True)
+    return _merge_cn_ip_history(official)
 
 
 def fetch_cn_core_cpi() -> pd.DataFrame:

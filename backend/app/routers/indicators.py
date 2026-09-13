@@ -6,11 +6,53 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db import get_db
+from app.indicator_catalog import get_indicator_catalog
+from app.indicator_defs import INDICATOR_DEFS
 from app.models import DataPoint, DataPointVintage, Indicator
-from app.schemas import DataPointOut, DataPointVintageOut, IndicatorHistory, IndicatorSummary
+from app.schemas import (
+    DataPointOut,
+    DataPointVintageOut,
+    IndicatorCatalogOut,
+    IndicatorHistory,
+    IndicatorSummary,
+)
+from app.services.derived_metrics import DERIVED_METRIC_SPECS
+from app.services.indicator_series import constrain_current_series, current_series_points
 from app.services.indicator_service import refresh_all_indicators
 
 router = APIRouter(prefix="/api", tags=["indicators"])
+
+
+@router.get("/indicator-catalog", response_model=list[IndicatorCatalogOut])
+def indicator_catalog(
+    region: str | None = Query(default=None, description="按国家/地区筛选"),
+):
+    """Expose the validated analytical dictionary used by models and UI."""
+
+    catalog = get_indicator_catalog()
+    normalized_region = region.upper() if region else None
+    rows = []
+    for definition in INDICATOR_DEFS:
+        if normalized_region and definition["region"] != normalized_region:
+            continue
+        entry = catalog[definition["code"]]
+        formula = DERIVED_METRIC_SPECS.get(entry.code)
+        rows.append(
+            {
+                "code": entry.code,
+                "name": definition["name"],
+                "category": definition["category"],
+                "region": definition["region"],
+                "unit": definition["unit"],
+                "is_visible": definition.get("is_visible", True),
+                "sort_order": definition["sort_order"],
+                **entry.as_dict(),
+                "formula": formula.formula if formula else None,
+                "formula_version": formula.version if formula else None,
+                "input_codes": list(formula.input_codes) if formula else None,
+            }
+        )
+    return rows
 
 
 def _freshness(points: list[DataPoint], code: str) -> tuple[str, str]:
@@ -57,7 +99,7 @@ def list_indicators(
     indicators = db.execute(query).scalars().all()
     summaries = []
     for ind in indicators:
-        points = sorted(ind.data_points, key=lambda p: p.date)
+        points = sorted(current_series_points(ind.code, ind.data_points), key=lambda p: p.date)
         latest = points[-1] if points else None
         prev = points[-2] if len(points) > 1 else None
         change_pct = None
@@ -92,6 +134,10 @@ def get_history(
     code: str,
     start: date | None = None,
     end: date | None = None,
+    include_legacy: bool = Query(
+        default=False,
+        description="显式包含旧公式版本或统计口径断点前的数据",
+    ),
     db: Session = Depends(get_db),
 ):
     indicator = db.get(Indicator, code)
@@ -99,6 +145,8 @@ def get_history(
         raise HTTPException(status_code=404, detail="indicator not found")
 
     query = select(DataPoint).where(DataPoint.indicator_code == code)
+    if not include_legacy:
+        query = constrain_current_series(query, code)
     if start:
         query = query.where(DataPoint.date >= start)
     if end:

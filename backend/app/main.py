@@ -6,7 +6,16 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.db import SessionLocal
-from app.routers import analysis, employment, forecast, forex, indicators, population
+from app.routers import (
+    analysis,
+    as_of,
+    employment,
+    forecast,
+    forex,
+    indicators,
+    population,
+    refresh_status,
+)
 from app.scheduler import scheduled_refresh, start_scheduler
 from app.services.indicator_service import ensure_indicators_seeded
 
@@ -27,6 +36,8 @@ app.include_router(forex.router)
 app.include_router(population.router)
 app.include_router(employment.router)
 app.include_router(analysis.router)
+app.include_router(as_of.router)
+app.include_router(refresh_status.router)
 
 
 @app.on_event("startup")
@@ -38,7 +49,11 @@ def on_startup():
         db.close()
 
     start_scheduler()
-    threading.Thread(target=scheduled_refresh, daemon=True).start()
+    threading.Thread(
+        target=scheduled_refresh,
+        kwargs={"trigger": "startup"},
+        daemon=True,
+    ).start()
 
 
 @app.get("/health")

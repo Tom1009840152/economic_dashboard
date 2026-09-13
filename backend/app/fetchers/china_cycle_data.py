@@ -12,16 +12,22 @@ import datetime as dt
 import logging
 import re
 import time
-from bisect import bisect_right
 from functools import lru_cache
-from io import StringIO
+from io import BytesIO, StringIO
 from urllib.parse import urljoin
 
 import akshare as ak
 import pandas as pd
+import pdfplumber
 import requests
 from curl_cffi import requests as curl_requests
 from lxml import html as lxml_html
+
+from app.services.derived_metrics import (
+    DERIVED_METRIC_SPECS,
+    calculate_credit_metrics,
+    calculate_fiscal_metrics,
+)
 
 
 _HEADERS = {
@@ -34,11 +40,40 @@ _HEADERS = {
 _EASTMONEY_API = "https://datacenter-web.eastmoney.com/api/data/v1/get"
 _EASTMONEY_CONSUMER_URL = "https://data.eastmoney.com/cjsj/xfzxx.html"
 _EASTMONEY_HOUSE_URL = "https://data.eastmoney.com/cjsj/newhouse.html"
+_EASTMONEY_INDUSTRIAL_URL = "https://data.eastmoney.com/cjsj/gyzjz.html"
 _MOFCOM_TSF_URL = "https://data.mofcom.gov.cn/gnmy/shrzgm.shtml"
 _NBS_RELEASE_BASE = "https://www.stats.gov.cn/sj/zxfb/"
 _PBOC_RELEASE_BASE = "https://www.pbc.gov.cn/diaochatongjisi/116219/116225/"
 _MOF_FISCAL_BASE = "https://gks.mof.gov.cn/tongjishuju/"
-_MOF_BOND_BASE = "https://zwgls.mof.gov.cn/tjsj/"
+_MOF_BOND_BASE = "https://yss.mof.gov.cn/zhuantilanmu/dfzgl/sjtj/"
+_PBOC_TSF_STOCK_PDFS = (
+    # This official backfill contains 36 monthly rows from 2017-01 to 2019-12.
+    (
+        "https://www.pbc.gov.cn/diaochatongjisi/attachDir/2025/11/"
+        "2025110511314347909.pdf",
+        dt.date(2017, 1, 1),
+    ),
+    (
+        "https://www.pbc.gov.cn/diaochatongjisi/fileDir/resource/cms/2024/01/"
+        "2024011510325158987.pdf",
+        None,
+    ),
+    (
+        "https://www.pbc.gov.cn/diaochatongjisi/fileDir/resource/cms/2024/02/"
+        "2024021917193173502.pdf",
+        None,
+    ),
+    (
+        "https://www.pbc.gov.cn/diaochatongjisi/attachDir/2025/11/"
+        "2025111416274070278.pdf",
+        None,
+    ),
+    (
+        "https://www.pbc.gov.cn/diaochatongjisi/attachDir/2025/11/"
+        "2025111913535780670.pdf",
+        None,
+    ),
+)
 _CACHE_TTL = 6 * 60 * 60
 _cache: dict[str, tuple[float, object]] = {}
 logger = logging.getLogger(__name__)
@@ -63,6 +98,12 @@ def _request_text(url: str) -> str:
     response.raise_for_status()
     response.encoding = response.apparent_encoding or "utf-8"
     return response.text
+
+
+def _request_bytes(url: str) -> bytes:
+    response = requests.get(url, headers=_HEADERS, timeout=30)
+    response.raise_for_status()
+    return response.content
 
 
 def _get_nbs_text(url: str) -> str:
@@ -111,6 +152,7 @@ def _frame(rows: list[dict]) -> pd.DataFrame:
         "available_at",
         "source_url",
         "status",
+        "formula_version",
     ]
     if not rows:
         return pd.DataFrame(columns=columns)
@@ -156,6 +198,83 @@ def _merge_bundles(*bundles: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]
         )
         for code in codes
     }
+
+
+def _load_cn_ip_mirror_backfill() -> pd.DataFrame:
+    """Load the long industrial-production history from a transport mirror.
+
+    AkShare exposes a column named ``发布时间`` for this dataset, but its values
+    are the first day of the observation month rather than recoverable release
+    timestamps. Deliberately ignore it: mirror observations can support the
+    final-value matrix, but must remain unavailable to strict pseudo-real-time
+    backtests.
+    """
+    raw = ak.macro_china_gyzjz()
+    required = {"月份", "同比增长", "累计增长"}
+    missing = required.difference(raw.columns)
+    if missing:
+        raise KeyError(f"industrial-production mirror missing columns: {sorted(missing)}")
+
+    rows: list[dict] = []
+    for _, row in raw.iterrows():
+        match = re.fullmatch(r"(20\d{2})年(\d{1,2})月份?", str(row["月份"]).strip())
+        if not match:
+            continue
+        observed = dt.date(int(match.group(1)), int(match.group(2)), 1)
+        if observed < dt.date(2008, 2, 1):
+            continue
+        value = pd.to_numeric(row["同比增长"], errors="coerce")
+        # Since 2015, January-February is released only as a combined rate. The
+        # mirror leaves the single-month field blank and stores that legitimate
+        # combined observation in the cumulative column. Keep it at February;
+        # never manufacture a January value from it.
+        if pd.isna(value) and observed.month == 2:
+            value = pd.to_numeric(row["累计增长"], errors="coerce")
+        if pd.isna(value):
+            continue
+        rows.append(
+            {
+                "date": observed,
+                "value": float(value),
+                "release_date": None,
+                "available_at": None,
+                "source_url": _EASTMONEY_INDUSTRIAL_URL,
+                "status": "mirror_backfill",
+            }
+        )
+    return _frame(rows)
+
+
+def _merge_cn_ip_history(
+    official: pd.DataFrame, mirror: pd.DataFrame | None = None
+) -> pd.DataFrame:
+    """Join long mirror history to rolling official observations.
+
+    The official frame is annotated before merging so ``_frame``'s status
+    priority resolves every overlap in favour of the NBS observation, even if
+    callers provide only the legacy ``date``/``value`` pair.
+    """
+    official_rows: list[dict] = []
+    for row in official.to_dict("records"):
+        official_rows.append(
+            {
+                **row,
+                "source_url": row.get("source_url") or _NBS_RELEASE_BASE,
+                "status": "published",
+            }
+        )
+    if mirror is None:
+        mirror = _cached("china_ip_mirror_backfill", _load_cn_ip_mirror_backfill)
+    return _frame([*mirror.to_dict("records"), *official_rows])
+
+
+def fetch_cn_industrial_production_history() -> pd.DataFrame:
+    """Return official recent CN_IP observations plus the mirror backfill."""
+    # Lazy import avoids a module cycle while keeping the existing NBS parser as
+    # the single owner of current official observations.
+    from app.fetchers.nbs_cycle import _load_industrial
+
+    return _merge_cn_ip_history(_load_industrial())
 
 
 def _period_date(title: str, body: str = "") -> dt.date | None:
@@ -584,6 +703,7 @@ def _load_real_estate_activity(page_count: int = 14) -> dict[str, pd.DataFrame]:
 def _load_tsf_components() -> dict[str, pd.DataFrame]:
     raw = ak.macro_china_shrzgm()
     mapping = {
+        "CN_TSF": "社会融资规模增量",
         "CN_TSF_RMB_LOANS_FLOW": "其中-人民币贷款",
         "CN_CORP_BOND_FINANCING": "其中-企业债券",
     }
@@ -606,28 +726,227 @@ def _load_tsf_components() -> dict[str, pd.DataFrame]:
     return _series_frames(output)
 
 
-@lru_cache(maxsize=1)
-def _pboc_release_catalog() -> tuple[tuple[str, str], ...]:
-    source = _request_text(urljoin(_PBOC_RELEASE_BASE, "index.html"))
-    document = lxml_html.fromstring(source)
+@lru_cache(maxsize=4)
+def _pboc_release_catalog(page_count: int = 2) -> tuple[tuple[str, str], ...]:
+    """Return current PBOC credit releases plus the immediately preceding page.
+
+    The PBOC archive does not use ``index_1.html``. Its actual pagination is
+    ``11871-1.html``. Two pages cover the overlap needed to join the official
+    current releases to the longer transport-mirror history without crawling
+    hundreds of old detail pages on every refresh.
+    """
     found: dict[str, str] = {}
-    for anchor in document.xpath("//a[@href]"):
-        title = " ".join(anchor.text_content().split())
-        if "金融统计数据报告" in title or "社会融资规模" in title:
-            found[urljoin(_PBOC_RELEASE_BASE, anchor.get("href"))] = title
+    index_urls = [urljoin(_PBOC_RELEASE_BASE, "index.html")]
+    index_urls.extend(
+        urljoin(_PBOC_RELEASE_BASE, f"11871-{page}.html")
+        for page in range(1, page_count)
+    )
+    for page_url in index_urls:
+        try:
+            source = _request_text(page_url)
+        except Exception:
+            logger.warning("PBOC archive index failed: %s", page_url, exc_info=True)
+            continue
+        document = lxml_html.fromstring(source)
+        for anchor in document.xpath("//a[@href]"):
+            title = " ".join(anchor.text_content().split())
+            is_credit_release = (
+                "金融统计数据报告" in title
+                or (
+                    "社会融资规模" in title
+                    and ("存量" in title or "增量" in title)
+                )
+            )
+            if is_credit_release and "地区社会融资规模" not in title:
+                found[urljoin(page_url, anchor.get("href"))] = title
     return tuple(found.items())
 
 
-def _load_pboc_credit() -> dict[str, pd.DataFrame]:
+def _amount_in_100m(text: str, label: str) -> float | None:
+    match = re.search(
+        rf"{label}\s*(?:为)?\s*(增加|减少)?\s*([\d.]+)\s*(万亿元|亿元)",
+        text,
+    )
+    if not match:
+        return None
+    value = float(match.group(2)) * (10000 if match.group(3) == "万亿元" else 1)
+    return -value if match.group(1) == "减少" else value
+
+
+def _credit_ytd_values(text: str) -> dict[str, float]:
+    """Extract cumulative AFRE components, normalized to 100 million yuan."""
+    anchor = re.search(r"社会融资规模增量累计为\s*[\d.]+\s*(?:万亿元|亿元)", text)
+    if not anchor:
+        return {}
+    # Component values follow the headline. Limiting the segment prevents a
+    # similarly named stock item or bank-loan paragraph from being captured.
+    segment = text[anchor.start() : anchor.start() + 1800]
+    patterns = {
+        "CN_TSF": r"社会融资规模增量累计",
+        "CN_TSF_RMB_LOANS_FLOW": r"对实体经济发放的人民币贷款",
+        "CN_CORP_BOND_FINANCING": r"企业债券净融资",
+        "CN_GOV_BOND_FINANCING": r"政府债券净融资",
+    }
+    return {
+        code: value
+        for code, pattern in patterns.items()
+        if (value := _amount_in_100m(segment, pattern)) is not None
+    }
+
+
+def _derive_monthly_from_ytd(rows: list[dict]) -> list[dict]:
+    """Difference only adjacent published cumulative observations.
+
+    The resulting month's visibility is the current release's visibility, not
+    the prior release's. Missing months are deliberately left missing rather
+    than differencing across a gap.
+    """
+    by_period = {row["date"]: row for row in rows}
+    monthly: list[dict] = []
+    for observed, row in sorted(by_period.items()):
+        if observed.month == 1:
+            value = row["value"]
+        else:
+            previous = by_period.get(dt.date(observed.year, observed.month - 1, 1))
+            if previous is None:
+                continue
+            value = row["value"] - previous["value"]
+        monthly.append({**row, "value": round(value, 6), "status": "derived"})
+    return monthly
+
+
+def _numeric_line_before(lines: list[str], anchor: str) -> list[float]:
+    normalized_anchor = re.sub(r"\s+", "", anchor).casefold()
+    for index, line in enumerate(lines):
+        if re.sub(r"\s+", "", line).casefold() != normalized_anchor:
+            continue
+        for candidate in reversed(lines[:index]):
+            values = [
+                float(value)
+                for value in re.findall(r"(?<![\w.])-?\d+(?:\.\d+)?", candidate)
+            ]
+            if len(values) >= 2:
+                return values
+    return []
+
+
+def _stock_rows_from_pdf_text(text: str, source_url: str) -> dict[str, list[dict]]:
+    months: list[dt.date] = []
+    for year, month in re.findall(r"(20\d{2})\.(\d{1,2})(?!\d)", text):
+        observed = dt.date(int(year), int(month), 1)
+        if observed not in months:
+            months.append(observed)
+        if len(months) == 12:
+            break
+    total = _numeric_line_before(text.splitlines(), "AFRE(stock)")
+    rmb = _numeric_line_before(text.splitlines(), "RMB loans")
+    total_growth = total[1::2]
+    rmb_growth = rmb[1::2]
+    output = {"CN_TSF_STOCK_YOY": [], "CN_TSF_RMB_LOAN_STOCK_YOY": []}
+    for code, values in (
+        ("CN_TSF_STOCK_YOY", total_growth),
+        ("CN_TSF_RMB_LOAN_STOCK_YOY", rmb_growth),
+    ):
+        for observed, value in zip(months, values, strict=False):
+            output[code].append(
+                {
+                    "date": observed,
+                    "value": value,
+                    "release_date": None,
+                    "available_at": None,
+                    "source_url": source_url,
+                    "status": "historical_backfill",
+                }
+            )
+    return output
+
+
+def _stock_rows_from_legacy_tables(
+    tables: list[list[list[str | None]]], source_url: str, start: dt.date
+) -> dict[str, list[dict]]:
+    candidates: list[list[tuple[float, float]]] = []
+    for table in tables:
+        values: list[tuple[float, float]] = []
+        for row in table[1:]:
+            numeric = [pd.to_numeric(cell, errors="coerce") for cell in row]
+            numeric = [float(value) for value in numeric if pd.notna(value)]
+            if len(numeric) >= 2:
+                values.append((numeric[0], numeric[1]))
+        if len(values) >= 24 and max(abs(pair[0]) for pair in values) < 200:
+            candidates.append(values)
+    output = {"CN_TSF_STOCK_YOY": [], "CN_TSF_RMB_LOAN_STOCK_YOY": []}
+    if not candidates:
+        return output
+    values = max(candidates, key=len)
+    for offset, (total_growth, rmb_growth) in enumerate(values):
+        month_index = start.month - 1 + offset
+        observed = dt.date(start.year + month_index // 12, month_index % 12 + 1, 1)
+        metadata = {
+            "date": observed,
+            "release_date": None,
+            "available_at": None,
+            "source_url": source_url,
+            "status": "historical_backfill",
+        }
+        output["CN_TSF_STOCK_YOY"].append({**metadata, "value": total_growth})
+        output["CN_TSF_RMB_LOAN_STOCK_YOY"].append({**metadata, "value": rmb_growth})
+    return output
+
+
+def _parse_pboc_stock_pdf(
+    content: bytes, source_url: str, legacy_start: dt.date | None = None
+) -> dict[str, list[dict]]:
+    with pdfplumber.open(BytesIO(content)) as document:
+        if legacy_start is not None:
+            tables = [table for page in document.pages for table in page.extract_tables()]
+            return _stock_rows_from_legacy_tables(tables, source_url, legacy_start)
+        text = "\n".join(page.extract_text() or "" for page in document.pages)
+    return _stock_rows_from_pdf_text(text, source_url)
+
+
+def _load_pboc_stock_archives() -> dict[str, pd.DataFrame]:
     output: dict[str, list[dict]] = {
         "CN_TSF_STOCK_YOY": [],
         "CN_TSF_RMB_LOAN_STOCK_YOY": [],
+    }
+    for source_url, legacy_start in _PBOC_TSF_STOCK_PDFS:
+        try:
+            parsed = _parse_pboc_stock_pdf(
+                _request_bytes(source_url), source_url, legacy_start
+            )
+        except Exception:
+            logger.warning("PBOC stock PDF failed: %s", source_url, exc_info=True)
+            continue
+        for code in output:
+            output[code].extend(parsed[code])
+    return _series_frames(output)
+
+
+def _load_pboc_credit() -> dict[str, pd.DataFrame]:
+    archives = _load_pboc_stock_archives()
+    output: dict[str, list[dict]] = {
+        "CN_TSF": [],
+        "CN_TSF_RMB_LOANS_FLOW": [],
+        "CN_CORP_BOND_FINANCING": [],
+        "CN_TSF_STOCK_YOY": archives["CN_TSF_STOCK_YOY"].to_dict("records"),
+        "CN_TSF_RMB_LOAN_STOCK_YOY": archives[
+            "CN_TSF_RMB_LOAN_STOCK_YOY"
+        ].to_dict("records"),
         "CN_GOV_BOND_FINANCING_YTD": [],
         "CN_GOV_BOND_FINANCING": [],
     }
-    ytd_rows: list[dict] = []
+    cumulative: dict[str, list[dict]] = {
+        "CN_TSF": [],
+        "CN_TSF_RMB_LOANS_FLOW": [],
+        "CN_CORP_BOND_FINANCING": [],
+        "CN_GOV_BOND_FINANCING": [],
+    }
     for source_url, title in _pboc_release_catalog():
-        source = _request_text(source_url)
+        try:
+            source = _request_text(source_url)
+        except Exception:
+            logger.warning("PBOC credit release failed: %s", source_url, exc_info=True)
+            continue
         text = _text_from_html(source)
         observed = _period_date(title, text)
         if observed is None:
@@ -648,27 +967,19 @@ def _load_pboc_credit() -> dict[str, pd.DataFrame]:
             output["CN_TSF_RMB_LOAN_STOCK_YOY"].append(
                 {"date": observed, "value": _signed(*rmb_stock.groups()), **metadata}
             )
-        government = re.search(r"政府债券净融资\s*([\d.]+)\s*(万亿元|亿元)", text)
-        if government:
-            value = float(government.group(1)) * (10000 if government.group(2) == "万亿元" else 1)
+        for code, value in _credit_ytd_values(text).items():
             row = {"date": observed, "value": value, **metadata}
-            output["CN_GOV_BOND_FINANCING_YTD"].append(row)
-            ytd_rows.append(row)
+            cumulative[code].append(row)
+            if code == "CN_GOV_BOND_FINANCING":
+                output["CN_GOV_BOND_FINANCING_YTD"].append(row)
 
-    by_period = {row["date"]: row for row in ytd_rows}
-    for observed, row in sorted(by_period.items()):
-        if observed.month == 1:
-            flow = row["value"]
-        else:
-            previous_date = dt.date(observed.year, observed.month - 1, 1)
-            previous = by_period.get(previous_date)
-            if previous is None:
-                continue
-            flow = row["value"] - previous["value"]
-        output["CN_GOV_BOND_FINANCING"].append(
-            {**row, "value": round(flow, 6), "status": "derived"}
-        )
+    for code, rows in cumulative.items():
+        output[code].extend(_derive_monthly_from_ytd(rows))
     return _series_frames(output)
+
+
+def _load_credit_data() -> dict[str, pd.DataFrame]:
+    return _merge_bundles(_load_tsf_components(), _load_pboc_credit())
 
 
 def _mof_catalog(base_url: str, pages: int = 2) -> tuple[tuple[str, str], ...]:
@@ -749,6 +1060,39 @@ def _load_fiscal(page_count: int = 2) -> dict[str, pd.DataFrame]:
     return _series_frames(output)
 
 
+def _special_bond_monthly_value(text: str, observed: dt.date) -> float | None:
+    """Extract the monthly special-bond issuance, never the YTD amount."""
+    month_anchor = re.search(
+        rf"{observed.year}年\s*{observed.month}月(?:份)?\s*[，,]", text
+    )
+    if not month_anchor:
+        return None
+    # MOF puts the current-month subsection before the cumulative subsection.
+    # Keep the window deliberately short so a 1-N month value cannot leak in.
+    segment = text[month_anchor.start() : month_anchor.start() + 900]
+    cumulative = re.search(
+        rf"(?:1\s*[-—–至]\s*{observed.month}月|{observed.year}年\s*1\s*[-—–至])",
+        segment[1:],
+    )
+    if cumulative:
+        segment = segment[: cumulative.start() + 1]
+
+    # Newer releases first state the newly issued total and then its general /
+    # special split. Older releases directly state total special issuance.
+    patterns = (
+        r"发行新增地方政府债券[\d.]+亿元.{0,80}?"
+        r"(?:其中[，,]?)?\s*(?:发行)?一般债券[\d.]+亿元[、，,;；]\s*"
+        r"(?:发行)?专项债券\s*([\d.]+)\s*亿元",
+        r"(?:其中[，,]?)?\s*发行专项债券\s*([\d.]+)\s*亿元",
+        r"(?:其中[，,]?)?\s*专项债券\s*([\d.]+)\s*亿元",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, segment)
+        if match:
+            return float(match.group(1))
+    return None
+
+
 def _load_special_bonds(page_count: int = 2) -> pd.DataFrame:
     rows: list[dict] = []
     for source_url, title in _mof_catalog(_MOF_BOND_BASE, page_count):
@@ -763,16 +1107,12 @@ def _load_special_bonds(page_count: int = 2) -> pd.DataFrame:
         observed = _period_date(title, text)
         if observed is None:
             continue
-        match = re.search(
-            rf"{observed.year}年{observed.month}月[，,].{{0,30}}?发行新增地方政府债券[\d.]+亿元[，,]"
-            r"其中一般债券[\d.]+亿元、专项债券([\d.]+)亿元",
-            text,
-        )
-        if match:
+        value = _special_bond_monthly_value(text, observed)
+        if value is not None:
             rows.append(
                 {
                     "date": observed,
-                    "value": float(match.group(1)),
+                    "value": value,
                     **_publication_metadata(source, source_url),
                     "status": "published",
                 }
@@ -912,99 +1252,76 @@ def _load_nominal_gdp() -> pd.DataFrame:
     return _frame(rows)
 
 
-def _trailing_nominal_gdp(gdp_ytd: pd.DataFrame) -> dict[dt.date, float]:
-    values = {row.date: float(row.value) for row in gdp_ytd.itertuples(index=False)}
-    trailing: dict[dt.date, float] = {}
-    for observed, current_ytd in sorted(values.items()):
-        previous_annual = values.get(dt.date(observed.year - 1, 12, 1))
-        previous_same_period = values.get(dt.date(observed.year - 1, observed.month, 1))
-        if previous_annual is None or previous_same_period is None:
-            continue
-        trailing[observed] = current_ytd + previous_annual - previous_same_period
-    return trailing
-
-
 def _load_credit_impulse() -> dict[str, pd.DataFrame]:
-    raw = ak.macro_china_shrzgm()
-    tsf = pd.DataFrame(
-        {
-            "period": pd.to_datetime(raw["月份"].astype(str), format="%Y%m", errors="coerce"),
-            "value": pd.to_numeric(raw["社会融资规模增量"], errors="coerce"),
-        }
+    raw = _cached("china_credit_data", _load_credit_data)["CN_TSF"]
+    tsf = pd.Series(
+        pd.to_numeric(raw["value"], errors="coerce").to_numpy(),
+        index=pd.to_datetime(raw["date"], errors="coerce"),
+        dtype="float64",
     ).dropna()
-    if tsf.empty:
+    nominal_gdp = _load_nominal_gdp()
+    gdp = pd.Series(
+        pd.to_numeric(nominal_gdp["value"], errors="coerce").to_numpy(),
+        index=pd.to_datetime(nominal_gdp["date"], errors="coerce"),
+        dtype="float64",
+    ).dropna()
+    if tsf.empty or gdp.empty:
         return _series_frames({"CN_CREDIT_INTENSITY": [], "CN_CREDIT_IMPULSE": []})
-    tsf["period"] = tsf["period"].dt.to_period("M")
-    monthly = tsf.drop_duplicates("period", keep="last").set_index("period")["value"].sort_index()
-    complete_index = pd.period_range(monthly.index.min(), monthly.index.max(), freq="M")
-    rolling_credit = monthly.reindex(complete_index).rolling(12, min_periods=12).sum()
+    intensity, impulse = calculate_credit_metrics(tsf, gdp)
 
-    gdp_quarters = _trailing_nominal_gdp(_load_nominal_gdp())
-    quarter_dates = sorted(gdp_quarters)
-    intensity: dict[dt.date, float] = {}
-    for period, credit in rolling_credit.dropna().items():
-        observed = dt.date(period.year, period.month, 1)
-        position = bisect_right(quarter_dates, observed) - 1
-        if position < 0:
-            continue
-        denominator = gdp_quarters[quarter_dates[position]]
-        if denominator:
-            intensity[observed] = float(credit / denominator * 100)
+    def rows(code: str, series: pd.Series) -> list[dict]:
+        return [
+            {
+                "date": dt.date(period.year, period.month, 1),
+                "value": float(value),
+                "source_url": "https://www.pbc.gov.cn/diaochatongjisi/",
+                "status": "derived_backfill",
+                "formula_version": DERIVED_METRIC_SPECS[code].version,
+            }
+            for period, value in series.items()
+        ]
 
-    metadata = {
-        "source_url": "https://www.pbc.gov.cn/diaochatongjisi/",
-        "status": "derived_backfill",
-    }
-    intensity_rows = [
-        {"date": observed, "value": value, **metadata}
-        for observed, value in sorted(intensity.items())
-    ]
-    impulse_rows = []
-    for observed, value in sorted(intensity.items()):
-        previous = intensity.get(dt.date(observed.year - 1, observed.month, 1))
-        if previous is not None:
-            impulse_rows.append(
-                {"date": observed, "value": value - previous, **metadata}
-            )
     return _series_frames(
-        {"CN_CREDIT_INTENSITY": intensity_rows, "CN_CREDIT_IMPULSE": impulse_rows}
+        {
+            "CN_CREDIT_INTENSITY": rows("CN_CREDIT_INTENSITY", intensity),
+            "CN_CREDIT_IMPULSE": rows("CN_CREDIT_IMPULSE", impulse),
+        }
     )
 
 
 def _build_fiscal_impulse(fiscal: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
     broad = fiscal["CN_FISCAL_BROAD_EXPENDITURE_YTD"]
-    broad_values = {
-        row.date: float(row.value)
-        for row in broad.itertuples(index=False)
-        if row.date.month in {3, 6, 9, 12}
-    }
-    gdp_values = {
-        row.date: float(row.value) for row in _load_nominal_gdp().itertuples(index=False)
-    }
-    intensity = {
-        observed: spending / gdp_values[observed] * 100
-        for observed, spending in broad_values.items()
-        if observed in gdp_values and gdp_values[observed]
-    }
-    metadata = {
-        "source_url": _MOF_FISCAL_BASE,
-        "status": "derived_backfill",
-    }
-    intensity_rows = [
-        {"date": observed, "value": value, **metadata}
-        for observed, value in sorted(intensity.items())
-    ]
-    impulse_rows = []
-    for observed, value in sorted(intensity.items()):
-        previous = intensity.get(dt.date(observed.year - 1, observed.month, 1))
-        if previous is not None:
-            impulse_rows.append(
-                {"date": observed, "value": value - previous, **metadata}
-            )
+    nominal_gdp = _load_nominal_gdp()
+    spending = pd.Series(
+        pd.to_numeric(broad["value"], errors="coerce").to_numpy(),
+        index=pd.to_datetime(broad["date"], errors="coerce"),
+        dtype="float64",
+    ).dropna()
+    gdp = pd.Series(
+        pd.to_numeric(nominal_gdp["value"], errors="coerce").to_numpy(),
+        index=pd.to_datetime(nominal_gdp["date"], errors="coerce"),
+        dtype="float64",
+    ).dropna()
+    intensity, impulse = calculate_fiscal_metrics(spending, gdp)
+
+    def rows(code: str, series: pd.Series) -> list[dict]:
+        return [
+            {
+                "date": dt.date(period.year, period.month, 1),
+                "value": float(value),
+                "source_url": _MOF_FISCAL_BASE,
+                "status": "derived_backfill",
+                "formula_version": DERIVED_METRIC_SPECS[code].version,
+            }
+            for period, value in series.items()
+        ]
+
     return _series_frames(
         {
-            "CN_FISCAL_SPEND_INTENSITY": intensity_rows,
-            "CN_FISCAL_IMPULSE_PROXY": impulse_rows,
+            "CN_FISCAL_SPEND_INTENSITY": rows(
+                "CN_FISCAL_SPEND_INTENSITY", intensity
+            ),
+            "CN_FISCAL_IMPULSE_PROXY": rows("CN_FISCAL_IMPULSE_PROXY", impulse),
         }
     )
 
@@ -1024,6 +1341,7 @@ def _make_bundle_fetcher(bundle_key: str, loader, code: str):
 
 
 CHINA_CYCLE_FETCHERS = {
+    "CN_IP": fetch_cn_industrial_production_history,
     **{
         code: _make_bundle_fetcher("china_pmi_detail", _load_pmi, code)
         for code in (
@@ -1067,12 +1385,11 @@ CHINA_CYCLE_FETCHERS = {
         )
     },
     **{
-        code: _make_bundle_fetcher("china_tsf_components", _load_tsf_components, code)
-        for code in ("CN_TSF_RMB_LOANS_FLOW", "CN_CORP_BOND_FINANCING")
-    },
-    **{
-        code: _make_bundle_fetcher("china_pboc_credit", _load_pboc_credit, code)
+        code: _make_bundle_fetcher("china_credit_data", _load_credit_data, code)
         for code in (
+            "CN_TSF",
+            "CN_TSF_RMB_LOANS_FLOW",
+            "CN_CORP_BOND_FINANCING",
             "CN_TSF_STOCK_YOY",
             "CN_TSF_RMB_LOAN_STOCK_YOY",
             "CN_GOV_BOND_FINANCING_YTD",

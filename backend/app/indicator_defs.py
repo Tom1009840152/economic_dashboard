@@ -16,6 +16,9 @@ forex 组内按各经济体名义 GDP 排名排序（数据源为中国银行外
 macro/bond 组是月度/日度的宏观经济数据，中国的在前、美国、日本、欧元区、英国、韩国依次在后。
 """
 
+from app.indicator_catalog import enrich_indicator_defs
+
+
 INDICATOR_DEFS = [
     {"code": "SSE", "name": "上证指数", "category": "index", "unit": "点", "sort_order": 0, "region": "CN"},
     {"code": "DJI", "name": "道琼斯工业指数", "category": "index", "unit": "点", "sort_order": 1, "region": "US"},
@@ -45,7 +48,7 @@ INDICATOR_DEFS = [
     {"code": "CN_IP", "name": "中国规上工业增加值同比", "category": "macro", "unit": "%", "sort_order": 45, "region": "CN"},
     {"code": "CN_CLI", "name": "中国综合领先指标", "category": "macro", "unit": "点", "sort_order": 46, "region": "CN"},
     {"code": "CN_TSF", "name": "中国社会融资规模增量", "category": "macro", "unit": "亿元", "sort_order": 47, "region": "CN"},
-    {"code": "CN_GDP", "name": "中国GDP同比", "category": "macro", "unit": "%", "sort_order": 48, "region": "CN"},
+    {"code": "CN_GDP", "name": "中国GDP累计同比", "category": "macro", "unit": "%", "sort_order": 48, "region": "CN"},
     {"code": "CN_RETAIL", "name": "中国社会消费品零售总额同比", "category": "macro", "unit": "%", "sort_order": 49, "region": "CN"},
     {"code": "CN_FAI", "name": "中国固定资产投资同比", "category": "macro", "unit": "%", "sort_order": 50, "region": "CN"},
     {"code": "CN_EXPORTS", "name": "中国出口同比", "category": "macro", "unit": "%", "sort_order": 51, "region": "CN"},
@@ -180,3 +183,8 @@ INDICATOR_DEFS = [
     {"code": "KR_CLI", "name": "韩国综合领先指标", "category": "macro", "unit": "点", "sort_order": 122, "region": "KR"},
     {"code": "KR_RESERVES", "name": "韩国外汇储备", "category": "macro", "unit": "百万美元", "sort_order": 123, "region": "KR"},
 ]
+
+# Keep database-sized source/frequency fields in sync with the richer modelling
+# dictionary.  The catalog is exhaustive, so a newly added indicator must be
+# classified before the application can silently seed it with vague defaults.
+INDICATOR_DEFS = enrich_indicator_defs(INDICATOR_DEFS)

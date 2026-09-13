@@ -21,11 +21,15 @@ from app.services.indicator_service import ensure_indicators_seeded, upsert_poin
 
 GROUPS = {
     "pmi": {code for code in CHINA_CYCLE_FETCHERS if code.startswith(("CN_PMI_", "CN_NMI_"))},
-    "industry": {code for code in CHINA_CYCLE_FETCHERS if code.startswith("CN_IND_")},
+    "industry": {
+        code
+        for code in CHINA_CYCLE_FETCHERS
+        if code == "CN_IP" or code.startswith("CN_IND_")
+    },
     "credit": {
         code
         for code in CHINA_CYCLE_FETCHERS
-        if code.startswith(
+        if code == "CN_TSF" or code.startswith(
             ("CN_TSF_", "CN_CORP_BOND_", "CN_GOV_BOND_", "CN_GDP_NOMINAL", "CN_CREDIT_")
         )
     },

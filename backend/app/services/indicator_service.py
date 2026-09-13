@@ -1,4 +1,6 @@
 import logging
+import time
+from collections.abc import Callable, Mapping
 from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
 
@@ -6,9 +8,16 @@ import pandas as pd
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.fetchers.akshare_source import fetch_all
+from app.fetchers.akshare_source import FETCHERS
 from app.indicator_defs import INDICATOR_DEFS
-from app.models import DataPoint, DataPointVintage, Indicator
+from app.models import DataPoint, DataPointVintage, Indicator, RefreshResult, RefreshRun
+from app.services.data_quality import (
+    DataQualityError,
+    QualityReport,
+    consumer_component_issues,
+    enforce_quality,
+    validate_indicator_frame,
+)
 
 logger = logging.getLogger(__name__)
 _STATUS_PRIORITY = {
@@ -72,6 +81,8 @@ def _incoming_metadata(row, columns: set[str]) -> dict:
         metadata["source_url"] = _optional_text(row.source_url, 512)
     if "status" in columns:
         metadata["status"] = _optional_text(row.status, 32) or "published"
+    if "formula_version" in columns:
+        metadata["formula_version"] = _optional_text(row.formula_version, 32)
     return metadata
 
 
@@ -89,11 +100,21 @@ def _avoid_metadata_downgrade(point: DataPoint, value: Decimal, metadata: dict) 
     """
     current_value = Decimal(point.value).quantize(Decimal("0.000001"))
     incoming_status = metadata.get("status")
-    if current_value != value or incoming_status is None:
+    if current_value != value:
         return metadata
-    if _STATUS_PRIORITY.get(incoming_status, 0) < _STATUS_PRIORITY.get(point.status, 0):
+    if incoming_status is not None and _STATUS_PRIORITY.get(
+        incoming_status, 0
+    ) < _STATUS_PRIORITY.get(point.status, 0):
         return {}
-    return metadata
+    # Empty cells in a metadata-bearing frame mean "not supplied", not
+    # "erase what a richer release already told us".  This rule is limited to
+    # unchanged numeric values: a changed historical backfill must not inherit
+    # an older value's publication timestamp and leak into strict as-of views.
+    return {
+        key: incoming
+        for key, incoming in metadata.items()
+        if key == "status" or incoming is not None or getattr(point, key) is None
+    }
 
 
 def _append_vintage(db: Session, point: DataPoint) -> None:
@@ -108,12 +129,19 @@ def _append_vintage(db: Session, point: DataPoint) -> None:
             retrieved_at=point.retrieved_at,
             source_url=point.source_url,
             status=point.status,
+            formula_version=point.formula_version,
             version=point.version,
         )
     )
 
 
-def upsert_points(db: Session, code: str, df: pd.DataFrame) -> int:
+def _store_points(
+    db: Session,
+    code: str,
+    df: pd.DataFrame,
+    *,
+    commit: bool = True,
+) -> int:
     """Update current observations and append only meaningful vintage changes.
 
     Fetchers may return the original ``date, value`` pair or additionally provide
@@ -188,17 +216,214 @@ def upsert_points(db: Session, code: str, df: pd.DataFrame) -> int:
     db.flush()
     for point in vintage_points:
         _append_vintage(db, point)
-    db.commit()
+    if commit:
+        db.commit()
     logger.info("stored %s: %d changed vintages from %d observations", code, changed, len(clean))
     return changed
 
 
-def refresh_all_indicators(db: Session) -> dict[str, int]:
-    ensure_indicators_seeded(db)
-    results: dict[str, int] = {}
-    data_by_code = fetch_all()
+def upsert_points(db: Session, code: str, df: pd.DataFrame) -> int:
+    """Quality-check and store one indicator outside a refresh run."""
 
-    for code, df in data_by_code.items():
-        results[code] = upsert_points(db, code, df)
+    report = validate_indicator_frame(db, code, df)
+    enforce_quality(report)
+    return _store_points(db, code, df)
+
+
+def _last_success(db: Session, code: str) -> RefreshResult | None:
+    return db.scalar(
+        select(RefreshResult)
+        .where(
+            RefreshResult.indicator_code == code,
+            RefreshResult.status.in_(("success", "no_change")),
+        )
+        .order_by(RefreshResult.finished_at.desc(), RefreshResult.id.desc())
+        .limit(1)
+    )
+
+
+def _error_text(exc: BaseException, limit: int = 4000) -> str:
+    return f"{type(exc).__name__}: {exc}"[:limit]
+
+
+def _record_refresh_result(
+    db: Session,
+    *,
+    run_id: int,
+    code: str,
+    status: str,
+    row_count: int,
+    changed_count: int,
+    duration_ms: int,
+    started_at: datetime,
+    finished_at: datetime,
+    previous_success_at: datetime | None,
+    error: str | None = None,
+    quality_report: QualityReport | None = None,
+) -> None:
+    last_success_at = finished_at if status in {"success", "no_change"} else previous_success_at
+    db.add(
+        RefreshResult(
+            run_id=run_id,
+            indicator_code=code,
+            status=status,
+            row_count=row_count,
+            changed_count=changed_count,
+            duration_ms=max(duration_ms, 0),
+            started_at=started_at,
+            finished_at=finished_at,
+            last_success_at=last_success_at,
+            error=error,
+            quality_issues=quality_report.issues_json() if quality_report else None,
+        )
+    )
+
+
+def refresh_all_indicators(
+    db: Session,
+    trigger: str = "manual",
+    *,
+    fetchers: Mapping[str, Callable[[], pd.DataFrame]] | None = None,
+) -> dict[str, int]:
+    """Refresh every configured series and persist an auditable run ledger.
+
+    Fetching and validation happen before any values are written.  A failed
+    indicator is recorded and its last known-good current snapshot is left
+    untouched; independent indicators continue refreshing.
+    """
+
+    ensure_indicators_seeded(db)
+    selected_fetchers = dict(FETCHERS if fetchers is None else fetchers)
+    run_started = datetime.now(UTC).replace(tzinfo=None)
+    run = RefreshRun(
+        trigger=trigger[:16] or "manual",
+        status="running",
+        started_at=run_started,
+        total_indicators=len(selected_fetchers),
+    )
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+
+    results: dict[str, int] = {}
+    attempts: dict[str, dict] = {}
+
+    for code, fetcher in selected_fetchers.items():
+        started_at = datetime.now(UTC).replace(tzinfo=None)
+        started_clock = time.perf_counter()
+        previous = _last_success(db, code)
+        try:
+            frame = fetcher()
+            report = validate_indicator_frame(
+                db,
+                code,
+                frame,
+                previous_row_count=previous.row_count if previous else None,
+            )
+            error = None
+        except Exception as exc:
+            frame = None
+            report = None
+            error = exc
+        fetch_duration_ms = round((time.perf_counter() - started_clock) * 1000)
+        attempts[code] = {
+            "frame": frame,
+            "report": report,
+            "error": error,
+            "started_at": started_at,
+            "fetch_duration_ms": fetch_duration_ms,
+            "previous_success_at": previous.last_success_at if previous else None,
+        }
+
+    # This check must see all three frames together; it catches a known upstream
+    # field-mapping failure where expectations silently duplicated satisfaction.
+    consumer_issues = consumer_component_issues(
+        {code: attempt["frame"] for code, attempt in attempts.items()}
+    )
+    for code, issues in consumer_issues.items():
+        attempt = attempts[code]
+        report = attempt["report"]
+        if report is not None:
+            attempt["report"] = QualityReport(report.row_count, report.issues + issues)
+
+    failures: list[str] = []
+    counts = {"success": 0, "no_change": 0, "failed": 0}
+    for code, attempt in attempts.items():
+        frame = attempt["frame"]
+        report = attempt["report"]
+        error = attempt["error"]
+        changed = 0
+        status = "failed"
+        error_message = None
+        write_started = time.perf_counter()
+        try:
+            if error is not None:
+                raise error
+            assert report is not None
+            enforce_quality(report)
+            # Keep current values, appended vintages and the per-indicator
+            # ledger row in one transaction.
+            changed = _store_points(db, code, frame, commit=False)
+            status = "success" if changed else "no_change"
+        except Exception as exc:
+            db.rollback()
+            error_message = _error_text(exc)
+            failures.append(f"{code}: {error_message}")
+            if isinstance(exc, DataQualityError):
+                logger.warning("quality gate rejected %s: %s", code, exc)
+            else:
+                logger.exception("refresh failed for %s", code)
+
+        finished_at = datetime.now(UTC).replace(tzinfo=None)
+        duration_ms = attempt["fetch_duration_ms"] + round(
+            (time.perf_counter() - write_started) * 1000
+        )
+        try:
+            _record_refresh_result(
+                db,
+                run_id=run.id,
+                code=code,
+                status=status,
+                row_count=(
+                    report.row_count
+                    if report
+                    else (len(frame) if frame is not None else 0)
+                ),
+                changed_count=changed,
+                duration_ms=duration_ms,
+                started_at=attempt["started_at"],
+                finished_at=finished_at,
+                previous_success_at=attempt["previous_success_at"],
+                error=error_message,
+                quality_report=report,
+            )
+            db.commit()
+        except Exception as ledger_error:
+            # The data/vintage flush above is in the same transaction, so a
+            # ledger failure cannot leave un-audited indicator changes behind.
+            db.rollback()
+            persisted_run = db.get(RefreshRun, run.id)
+            if persisted_run is not None:
+                persisted_run.status = "failed"
+                persisted_run.finished_at = datetime.now(UTC).replace(tzinfo=None)
+                persisted_run.failed_count += 1
+                persisted_run.error = _error_text(ledger_error)
+                db.commit()
+            raise
+        results[code] = changed if status != "failed" else 0
+        counts[status] += 1
+
+    run.finished_at = datetime.now(UTC).replace(tzinfo=None)
+    run.success_count = counts["success"]
+    run.no_change_count = counts["no_change"]
+    run.failed_count = counts["failed"]
+    if not failures:
+        run.status = "success"
+    elif len(failures) == len(selected_fetchers):
+        run.status = "failed"
+    else:
+        run.status = "partial_failure"
+    run.error = "\n".join(failures)[:8000] or None
+    db.commit()
 
     return results

@@ -206,6 +206,10 @@ export interface AnalysisSeries {
   name: string;
   unit: string;
   points: AnalysisPoint[];
+  maintenance?: string;
+  verified_through?: string;
+  source?: string;
+  source_url?: string;
 }
 
 export interface MonetaryTransmissionSignal {
@@ -217,6 +221,8 @@ export interface MonetaryTransmissionSignal {
   state: string;
   interpretation: string;
   formula: string;
+  formula_version?: string;
+  data_origin?: "stored" | "calculated_fallback";
 }
 
 export interface MonetaryTransmissionDashboard {
@@ -235,4 +241,176 @@ export interface MonetaryTransmissionDashboard {
 
 export function getChinaMonetaryTransmission(): Promise<MonetaryTransmissionDashboard> {
   return apiFetch("/api/analysis/cn/monetary-transmission");
+}
+
+export type ActivityMatrixRole = "coincident" | "leading";
+export type ActivityMatrixConfidence = "high" | "medium" | "low" | "insufficient";
+
+export type ActivityMatrixSignalOperation =
+  | "level"
+  | "mean"
+  | "difference"
+  | "trailing_mean_3";
+
+export interface ActivityMatrixSignalMeta {
+  code: string;
+  name: string;
+  input_codes: string[];
+  weight: number;
+  operation: ActivityMatrixSignalOperation;
+  direction: "positive" | "negative";
+  frequency: string;
+  sources: string[];
+}
+
+export interface ActivityMatrixBlockMeta {
+  key: string;
+  name: string;
+  role: ActivityMatrixRole;
+  weight: number;
+  minimum_coverage: number;
+  indicator_codes: string[];
+  signals: ActivityMatrixSignalMeta[];
+}
+
+export interface ActivityMatrixSignalPoint {
+  code: string;
+  name: string;
+  input_codes: string[];
+  weight: number;
+  raw_value: number | null;
+  source_period: string | null;
+  standardized_score: number | null;
+  realtime_ready: boolean;
+  contribution: number | null;
+}
+
+export interface ActivityMatrixBlockPoint {
+  key: string;
+  name: string;
+  role: ActivityMatrixRole;
+  score: number | null;
+  coverage: number;
+  realtime_coverage: number;
+  available_count: number;
+  total_count: number;
+  minimum_coverage: number;
+  contribution: number | null;
+  signals: ActivityMatrixSignalPoint[];
+}
+
+export interface ActivityMatrixValidationPoint {
+  code: string;
+  name: string;
+  raw_value: number | null;
+  source_period: string | null;
+  standardized_score: number | null;
+}
+
+export interface ActivityMatrixMonth {
+  period: string;
+  composite_index: number | null;
+  coincident_index: number | null;
+  leading_index: number | null;
+  coincident_coverage: number;
+  leading_coverage: number;
+  overall_coverage: number;
+  input_coverage: number;
+  realtime_coverage: number;
+  active_blocks: number;
+  confidence: ActivityMatrixConfidence;
+  comparable_to_previous: boolean;
+  composition_changed: boolean;
+  comparison_reasons: string[];
+  blocks: ActivityMatrixBlockPoint[];
+  validation: ActivityMatrixValidationPoint[];
+}
+
+export interface ActivityMatrixContribution {
+  code: string;
+  name: string;
+  role: ActivityMatrixRole;
+  block_key: string;
+  source_period: string | null;
+  standardized_score: number;
+  contribution: number;
+}
+
+export interface ActivityMatrixInputStatus {
+  code: string;
+  name: string;
+  input_codes: string[];
+  frequency: string;
+  latest_observation: string | null;
+  latest_value: number | null;
+  lag_months: number | null;
+  is_stale: boolean;
+  used_in_latest: boolean;
+  used_observation: string | null;
+}
+
+export interface ActivityMatrixLatest {
+  period: string;
+  composite_index: number | null;
+  coincident_index: number | null;
+  leading_index: number | null;
+  overall_coverage: number;
+  input_coverage: number;
+  realtime_coverage: number;
+  confidence: ActivityMatrixConfidence;
+  positive_contributions: ActivityMatrixContribution[];
+  negative_contributions: ActivityMatrixContribution[];
+  input_latest_periods: ActivityMatrixInputStatus[];
+}
+
+export interface ActivityMatrixMethodology {
+  standardization: string;
+  rolling_window_months: number;
+  monthly_min_history: number;
+  quarterly_min_history: number;
+  zscore_clip: number;
+  quarterly_forward_fill_months: number;
+  block_min_coverage: number;
+  minimum_active_blocks: number;
+  overall_min_coverage: number;
+  neutral_level: number;
+  index_scale: number;
+  missing_value_policy: string;
+  weighting: string;
+  input_coverage_definition: string;
+  overall_coverage_definition: string;
+  realtime_coverage_definition: string;
+}
+
+export interface ActivityMatrixValidationMeta {
+  code: string;
+  name: string;
+  unit: string;
+  source: string;
+  frequency: string;
+  purpose: "external_validation_only";
+}
+
+export interface ActivityMatrixDashboard {
+  region: string;
+  country: string;
+  title: string;
+  mode: "current";
+  data_basis: "final";
+  as_of: string | null;
+  realtime_coverage: number | null;
+  method: string;
+  methodology_version: string;
+  methodology_note: string;
+  methodology: ActivityMatrixMethodology;
+  blocks: ActivityMatrixBlockMeta[];
+  validation_indicators: ActivityMatrixValidationMeta[];
+  months: ActivityMatrixMonth[];
+  latest: ActivityMatrixLatest | null;
+  warnings: string[];
+}
+
+export function getChinaActivityMatrix(months = 120): Promise<ActivityMatrixDashboard> {
+  const query = new URLSearchParams({ months: String(months) });
+  return apiFetch(`/api/analysis/cn/business-cycle/matrix?${query}`);
 }
