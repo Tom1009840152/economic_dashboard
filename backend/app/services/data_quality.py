@@ -26,6 +26,7 @@ _VALID_STATUSES = frozenset(
     {
         "published",
         "derived",
+        "revision_metadata_unknown",
         "historical_backfill",
         "derived_backfill",
         "mirror_backfill",

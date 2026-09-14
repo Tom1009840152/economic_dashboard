@@ -117,15 +117,15 @@ Statistics 的月度季调序列，并统一为15—64岁口径。除总体和�
 | CN_CPI | CPI同比 | `ak.macro_china_cpi` | 月度，取"全国-同比增长" |
 | CN_PPI | PPI同比 | `ak.macro_china_ppi` | 月度，取"当月同比增长" |
 | CN_PMI | 制造业PMI | `ak.macro_china_pmi` | 月度，取"制造业-指数" |
-| CN_NMI | 非制造业商务活动指数 | `ak.macro_china_pmi` | 月度，取"非制造业-指数"；50为荣枯线 |
+| CN_NMI | 非制造业商务活动指数 | `ak.macro_china_pmi` 长历史 + 国家统计局《中国采购经理指数运行情况》原发布页 | 月度，50为荣枯线；常规刷新保留长历史，近期原发布页补真实发布时间，归档回填逐月核验当时值 |
 | CN_IP | 规上工业增加值同比 | 国家统计局数据发布页；`ak.macro_china_gyzjz`（东方财富镜像）补历史 | 月度可比价同比，不等于全部工业企业产出；官方近期值优先，镜像补至 2008-02 且发布时点未知；1—2 月合并值记在 2 月，1 月不插值 |
 | CN_CLI | 综合领先指标 | OECD Data Explorer `DF_CLI` | 月度，振幅调整，长期均值=100 |
 | CN_CORE_CPI | 核心CPI同比 | 国家统计局月度CPI/PPI解读稿 | 剔除食品和能源；官方发布值，不自行估算权重 |
-| CN_TSF | 社会融资规模增量 | 人民银行月度发布页；商务部镜像补历史 | 当前官方累计值按相邻月份差分，历史镜像明确标记；覆盖至2026-07 |
+| CN_TSF | 社会融资规模增量 | 人民银行月度发布页；商务部镜像补历史 | 官方直接月度值优先；现代正文多为年内累计值，按 `pboc_ytd_diff_v1` 由相邻首次发布差分并自动补取跨批次边界；四舍五入结果必须与亿元精确当前值完全一致才可补元数据，不同首次发布值待专用有序版本导入器保存完整来源链；全区间预检/落库未完成；当前值覆盖至2026-08 |
 | CN_GDP | GDP累计同比 | `ak.macro_china_gdp` | 季度末定位的年内累计实际GDP同比，不是单季同比；A3主验证需另构造单季同比或季调环比 |
 | CN_RETAIL | 社会消费品零售总额同比 | `ak.macro_china_consumer_goods_retail` | 月度 |
 | CN_FAI | 固定资产投资同比 | `ak.macro_china_gdzctz` | 月度 |
-| CN_EXPORTS | 出口同比 | `ak.macro_china_exports_yoy` | 日频发布节奏，海关总署 |
+| CN_EXPORTS | 出口同比 | `ak.macro_china_exports_yoy`；海关总署“全国进出口总值表（美元值）”归档待接入 | 月度美元口径；2020年起1—2月合并，不拆分；中文快讯保留分钟级首次发布时间，但站点 WAF/HTTPS 稳定性尚需浏览器采集方案 |
 | CN_EXPORTS_ABS | 出口额（伴生指标，不单独出卡片） | `ak.macro_china_hgjck` | 原始单位"千美元"，除以 1e5 换算成"亿美元" |
 | CN_HOG | 生猪现货价格指数 | `ak.index_hog_spot_price` | 周频，判断"猪周期"最常用的原始价格序列 |
 | CN_REALESTATE | 国房景气指数 | `ak.macro_china_real_estate` | 全国综合房地产市场冷热度 |

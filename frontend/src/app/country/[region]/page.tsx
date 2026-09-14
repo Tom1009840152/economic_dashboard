@@ -3,11 +3,13 @@ import { notFound, redirect } from "next/navigation";
 import {
   getEmployment,
   getChinaActivityMatrix,
+  getChinaBusinessCycleRegime,
   getChinaMonetaryTransmission,
   getIndicators,
   getInternationalEmployment,
   getPopulation,
   type ActivityMatrixDashboard,
+  type BusinessCycleRegimeDashboard,
   type EmploymentDashboard,
   type IndicatorSummary,
   type InternationalEmploymentDashboard,
@@ -25,6 +27,7 @@ import { USEmploymentSummaryCard } from "@/components/us-employment-summary-card
 import { InternationalEmploymentSummaryCard } from "@/components/international-employment-summary-card";
 import { MonetaryTransmissionSummaryCard } from "@/components/monetary-transmission-summary-card";
 import { ChinaActivityMatrixSummaryCard } from "@/components/china-activity-matrix-summary-card";
+import { ChinaBusinessCycleSummaryCard } from "@/components/china-business-cycle-summary-card";
 import {
   COUNTRY_SECTIONS,
   defaultSectionForRegion,
@@ -190,6 +193,7 @@ export default async function CountryPage(props: PageProps<"/country/[region]">)
     population,
     employment,
     internationalEmployment,
+    businessCycle,
     monetaryTransmission,
     activityMatrix,
   ] = await Promise.all([
@@ -197,6 +201,7 @@ export default async function CountryPage(props: PageProps<"/country/[region]">)
     needsPeople ? getPopulation(meta.code).catch(() => null) : Promise.resolve(null),
     needsPeople && region === "cn" ? getEmployment("CN").catch(() => null) : Promise.resolve(null),
     needsPeople && region !== "cn" ? getInternationalEmployment(meta.code).catch(() => null) : Promise.resolve(null),
+    needsAnalysis ? getChinaBusinessCycleRegime(24).catch(() => null) : Promise.resolve(null),
     needsAnalysis ? getChinaMonetaryTransmission().catch(() => null) : Promise.resolve(null),
     needsAnalysis ? getChinaActivityMatrix(24).catch(() => null) : Promise.resolve(null),
   ]);
@@ -261,7 +266,7 @@ export default async function CountryPage(props: PageProps<"/country/[region]">)
     ? sections.filter((group) => group.id === selectedGroup)
     : sections;
   const entryCount = countrySection === "analysis"
-    ? Number(Boolean(activityMatrix)) + Number(Boolean(monetaryTransmission))
+    ? Number(Boolean(businessCycle)) + Number(Boolean(activityMatrix)) + Number(Boolean(monetaryTransmission))
     : visibleSections.reduce((total, current) => total + current.cards.length, 0);
 
   return (
@@ -325,7 +330,7 @@ export default async function CountryPage(props: PageProps<"/country/[region]">)
       )}
 
       <div className="space-y-12 pb-8">
-        {(activityMatrix || monetaryTransmission) && countrySection === "analysis" && (
+        {(businessCycle || activityMatrix || monetaryTransmission) && countrySection === "analysis" && (
           <section id="analysis" className="scroll-mt-24 pt-10">
             {!countrySection && (
               <div className="mb-4 flex items-start gap-3">
@@ -341,15 +346,22 @@ export default async function CountryPage(props: PageProps<"/country/[region]">)
               </div>
             )}
             <div className="space-y-4">
-              {activityMatrix && (
+              {businessCycle && (
                 <FadeIn>
+                  <ChinaBusinessCycleSummaryCard
+                    data={businessCycle as BusinessCycleRegimeDashboard}
+                  />
+                </FadeIn>
+              )}
+              {activityMatrix && (
+                <FadeIn delay={0.04}>
                   <ChinaActivityMatrixSummaryCard
                     data={activityMatrix as ActivityMatrixDashboard}
                   />
                 </FadeIn>
               )}
               {monetaryTransmission && (
-                <FadeIn delay={0.04}>
+                <FadeIn delay={0.08}>
                   <MonetaryTransmissionSummaryCard
                     data={monetaryTransmission as MonetaryTransmissionDashboard}
                   />

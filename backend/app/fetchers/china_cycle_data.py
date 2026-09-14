@@ -9,12 +9,13 @@ machine-readable; those observations are explicitly marked ``mirror_backfill``.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import logging
 import re
 import time
-from functools import lru_cache
 from io import BytesIO, StringIO
-from urllib.parse import urljoin
+from pathlib import Path
+from urllib.parse import urljoin, urlparse
 
 import akshare as ak
 import pandas as pd
@@ -44,6 +45,8 @@ _EASTMONEY_INDUSTRIAL_URL = "https://data.eastmoney.com/cjsj/gyzjz.html"
 _MOFCOM_TSF_URL = "https://data.mofcom.gov.cn/gnmy/shrzgm.shtml"
 _NBS_RELEASE_BASE = "https://www.stats.gov.cn/sj/zxfb/"
 _PBOC_RELEASE_BASE = "https://www.pbc.gov.cn/diaochatongjisi/116219/116225/"
+_PBOC_NEWS_BASE = "https://www.pbc.gov.cn/goutongjiaoliu/113456/113469/"
+PBOC_YTD_DIFF_FORMULA_VERSION = "pboc_ytd_diff_v1"
 _MOF_FISCAL_BASE = "https://gks.mof.gov.cn/tongjishuju/"
 _MOF_BOND_BASE = "https://yss.mof.gov.cn/zhuantilanmu/dfzgl/sjtj/"
 _PBOC_TSF_STOCK_PDFS = (
@@ -78,6 +81,11 @@ _CACHE_TTL = 6 * 60 * 60
 _cache: dict[str, tuple[float, object]] = {}
 logger = logging.getLogger(__name__)
 _nbs_session = curl_requests.Session(impersonate="chrome")
+_NBS_ARCHIVE_CACHE = Path(__file__).resolve().parents[2] / ".cache" / "nbs-release"
+_PBOC_ARCHIVE_CACHE = Path(__file__).resolve().parents[2] / ".cache" / "pboc-release"
+_NBS_ARCHIVE_REQUEST_INTERVAL = 0.45
+_PBOC_BOUNDARY_SCAN_PAGES = 12
+_last_nbs_archive_request = 0.0
 
 
 def _cached(key: str, loader):
@@ -106,6 +114,34 @@ def _request_bytes(url: str) -> bytes:
     return response.content
 
 
+def _is_pboc_https_url(value: object) -> bool:
+    """Accept only HTTPS resources hosted by the PBOC or its subdomains."""
+
+    try:
+        parsed = urlparse(str(value))
+    except (TypeError, ValueError):
+        return False
+    hostname = (parsed.hostname or "").lower().rstrip(".")
+    return parsed.scheme.lower() == "https" and (
+        hostname == "pbc.gov.cn" or hostname.endswith(".pbc.gov.cn")
+    )
+
+
+def _valid_pboc_release_source(source: str) -> bool:
+    """Reject challenge, truncated and unrelated pages before caching them."""
+
+    if len(source) < 500 or "Please enable JavaScript" in source:
+        return False
+    try:
+        text = _text_from_html(source)
+    except (TypeError, ValueError):
+        return False
+    return "社会融资规模增量" in text and any(
+        marker in text or marker in source
+        for marker in ("文章来源", "发布时间", "发布日期", "PubDate")
+    )
+
+
 def _get_nbs_text(url: str) -> str:
     response = _nbs_session.get(url, headers=_HEADERS, timeout=30)
     if response.status_code == 404:
@@ -113,33 +149,205 @@ def _get_nbs_text(url: str) -> str:
     response.raise_for_status()
     source = response.content.decode("utf-8", errors="replace")
     if "Please enable JavaScript and refresh the page" in source:
-        raise RuntimeError("NBS website returned a JavaScript verification page")
+        # Some historical shards challenge the browser-impersonating session
+        # while serving the same official static page to a plain HTTPS client.
+        # Use one bounded fallback, but still reject any challenge body so it
+        # can never enter the evidence cache.
+        source = _request_text(url)
+        if "Please enable JavaScript and refresh the page" in source:
+            raise RuntimeError("NBS website returned a JavaScript verification page")
+    return source
+
+
+def _get_nbs_archive_text(url: str, *, cache: bool = True) -> str:
+    """Read one official archive page slowly and cache it for resumable backfills.
+
+    The NBS archive applies a JavaScript challenge when a crawler bursts through
+    many pages. D7 needs dozens of distinct monthly releases, so one-time
+    backfills use a small on-disk cache and a bounded delay. Only successfully
+    decoded official HTML is cached; a challenge page is never evidence.
+    """
+
+    digest = hashlib.sha256(url.encode("utf-8")).hexdigest()
+    cache_path = _NBS_ARCHIVE_CACHE / f"{digest}.html"
+    if cache and cache_path.exists():
+        return cache_path.read_text(encoding="utf-8")
+
+    global _last_nbs_archive_request
+    last_error: Exception | None = None
+    # Index pages are mutable manifests and intentionally are not persisted.
+    # A failed index should be resumed later from a small page range rather
+    # than retried four times in a burst, which worsens upstream throttling.
+    attempts = 4 if cache else 1
+    for attempt in range(attempts):
+        wait_for = _NBS_ARCHIVE_REQUEST_INTERVAL - (
+            time.monotonic() - _last_nbs_archive_request
+        )
+        if wait_for > 0:
+            time.sleep(wait_for)
+        try:
+            source = _get_nbs_text(url)
+            _last_nbs_archive_request = time.monotonic()
+            if cache:
+                _NBS_ARCHIVE_CACHE.mkdir(parents=True, exist_ok=True)
+                cache_path.write_text(source, encoding="utf-8")
+            return source
+        except Exception as exc:
+            _last_nbs_archive_request = time.monotonic()
+            last_error = exc
+            if attempt < attempts - 1:
+                time.sleep(2 ** attempt)
+    assert last_error is not None
+    raise last_error
+
+
+def _get_pboc_archive_text(url: str) -> str:
+    """Read and persist one official PBOC detail page for resumable backfills."""
+
+    if not _is_pboc_https_url(url):
+        raise ValueError(f"refusing non-official PBOC archive URL: {url}")
+    digest = hashlib.sha256(url.encode("utf-8")).hexdigest()
+    cache_path = _PBOC_ARCHIVE_CACHE / f"{digest}.html"
+    if cache_path.exists():
+        cached = cache_path.read_text(encoding="utf-8")
+        if _valid_pboc_release_source(cached):
+            return cached
+    source = _request_text(url)
+    if not _valid_pboc_release_source(source):
+        raise RuntimeError("PBOC website returned an invalid archive detail page")
+    _PBOC_ARCHIVE_CACHE.mkdir(parents=True, exist_ok=True)
+    temporary = cache_path.with_suffix(".tmp")
+    temporary.write_text(source, encoding="utf-8")
+    temporary.replace(cache_path)
     return source
 
 
 def _publication_metadata(source: str, source_url: str) -> dict:
     text = _text_from_html(source)
-    match = re.search(
-        r"(?:PubDate|createDate)[^>]*content=[\"']"
-        r"(20\d{2})[/-](\d{1,2})[/-](\d{1,2})(?:\s+(\d{1,2}):(\d{2}))?",
-        source,
-        re.I,
-    ) or re.search(
-        r"(20\d{2})[/-](\d{1,2})[/-](\d{1,2})(?:\s+(\d{1,2}):(\d{2}))?", text
-    ) or re.search(
-        r"发布日期[:：]?\s*(20\d{2})年(\d{1,2})月(\d{1,2})日"
-        r"(?:\s+(\d{1,2}):(\d{2}))?",
-        text,
+    hostname = (urlparse(source_url).hostname or "").lower()
+    is_pboc = hostname == "pbc.gov.cn" or hostname.endswith(".pbc.gov.cn")
+
+    # Prefer a visibly labelled clock time over metadata. Old PBOC articles
+    # were migrated to new CMS URLs whose ``createDate`` is the migration time,
+    # while the article byline still preserves the original release second.
+    try:
+        document = lxml_html.fromstring(source)
+        dom_time_text = " ".join(
+            " ".join(node.text_content().split())
+            for node in document.xpath("//*[@id='shijian']")
+        )
+    except (TypeError, ValueError):
+        dom_time_text = ""
+
+    exact_patterns: list[tuple[str, str, int]] = [
+        (
+            dom_time_text,
+            r"(20\d{2})[/-](\d{1,2})[/-](\d{1,2})\s+"
+            r"(\d{1,2}):(\d{2})(?::\d{2})?",
+            0,
+        ),
+        (
+            dom_time_text,
+            r"(20\d{2})年(\d{1,2})月(\d{1,2})日?\s+"
+            r"(\d{1,2}):(\d{2})(?::\d{2})?",
+            0,
+        ),
+        (
+            text,
+            r"(?:文章来源|发布时间|发布日期)[:：]?\s*"
+            r"(20\d{2})[/-](\d{1,2})[/-](\d{1,2})\s+"
+            r"(\d{1,2}):(\d{2})(?::\d{2})?",
+            0,
+        ),
+        (
+            source,
+            r"PubDate[^>]*content=[\"']"
+            r"(20\d{2})[/-](\d{1,2})[/-](\d{1,2})\s+"
+            r"(\d{1,2}):(\d{2})(?::\d{2})?",
+            re.I,
+        ),
+    ]
+    exact_patterns.insert(
+        3,
+        (
+            text,
+            r"(?:文章来源|发布时间|发布日期)[:：]?\s*"
+            r"(20\d{2})年(\d{1,2})月(\d{1,2})日?\s+"
+            r"(\d{1,2}):(\d{2})(?::\d{2})?",
+            0,
+        ),
     )
-    if not match:
+    if not is_pboc:
+        exact_patterns.append(
+            (
+                source,
+                r"createDate[^>]*content=[\"']"
+                r"(20\d{2})[/-](\d{1,2})[/-](\d{1,2})\s+"
+                r"(\d{1,2}):(\d{2})(?::\d{2})?",
+                re.I,
+            )
+        )
+    match = next(
+        (
+            found
+            for haystack, pattern, flags in exact_patterns
+            if (found := re.search(pattern, haystack, flags)) is not None
+        ),
+        None,
+    )
+    if match is not None:
+        year, month, day, hour, minute = (
+            int(match.group(index)) for index in range(1, 6)
+        )
+        published = dt.datetime(year, month, day, hour, minute)
+        return {
+            "release_date": published.date(),
+            "available_at": published,
+            "source_url": source_url,
+        }
+
+    date_patterns: list[tuple[str, str, int]] = [
+        (
+            source,
+            r"PubDate[^>]*content=[\"']"
+            r"(20\d{2})[/-](\d{1,2})[/-](\d{1,2})",
+            re.I,
+        ),
+        (
+            text,
+            r"(?:文章来源|发布时间|发布日期)[:：]?\s*"
+            r"(20\d{2})[年/-](\d{1,2})[月/-](\d{1,2})(?:日)?",
+            0,
+        ),
+    ]
+    if not is_pboc:
+        date_patterns.insert(
+            1,
+            (
+                source,
+                r"createDate[^>]*content=[\"']"
+                r"(20\d{2})[/-](\d{1,2})[/-](\d{1,2})",
+                re.I,
+            ),
+        )
+    match = next(
+        (
+            found
+            for haystack, pattern, flags in date_patterns
+            if (found := re.search(pattern, haystack, flags)) is not None
+        ),
+        None,
+    )
+    if match is None:
         return {"release_date": None, "available_at": None, "source_url": source_url}
     year, month, day = (int(match.group(index)) for index in range(1, 4))
-    hour = int(match.group(4) or 0)
-    minute = int(match.group(5) or 0)
-    published = dt.datetime(year, month, day, hour, minute)
+    released = dt.date(year, month, day)
+    # A date-only page does not prove that the observation was available at
+    # midnight. Keep the date for display, but exclude it from strict intraday
+    # as-of reconstruction until an actual publication time is known.
     return {
-        "release_date": published.date(),
-        "available_at": published,
+        "release_date": released,
+        "available_at": None,
         "source_url": source_url,
     }
 
@@ -256,11 +464,21 @@ def _merge_cn_ip_history(
     """
     official_rows: list[dict] = []
     for row in official.to_dict("records"):
+        has_release_metadata = (
+            row.get("release_date") is not None
+            and not pd.isna(row.get("release_date"))
+            and row.get("available_at") is not None
+            and not pd.isna(row.get("available_at"))
+        )
         official_rows.append(
             {
                 **row,
                 "source_url": row.get("source_url") or _NBS_RELEASE_BASE,
-                "status": "published",
+                # Without the original publication timestamp this remains a
+                # historical snapshot. Giving it published priority would
+                # overwrite richer D7 provenance on every normal refresh.
+                "status": row.get("status")
+                or ("published" if has_release_metadata else "historical_backfill"),
             }
         )
     if mirror is None:
@@ -292,6 +510,14 @@ def _period_date(title: str, body: str = "") -> dt.date | None:
         return dt.date(year, 6, 1)
     if "一季度" in source:
         return dt.date(year, 3, 1)
+    # Annual PBOC/MOF report titles normally omit ``全年``. Resolve those from
+    # the title before scanning body text, whose first paragraph may mention a
+    # particular month and otherwise misclassify the annual observation.
+    if (
+        not re.search(r"\d{1,2}\s*月份?|季度|半年", title)
+        and re.search(r"(?:社会融资规模|金融统计|财政收支).*?(?:报告|情况)", title)
+    ):
+        return dt.date(year, 12, 1)
     month_match = re.search(r"(?:^|年)(\d{1,2})月份?", source)
     if month_match:
         return dt.date(year, int(month_match.group(1)), 1)
@@ -342,6 +568,7 @@ def _load_nbs_pmi_history() -> dict[str, pd.DataFrame]:
         "CN_PMI_EXPECTATIONS": "生产经营活动预期指数(%)",
     }
     non_manufacturing_mapping = {
+        "CN_NMI": "商务活动指数(%)",
         "CN_NMI_NEW_ORDERS": "新订单指数(%)",
         "CN_NMI_EMPLOYMENT": "从业人员指数(%)",
         "CN_NMI_EXPECTATIONS": "业务活动预期指数(%)",
@@ -438,15 +665,51 @@ def _load_nbs_property_history() -> dict[str, pd.DataFrame]:
     )
 
 
-@lru_cache(maxsize=4)
-def _nbs_release_catalog(page_count: int = 14) -> tuple[tuple[str, str], ...]:
+def _nbs_release_catalog(
+    page_count: int = 14,
+    *,
+    archive: bool = False,
+    start_page: int = 0,
+    archive_shard: int = 0,
+) -> tuple[tuple[str, str], ...]:
+    if page_count < 1:
+        raise ValueError("page_count must be at least 1")
+    if start_page < 0:
+        raise ValueError("start_page cannot be negative")
+    if archive_shard < 0 or archive_shard % 1000:
+        raise ValueError("archive_shard must be zero or a non-negative multiple of 1000")
+
+    cache_key = f"nbs_release_catalog:{archive_shard}:{start_page}:{page_count}"
+    if not archive:
+        cached = _cache.get(cache_key)
+        if cached is not None and time.time() - cached[0] <= _CACHE_TTL:
+            return cached[1]
+
     found: dict[str, str] = {}
     # The NBS archive is paginated by release month. Fourteen pages cover the
     # rolling 13-month PMI tables and recent hard-data releases.
-    for page in range(page_count):
-        url = _NBS_RELEASE_BASE if page == 0 else urljoin(_NBS_RELEASE_BASE, f"index_{page}.html")
+    for page in range(start_page, start_page + page_count):
+        if archive_shard:
+            filename = (
+                f"index_{archive_shard}.html"
+                if page == 0
+                else f"index_{archive_shard}_{page}.html"
+            )
+            url = urljoin(_NBS_RELEASE_BASE, filename)
+        else:
+            url = (
+                _NBS_RELEASE_BASE
+                if page == 0
+                else urljoin(_NBS_RELEASE_BASE, f"index_{page}.html")
+            )
         try:
-            source = _get_nbs_text(url)
+            # Archive index pages change as new releases arrive, so they must
+            # never use the persistent detail-page cache.
+            source = (
+                _get_nbs_archive_text(url, cache=False)
+                if archive
+                else _get_nbs_text(url)
+            )
         except FileNotFoundError:
             logger.info("NBS archive ends before page %d", page)
             break
@@ -461,14 +724,33 @@ def _nbs_release_catalog(page_count: int = 14) -> tuple[tuple[str, str], ...]:
                 found[urljoin(url, href)] = title
         if page_count > 20:
             time.sleep(0.15)
-    return tuple(found.items())
+    result = tuple(found.items())
+    # Ordinary refreshes share one bounded catalog result across all PMI
+    # signals, including an empty result during an upstream challenge. This
+    # prevents one failed refresh from immediately hammering the same indexes
+    # again; archive runs deliberately bypass this cache.
+    if not archive:
+        _cache[cache_key] = (time.time(), result)
+    return result
 
 
-def _nbs_links(pattern: str, page_count: int = 14) -> list[tuple[str, str]]:
+def _nbs_links(
+    pattern: str,
+    page_count: int = 14,
+    *,
+    archive: bool = False,
+    start_page: int = 0,
+    archive_shard: int = 0,
+) -> list[tuple[str, str]]:
     matcher = re.compile(pattern)
     return [
         (url, title)
-        for url, title in _nbs_release_catalog(page_count)
+        for url, title in _nbs_release_catalog(
+            page_count,
+            archive=archive,
+            start_page=start_page,
+            archive_shard=archive_shard,
+        )
         if matcher.search(title)
     ]
 
@@ -487,14 +769,24 @@ def _pmi_rows_from_table(table: pd.DataFrame, mapping: dict[str, int]) -> dict[s
     return rows
 
 
-def _load_pmi(page_count: int = 14) -> dict[str, pd.DataFrame]:
-    links = _nbs_links(r"中国采购经理指数运行情况", page_count)
+def _load_pmi(
+    page_count: int = 14, *, start_page: int = 0, archive_shard: int = 0
+) -> dict[str, pd.DataFrame]:
+    archive = page_count > 14 or start_page > 0 or archive_shard > 0
+    links = _nbs_links(
+        r"中国采购经理指数运行情况|中国制造业采购经理指数|"
+        r"中国非制造业商务活动指数",
+        page_count,
+        archive=archive,
+        start_page=start_page,
+        archive_shard=archive_shard,
+    )
     if not links:
         raise RuntimeError("NBS PMI release not found")
     # One current release already contains a 13-month rolling table. Historical
     # archive mode reads every monthly release to recover the original release
     # dates needed for pseudo-real-time backtests.
-    selected_links = links[:1] if page_count <= 14 else links
+    selected_links = links if archive else links[:1]
     result = {
         code: []
         for code in (
@@ -505,6 +797,7 @@ def _load_pmi(page_count: int = 14) -> dict[str, pd.DataFrame]:
             "CN_PMI_NEW_EXPORT_ORDERS",
             "CN_PMI_FINISHED_GOODS_INVENTORY",
             "CN_PMI_EXPECTATIONS",
+            "CN_NMI",
             "CN_NMI_NEW_ORDERS",
             "CN_NMI_EMPLOYMENT",
             "CN_NMI_EXPECTATIONS",
@@ -512,56 +805,87 @@ def _load_pmi(page_count: int = 14) -> dict[str, pd.DataFrame]:
     }
     for source_url, title in reversed(selected_links):
         try:
-            source = _get_nbs_text(source_url)
+            source = (
+                _get_nbs_archive_text(source_url)
+                if archive
+                else _get_nbs_text(source_url)
+            )
             tables = pd.read_html(StringIO(source))
             basic = next(
-                table
-                for table in tables
-                if table.shape[1] == 7
-                and table.astype(str).apply(lambda col: col.str.contains("生产")).any().any()
+                (
+                    table
+                    for table in tables
+                    if table.shape[1] == 7
+                    and table.astype(str)
+                    .apply(lambda col: col.str.contains("生产"))
+                    .any()
+                    .any()
+                ),
+                None,
             )
             detail = next(
-                table
-                for table in tables
-                if table.shape[1] == 9
-                and table.astype(str).apply(lambda col: col.str.contains("新出口")).any().any()
+                (
+                    table
+                    for table in tables
+                    if table.shape[1] == 9
+                    and table.astype(str)
+                    .apply(lambda col: col.str.contains("新出口"))
+                    .any()
+                    .any()
+                ),
+                None,
             )
             non_manufacturing = next(
-                table
-                for table in tables
-                if table.shape[1] == 7
-                and table.astype(str).apply(lambda col: col.str.contains("商务活动")).any().any()
+                (
+                    table
+                    for table in tables
+                    if table.shape[1] == 7
+                    and table.astype(str)
+                    .apply(lambda col: col.str.contains("商务活动"))
+                    .any()
+                    .any()
+                ),
+                None,
             )
+            if basic is None and non_manufacturing is None:
+                raise ValueError("PMI release has neither manufacturing nor NMI table")
         except Exception:
             logger.warning("NBS PMI release failed: %s", source_url, exc_info=True)
             continue
-        page_rows = _pmi_rows_from_table(
-            basic,
-            {
-                "CN_PMI_PRODUCTION": 2,
-                "CN_PMI_NEW_ORDERS": 3,
-                "CN_PMI_RAW_MATERIAL_INVENTORY": 4,
-                "CN_PMI_EMPLOYMENT": 5,
-            },
-        )
-        for code, rows in _pmi_rows_from_table(
-            detail,
-            {
-                "CN_PMI_NEW_EXPORT_ORDERS": 1,
-                "CN_PMI_FINISHED_GOODS_INVENTORY": 6,
-                "CN_PMI_EXPECTATIONS": 8,
-            },
-        ).items():
-            page_rows[code] = rows
-        for code, rows in _pmi_rows_from_table(
-            non_manufacturing,
-            {
-                "CN_NMI_NEW_ORDERS": 2,
-                "CN_NMI_EMPLOYMENT": 5,
-                "CN_NMI_EXPECTATIONS": 6,
-            },
-        ).items():
-            page_rows[code] = rows
+        page_rows: dict[str, list[dict]] = {}
+        if basic is not None:
+            page_rows.update(
+                _pmi_rows_from_table(
+                    basic,
+                    {
+                        "CN_PMI_PRODUCTION": 2,
+                        "CN_PMI_NEW_ORDERS": 3,
+                        "CN_PMI_RAW_MATERIAL_INVENTORY": 4,
+                        "CN_PMI_EMPLOYMENT": 5,
+                    },
+                )
+            )
+        if detail is not None:
+            for code, rows in _pmi_rows_from_table(
+                detail,
+                {
+                    "CN_PMI_NEW_EXPORT_ORDERS": 1,
+                    "CN_PMI_FINISHED_GOODS_INVENTORY": 6,
+                    "CN_PMI_EXPECTATIONS": 8,
+                },
+            ).items():
+                page_rows[code] = rows
+        if non_manufacturing is not None:
+            for code, rows in _pmi_rows_from_table(
+                non_manufacturing,
+                {
+                    "CN_NMI": 1,
+                    "CN_NMI_NEW_ORDERS": 2,
+                    "CN_NMI_EMPLOYMENT": 5,
+                    "CN_NMI_EXPECTATIONS": 6,
+                },
+            ).items():
+                page_rows[code] = rows
 
         metadata = _publication_metadata(source, source_url)
         current_period = _period_date(title)
@@ -574,12 +898,157 @@ def _load_pmi(page_count: int = 14) -> dict[str, pd.DataFrame]:
                 else:
                     row["status"] = "historical_backfill"
                 result[code].append(row)
-        if page_count > 20:
+        if archive:
             time.sleep(0.15)
     return _series_frames(result)
 
 
-def _load_industrial_enterprises(page_count: int = 14) -> dict[str, pd.DataFrame]:
+def _load_nmi_with_release_metadata() -> dict[str, pd.DataFrame]:
+    """Keep the existing long NMI history while enriching recent releases.
+
+    ``CN_NMI`` predates the cycle-model collectors and already has a longer
+    AkShare/NBS history in the general macro registry. Replacing that collector
+    with the rolling release table alone would shrink every ordinary refresh to
+    roughly 13 months and trip the row-count quality gate. Preserve the original
+    history, then let exact official release rows win where publication metadata
+    is available.
+    """
+
+    # Import lazily because macro_source participates in the aggregate fetcher
+    # registry that imports this module.
+    from app.fetchers.macro_source import fetch_cn_non_manufacturing_pmi
+
+    history = fetch_cn_non_manufacturing_pmi().copy()
+    history["status"] = "historical_backfill"
+    history_bundle = {"CN_NMI": _frame(history.to_dict("records"))}
+    try:
+        release_bundle = {
+            "CN_NMI": _cached("china_pmi_detail", _load_pmi)["CN_NMI"]
+        }
+    except Exception:
+        logger.warning(
+            "NBS rolling NMI release unavailable; retaining long history",
+            exc_info=True,
+        )
+        return history_bundle
+    return _merge_bundles(history_bundle, release_bundle)
+
+
+def _growth_from_release(
+    title: str,
+    text: str,
+    *,
+    label: str,
+) -> tuple[dt.date, float] | None:
+    """Extract the release's own monthly growth observation.
+
+    January-February is an official combined observation and is stored at
+    February. A longer 1-N title is cumulative, so for N>2 the parser requires
+    the article body to state the current month's rate explicitly.
+    """
+
+    compact_title = re.sub(r"\s+", "", title)
+    range_match = re.search(
+        rf"(20\d{{2}})年1[—–-](\d{{1,2}})月份?{label}(?:同比)?"
+        rf"(增长|下降)(\d+(?:\.\d+)?)%",
+        compact_title,
+    )
+    if range_match:
+        year, month = int(range_match.group(1)), int(range_match.group(2))
+        if month == 2:
+            return (
+                dt.date(year, month, 1),
+                _signed(range_match.group(3), range_match.group(4)),
+            )
+        body_match = re.search(
+            # Exclude the trailing ``N月份`` embedded in ``1—N月份``. Only a
+            # standalone month in the article body is single-month evidence.
+            rf"(?<![0-9—–\-至到~～]){month}\s*月份[，,]?\s*{label}"
+            # Retail releases often insert the current-month amount before the
+            # growth rate: ``40732亿元，同比增长2.0%``.
+            rf"(?:\s*\d+(?:\.\d+)?\s*亿元[，,])?\s*(?:同比)?\s*"
+            rf"(增长|下降)\s*(\d+(?:\.\d+)?)%",
+            text,
+        )
+        if body_match:
+            return dt.date(year, month, 1), _signed(*body_match.groups())
+        return None
+
+    monthly_match = re.search(
+        rf"(20\d{{2}})年(\d{{1,2}})月份?{label}(?:同比)?"
+        rf"(增长|下降)(\d+(?:\.\d+)?)%",
+        compact_title,
+    )
+    if monthly_match:
+        return (
+            dt.date(int(monthly_match.group(1)), int(monthly_match.group(2)), 1),
+            _signed(monthly_match.group(3), monthly_match.group(4)),
+        )
+    return None
+
+
+def _load_nbs_hard_activity_evidence(
+    page_count: int = 60,
+    *,
+    start_page: int = 0,
+    archive_shard: int = 0,
+) -> dict[str, pd.DataFrame]:
+    """Recover original NBS publication evidence for IP and retail sales.
+
+    Values come from each observation month's own official release page. The
+    rolling final-value database is deliberately not joined here: a mismatch is
+    handled by the evidence backfill command rather than overwriting today's
+    snapshot with an older vintage.
+    """
+
+    archive = page_count > 14 or start_page > 0 or archive_shard > 0
+    candidates = {
+        "CN_IP": (r"规模以上工业增加值", r"规模以上工业增加值"),
+        "CN_RETAIL": (r"社会消费品零售总额", r"社会消费品零售总额"),
+    }
+    output: dict[str, list[dict]] = {code: [] for code in candidates}
+    catalog = _nbs_release_catalog(
+        page_count,
+        archive=archive,
+        start_page=start_page,
+        archive_shard=archive_shard,
+    )
+    for code, (title_pattern, label) in candidates.items():
+        matcher = re.compile(title_pattern)
+        for source_url, title in catalog:
+            if not matcher.search(title):
+                continue
+            try:
+                source = (
+                    _get_nbs_archive_text(source_url)
+                    if archive
+                    else _get_nbs_text(source_url)
+                )
+                text = _text_from_html(source)
+                parsed = _growth_from_release(title, text, label=label)
+                metadata = _publication_metadata(source, source_url)
+            except Exception:
+                logger.warning(
+                    "NBS hard-activity release failed: %s", source_url, exc_info=True
+                )
+                continue
+            if parsed is None or metadata["available_at"] is None:
+                continue
+            observed, value = parsed
+            output[code].append(
+                {
+                    "date": observed,
+                    "value": value,
+                    **metadata,
+                    "status": "published",
+                }
+            )
+    return _series_frames(output)
+
+
+def _load_industrial_enterprises(
+    page_count: int = 14, *, start_page: int = 0, archive_shard: int = 0
+) -> dict[str, pd.DataFrame]:
     output: dict[str, list[dict]] = {
         "CN_IND_REVENUE_YTD": [],
         "CN_IND_REVENUE_YTD_YOY": [],
@@ -589,9 +1058,20 @@ def _load_industrial_enterprises(page_count: int = 14) -> dict[str, pd.DataFrame
         "CN_IND_FINISHED_INVENTORY_YOY": [],
         "CN_IND_INVENTORY_DAYS": [],
     }
-    for source_url, title in _nbs_links(r"规模以上工业企业利润", page_count):
+    archive = page_count > 14 or start_page > 0 or archive_shard > 0
+    for source_url, title in _nbs_links(
+        r"规模以上工业企业利润",
+        page_count,
+        archive=archive,
+        start_page=start_page,
+        archive_shard=archive_shard,
+    ):
         try:
-            source = _get_nbs_text(source_url)
+            source = (
+                _get_nbs_archive_text(source_url)
+                if archive
+                else _get_nbs_text(source_url)
+            )
             text = _text_from_html(source)
             tables = pd.read_html(StringIO(source))
         except Exception:
@@ -637,12 +1117,22 @@ def _load_industrial_enterprises(page_count: int = 14) -> dict[str, pd.DataFrame
             output["CN_IND_PROFIT_MONTHLY_YOY"].append(
                 {"date": observed, "value": _signed(*monthly_profit.groups()), **metadata}
             )
-        if page_count > 20:
+        if archive:
             time.sleep(0.15)
     return _series_frames(output)
 
 
-def _load_real_estate_activity(page_count: int = 14) -> dict[str, pd.DataFrame]:
+def _property_rows_from_tables(
+    tables: list[pd.DataFrame], observed: dt.date, metadata: dict
+) -> dict[str, list[dict]]:
+    """Extract nationwide property totals across historical NBS label changes.
+
+    Older releases use ``商品房`` while newer releases use ``新建商品房``.
+    Matching only the stable semantic prefix keeps both vintages comparable and
+    prevents the regional tables or the indented residential sub-rows from
+    being mistaken for the nationwide total.
+    """
+
     output: dict[str, list[dict]] = {
         code: []
         for code in (
@@ -659,43 +1149,97 @@ def _load_real_estate_activity(page_count: int = 14) -> dict[str, pd.DataFrame]:
         )
     }
     labels = {
-        "房地产开发投资（亿元）": ("CN_RE_INVEST_YTD", "CN_RE_INVEST_YTD_YOY"),
-        "新建商品房销售面积（万平方米）": (
+        "房地产开发投资": ("CN_RE_INVEST_YTD", "CN_RE_INVEST_YTD_YOY"),
+        "新建商品房销售面积": (
             "CN_RE_SALES_AREA_YTD",
             "CN_RE_SALES_AREA_YTD_YOY",
         ),
-        "新建商品房销售额（亿元）": (
+        "商品房销售面积": (
+            "CN_RE_SALES_AREA_YTD",
+            "CN_RE_SALES_AREA_YTD_YOY",
+        ),
+        "新建商品房销售额": (
             "CN_RE_SALES_VALUE_YTD",
             "CN_RE_SALES_VALUE_YTD_YOY",
         ),
-        "房屋新开工面积（万平方米）": ("CN_RE_STARTS_YTD", "CN_RE_STARTS_YTD_YOY"),
-        "房屋施工面积（万平方米）": ("CN_RE_CONSTRUCTION", "CN_RE_CONSTRUCTION_YOY"),
+        "商品房销售额": (
+            "CN_RE_SALES_VALUE_YTD",
+            "CN_RE_SALES_VALUE_YTD_YOY",
+        ),
+        "房屋新开工面积": ("CN_RE_STARTS_YTD", "CN_RE_STARTS_YTD_YOY"),
+        "房地产新开工施工面积": (
+            "CN_RE_STARTS_YTD",
+            "CN_RE_STARTS_YTD_YOY",
+        ),
+        "房屋施工面积": ("CN_RE_CONSTRUCTION", "CN_RE_CONSTRUCTION_YOY"),
+        "房地产施工面积": ("CN_RE_CONSTRUCTION", "CN_RE_CONSTRUCTION_YOY"),
     }
-    for source_url, title in _nbs_links(r"全国房地产市场基本情况", page_count):
-        observed = _period_date(title)
-        if observed is None:
+    for table in tables:
+        if table.shape[1] < 3:
             continue
-        try:
-            source = _get_nbs_text(source_url)
-            tables = pd.read_html(StringIO(source))
-        except Exception:
-            logger.warning("NBS real-estate release failed: %s", source_url, exc_info=True)
-            continue
-        metadata = {**_publication_metadata(source, source_url), "status": "published"}
-        summary = next((table for table in tables if table.shape[1] == 3), None)
-        if summary is None:
-            continue
-        for _, row in summary.iterrows():
-            pair = labels.get(str(row.iloc[0]).strip())
+        for _, row in table.iterrows():
+            raw_label = re.sub(r"\s+", "", str(row.iloc[0])).strip()
+            label = re.split(r"[（(]", raw_label, maxsplit=1)[0]
+            pair = labels.get(label)
             if not pair:
                 continue
             absolute = pd.to_numeric(row.iloc[1], errors="coerce")
             yoy = pd.to_numeric(row.iloc[2], errors="coerce")
             if pd.notna(absolute):
-                output[pair[0]].append({"date": observed, "value": float(absolute), **metadata})
+                output[pair[0]].append(
+                    {"date": observed, "value": float(absolute), **metadata}
+                )
             if pd.notna(yoy):
-                output[pair[1]].append({"date": observed, "value": float(yoy), **metadata})
-        if page_count > 20:
+                output[pair[1]].append(
+                    {"date": observed, "value": float(yoy), **metadata}
+                )
+    return output
+
+
+def _load_real_estate_activity(
+    page_count: int = 14, *, start_page: int = 0, archive_shard: int = 0
+) -> dict[str, pd.DataFrame]:
+    output: dict[str, list[dict]] = {
+        code: []
+        for code in (
+            "CN_RE_INVEST_YTD",
+            "CN_RE_INVEST_YTD_YOY",
+            "CN_RE_SALES_AREA_YTD",
+            "CN_RE_SALES_AREA_YTD_YOY",
+            "CN_RE_SALES_VALUE_YTD",
+            "CN_RE_SALES_VALUE_YTD_YOY",
+            "CN_RE_STARTS_YTD",
+            "CN_RE_STARTS_YTD_YOY",
+            "CN_RE_CONSTRUCTION",
+            "CN_RE_CONSTRUCTION_YOY",
+        )
+    }
+    archive = page_count > 14 or start_page > 0 or archive_shard > 0
+    for source_url, title in _nbs_links(
+        r"全国房地产市场基本情况|全国房地产开发投资",
+        page_count,
+        archive=archive,
+        start_page=start_page,
+        archive_shard=archive_shard,
+    ):
+        observed = _period_date(title)
+        if observed is None:
+            continue
+        try:
+            source = (
+                _get_nbs_archive_text(source_url)
+                if archive
+                else _get_nbs_text(source_url)
+            )
+            tables = pd.read_html(StringIO(source))
+        except Exception:
+            logger.warning("NBS real-estate release failed: %s", source_url, exc_info=True)
+            continue
+        metadata = {**_publication_metadata(source, source_url), "status": "published"}
+        page_rows = _property_rows_from_tables(tables, observed, metadata)
+        for code, rows in page_rows.items():
+            output[code].extend(rows)
+        if archive:
             time.sleep(0.15)
     return _series_frames(output)
 
@@ -726,8 +1270,9 @@ def _load_tsf_components() -> dict[str, pd.DataFrame]:
     return _series_frames(output)
 
 
-@lru_cache(maxsize=4)
-def _pboc_release_catalog(page_count: int = 2) -> tuple[tuple[str, str], ...]:
+def _pboc_release_catalog(
+    page_count: int = 2, *, archive: bool = False
+) -> tuple[tuple[str, str], ...]:
     """Return current PBOC credit releases plus the immediately preceding page.
 
     The PBOC archive does not use ``index_1.html``. Its actual pagination is
@@ -735,6 +1280,14 @@ def _pboc_release_catalog(page_count: int = 2) -> tuple[tuple[str, str], ...]:
     current releases to the longer transport-mirror history without crawling
     hundreds of old detail pages on every refresh.
     """
+    if page_count < 1:
+        raise ValueError("page_count must be at least 1")
+    cache_key = f"pboc_release_catalog:{page_count}"
+    if not archive:
+        cached = _cache.get(cache_key)
+        if cached is not None and time.time() - cached[0] <= _CACHE_TTL:
+            return cached[1]
+
     found: dict[str, str] = {}
     index_urls = [urljoin(_PBOC_RELEASE_BASE, "index.html")]
     index_urls.extend(
@@ -759,6 +1312,84 @@ def _pboc_release_catalog(page_count: int = 2) -> tuple[tuple[str, str], ...]:
             )
             if is_credit_release and "地区社会融资规模" not in title:
                 found[urljoin(page_url, anchor.get("href"))] = title
+    result = tuple(found.items())
+    if not archive:
+        _cache[cache_key] = (time.time(), result)
+    return result
+
+
+def _pboc_news_release_catalog(
+    page_count: int = 10,
+    *,
+    start_page: int = 1,
+    include_older_boundary: bool = False,
+) -> tuple[tuple[str, str], ...]:
+    """Discover original monthly AFRE releases in the PBOC news archive.
+
+    News page numbers drift whenever newer articles are inserted. The current
+    first page is therefore read on every archive run to discover ``totalpage``;
+    detail URL and content, rather than the page number, identify evidence.
+    """
+
+    if page_count < 1:
+        raise ValueError("page_count must be at least 1")
+    if start_page < 1:
+        raise ValueError("start_page must be at least 1")
+    first_source = _request_text(urljoin(_PBOC_NEWS_BASE, "index.html"))
+    total_match = re.search(r"totalpage=[\"'](\d+)[\"']", first_source, re.I)
+    if total_match is None:
+        visible_total = re.search(
+            r"(?:^|\s)1\s*/\s*(\d{1,4})(?:\s|$)",
+            _text_from_html(first_source),
+        )
+        if visible_total is None and start_page > 1:
+            raise RuntimeError("PBOC news archive page count could not be discovered")
+        total_pages = int(visible_total.group(1)) if visible_total else 1
+    else:
+        total_pages = int(total_match.group(1))
+    final_page = min(start_page + page_count - 1, total_pages)
+    if start_page > final_page:
+        return ()
+
+    found: dict[str, str] = {}
+
+    def collect(page: int) -> None:
+        page_url = (
+            urljoin(_PBOC_NEWS_BASE, "index.html")
+            if page == 1
+            else urljoin(_PBOC_NEWS_BASE, f"11040-{page}.html")
+        )
+        try:
+            source = first_source if page == 1 else _request_text(page_url)
+        except Exception:
+            logger.warning("PBOC news archive index failed: %s", page_url, exc_info=True)
+            return
+        document = lxml_html.fromstring(source)
+        for anchor in document.xpath("//a[@href]"):
+            title = (anchor.get("title") or " ".join(anchor.text_content().split())).strip()
+            if (
+                re.search(r"社会融资规模(?:增量)?统计数据报告", title)
+                and "地区社会融资规模" not in title
+                and "存量" not in title
+            ):
+                target = urljoin(page_url, anchor.get("href"))
+                if _is_pboc_https_url(target):
+                    found[target] = title
+
+    for page in range(start_page, final_page + 1):
+        collect(page)
+
+    # A monthly flow reconstructed from cumulative releases needs the previous
+    # month. Archive batches move from newer to older pages, so scan just far
+    # enough beyond the requested range to include one older release. This
+    # makes adjacent batches reproduce a single full-range run at the boundary.
+    if include_older_boundary and found and final_page < total_pages:
+        scan_end = min(final_page + _PBOC_BOUNDARY_SCAN_PAGES, total_pages)
+        for page in range(final_page + 1, scan_end + 1):
+            count_before = len(found)
+            collect(page)
+            if len(found) > count_before:
+                break
     return tuple(found.items())
 
 
@@ -794,6 +1425,51 @@ def _credit_ytd_values(text: str) -> dict[str, float]:
     }
 
 
+def _credit_monthly_values(
+    text: str, observed: dt.date | None = None
+) -> dict[str, float]:
+    """Extract a release's direct monthly AFRE values in 100 million yuan.
+
+    Direct monthly figures are preferred to differencing year-to-date totals:
+    they preserve the value the PBOC actually published for that month and do
+    not amplify revisions to an earlier cumulative observation.
+    """
+
+    month_pattern = str(observed.month) if observed is not None else r"\d{1,2}"
+    anchors = re.finditer(
+        rf"(?:(?P<year>20\d{{2}})年)?{month_pattern}月(?:份)?"
+        r"社会融资规模(?:增量)?为\s*[\d.]+\s*(?:万亿元|亿元)",
+        text,
+    )
+    anchor = next(
+        (
+            candidate
+            for candidate in anchors
+            if observed is None
+            or candidate.group("year") is None
+            or int(candidate.group("year")) == observed.year
+        ),
+        None,
+    )
+    if not anchor:
+        return {}
+    segment = text[anchor.start() : anchor.start() + 1800]
+    cumulative_boundary = segment.find("社会融资规模增量累计", anchor.end() - anchor.start())
+    if cumulative_boundary >= 0:
+        segment = segment[:cumulative_boundary]
+    patterns = {
+        "CN_TSF": r"社会融资规模增量",
+        "CN_TSF_RMB_LOANS_FLOW": r"(?:当月)?对实体经济发放的人民币贷款",
+        "CN_CORP_BOND_FINANCING": r"企业债券(?:融资净|净融资)",
+        "CN_GOV_BOND_FINANCING": r"政府债券净融资",
+    }
+    return {
+        code: value
+        for code, pattern in patterns.items()
+        if (value := _amount_in_100m(segment, pattern)) is not None
+    }
+
+
 def _derive_monthly_from_ytd(rows: list[dict]) -> list[dict]:
     """Difference only adjacent published cumulative observations.
 
@@ -811,7 +1487,14 @@ def _derive_monthly_from_ytd(rows: list[dict]) -> list[dict]:
             if previous is None:
                 continue
             value = row["value"] - previous["value"]
-        monthly.append({**row, "value": round(value, 6), "status": "derived"})
+        monthly.append(
+            {
+                **row,
+                "value": round(value, 6),
+                "status": "derived",
+                "formula_version": PBOC_YTD_DIFF_FORMULA_VERSION,
+            }
+        )
     return monthly
 
 
@@ -922,8 +1605,18 @@ def _load_pboc_stock_archives() -> dict[str, pd.DataFrame]:
     return _series_frames(output)
 
 
-def _load_pboc_credit() -> dict[str, pd.DataFrame]:
-    archives = _load_pboc_stock_archives()
+def _load_pboc_credit(
+    page_count: int = 2, *, archive: bool = False, start_page: int = 1
+) -> dict[str, pd.DataFrame]:
+    # The stock PDF bundle has no precise original publication timestamps and
+    # therefore cannot contribute evidence to a strict archive backfill.
+    archives = (
+        _series_frames(
+            {"CN_TSF_STOCK_YOY": [], "CN_TSF_RMB_LOAN_STOCK_YOY": []}
+        )
+        if archive
+        else _load_pboc_stock_archives()
+    )
     output: dict[str, list[dict]] = {
         "CN_TSF": [],
         "CN_TSF_RMB_LOANS_FLOW": [],
@@ -941,9 +1634,23 @@ def _load_pboc_credit() -> dict[str, pd.DataFrame]:
         "CN_CORP_BOND_FINANCING": [],
         "CN_GOV_BOND_FINANCING": [],
     }
-    for source_url, title in _pboc_release_catalog():
+    direct: dict[str, list[dict]] = {code: [] for code in cumulative}
+    catalog = (
+        _pboc_news_release_catalog(
+            page_count,
+            start_page=start_page,
+            include_older_boundary=True,
+        )
+        if archive
+        else _pboc_release_catalog(page_count)
+    )
+    for source_url, title in catalog:
         try:
-            source = _request_text(source_url)
+            source = (
+                _get_pboc_archive_text(source_url)
+                if archive
+                else _request_text(source_url)
+            )
         except Exception:
             logger.warning("PBOC credit release failed: %s", source_url, exc_info=True)
             continue
@@ -967,6 +1674,10 @@ def _load_pboc_credit() -> dict[str, pd.DataFrame]:
             output["CN_TSF_RMB_LOAN_STOCK_YOY"].append(
                 {"date": observed, "value": _signed(*rmb_stock.groups()), **metadata}
             )
+        for code, value in _credit_monthly_values(text, observed).items():
+            direct[code].append(
+                {"date": observed, "value": value, **metadata}
+            )
         for code, value in _credit_ytd_values(text).items():
             row = {"date": observed, "value": value, **metadata}
             cumulative[code].append(row)
@@ -974,7 +1685,13 @@ def _load_pboc_credit() -> dict[str, pd.DataFrame]:
                 output["CN_GOV_BOND_FINANCING_YTD"].append(row)
 
     for code, rows in cumulative.items():
-        output[code].extend(_derive_monthly_from_ytd(rows))
+        direct_periods = {row["date"] for row in direct[code]}
+        output[code].extend(direct[code])
+        output[code].extend(
+            row
+            for row in _derive_monthly_from_ytd(rows)
+            if row["date"] not in direct_periods
+        )
     return _series_frames(output)
 
 
@@ -1342,6 +2059,11 @@ def _make_bundle_fetcher(bundle_key: str, loader, code: str):
 
 CHINA_CYCLE_FETCHERS = {
     "CN_IP": fetch_cn_industrial_production_history,
+    "CN_NMI": _make_bundle_fetcher(
+        "china_nmi_with_release_metadata",
+        _load_nmi_with_release_metadata,
+        "CN_NMI",
+    ),
     **{
         code: _make_bundle_fetcher("china_pmi_detail", _load_pmi, code)
         for code in (

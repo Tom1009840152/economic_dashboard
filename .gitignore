@@ -4,6 +4,7 @@ backend/__pycache__/
 backend/**/__pycache__/
 backend/.env
 backend/*.log
+backend/.cache/
 *.pyc
 
 # Node / Next.js

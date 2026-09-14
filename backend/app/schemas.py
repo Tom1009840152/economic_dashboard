@@ -431,3 +431,353 @@ class ChinaBusinessCycleMatrixOut(BaseModel):
     months: list[CycleMonthOut]
     latest: CycleLatestOut | None = None
     warnings: list[str]
+
+
+RelativeCyclePhase = Literal["recovery", "expansion", "slowdown", "contraction"]
+RegimeStatus = Literal[
+    "confirmed",
+    "candidate",
+    "transition",
+    "held_uncomparable",
+    "stale",
+    "insufficient",
+]
+
+
+class RegimeMethodologyOut(BaseModel):
+    classification_scope: Literal["relative_growth_cycle_not_recession_call"]
+    level_source: str
+    level_smoothing_months: int
+    momentum_definition: str
+    momentum_comparison_months: int
+    level_neutral: float
+    level_buffer: float
+    momentum_buffer: float
+    confirmation_months_with_leading: int
+    confirmation_months_without_leading: int
+    phase_order: list[RelativeCyclePhase]
+    role_comparability: str
+    balanced_panel_months: int
+    basis_change_policy: str
+    coincident_min_coverage: float
+    coincident_high_coverage: float
+    absolute_anchor_min_valid: int
+    absolute_breadth_expansionary: float
+    absolute_breadth_contractionary: float
+    inflation_direction_buffer_pp: float
+
+
+class RegimeDriverOut(BaseModel):
+    code: str
+    name: str
+    block_key: str
+    source_period: str | None = None
+    contribution: float
+
+
+class AbsoluteAnchorPointOut(BaseModel):
+    code: str
+    name: str
+    three_month_average: float | None = None
+    threshold: float
+    gap: float | None = None
+    state: Literal["above", "below", "unavailable"]
+
+
+class AbsoluteAnchorOut(BaseModel):
+    state: Literal["expansionary", "mixed", "contractionary", "unavailable"]
+    breadth: float | None = None
+    gap: float | None = None
+    valid_count: int
+    total_count: int
+    conflict: bool
+    anchors: list[AbsoluteAnchorPointOut]
+
+
+class RegimeInflationOut(BaseModel):
+    period: str
+    value: float | None = None
+    level: Literal["very_low", "mild", "elevated", "unavailable"]
+    three_month_average: float | None = None
+    momentum: float | None = None
+    state: Literal[
+        "deflation_pressure",
+        "low_inflation",
+        "moderate",
+        "heating",
+        "unavailable",
+    ]
+    direction: Literal["reflation", "disinflation", "stable", "unavailable"]
+    ppi_value: float | None = None
+    ppi_three_month_average: float | None = None
+    rationale: str
+
+
+class RegimeMonthOut(BaseModel):
+    period: str
+    phase: RelativeCyclePhase | None = None
+    phase_label: str
+    raw_phase: RelativeCyclePhase | None = None
+    phase_status: RegimeStatus
+    confirmed: bool
+    confirmed_phase: RelativeCyclePhase | None = None
+    candidate_phase: RelativeCyclePhase | None = None
+    candidate_since: str | None = None
+    confirmed_since: str | None = None
+    candidate_streak: int
+    required_confirmation_months: int | None = None
+    duration_months: int | None = None
+    undecidable_streak: int
+    decision_eligible: bool
+    decision_reasons: list[str]
+    coincident_comparable: bool
+    leading_comparable: bool
+    coincident_coverage: float | None = None
+    leading_coverage: float | None = None
+    coincident_basis: list[str]
+    leading_basis: list[str]
+    coincident_basis_signature: str | None = None
+    leading_basis_signature: str | None = None
+    coincident_basis_coverage: float | None = None
+    leading_basis_coverage: float | None = None
+    coincident_basis_changed: bool
+    leading_basis_changed: bool
+    coincident_index: float | None = None
+    leading_index: float | None = None
+    level_3m: float | None = None
+    level_gap: float | None = None
+    momentum_3m: float | None = None
+    diagnostic_level_3m: float | None = None
+    diagnostic_momentum_3m: float | None = None
+    level_axis: Literal["above", "below", "neutral", "unavailable"]
+    momentum_axis: Literal["rising", "falling", "neutral", "unavailable"]
+    leading_level_3m: float | None = None
+    leading_gap: float | None = None
+    leading_momentum_3m: float | None = None
+    leading_diagnostic_level_3m: float | None = None
+    leading_diagnostic_momentum_3m: float | None = None
+    leading_direction: Literal["up", "down", "neutral", "unavailable"]
+    leading_confirmation: Literal["confirmed", "divergent", "neutral", "unavailable"]
+    confidence: Literal["high", "medium", "low", "insufficient"]
+    confidence_reasons: list[str]
+    data_basis: Literal["final"]
+    realtime_coverage: float
+    absolute_anchor: AbsoluteAnchorOut
+    inflation: RegimeInflationOut
+    summary: str
+    outlook: str
+    triggers: list[str]
+    positive_contributions: list[RegimeDriverOut]
+    negative_contributions: list[RegimeDriverOut]
+
+
+class RegimeTrajectoryPointOut(BaseModel):
+    period: str
+    level_gap: float
+    momentum_3m: float | None = None
+    diagnostic_momentum_3m: float | None = None
+    phase: RelativeCyclePhase | None = None
+    phase_status: RegimeStatus
+    comparable: bool
+
+
+class RegimeTimelineOut(BaseModel):
+    phase: RelativeCyclePhase
+    phase_label: str
+    start_period: str
+    end_period: str
+    duration_months: int
+    ongoing: bool
+
+
+class ChinaCycleRegimeOut(BaseModel):
+    region: Literal["CN"]
+    country: str
+    title: str
+    mode: Literal["current"]
+    data_basis: Literal["final"]
+    as_of: str | None = None
+    last_decision_period: str | None = None
+    realtime_coverage: float | None = None
+    a1_methodology_version: str | None = None
+    methodology_version: str
+    methodology_note: str
+    methodology: RegimeMethodologyOut
+    change_conditions: list[str]
+    latest: RegimeMonthOut | None = None
+    months: list[RegimeMonthOut]
+    trajectory: list[RegimeTrajectoryPointOut]
+    timeline: list[RegimeTimelineOut]
+    a1_warnings: list[str]
+    warnings: list[str]
+
+
+class CycleBacktestDefinitionOut(BaseModel):
+    timezone: Literal["Asia/Shanghai"]
+    decision_schedule: Literal["observation_month_plus_1_day_20_18_00"]
+    strict: Literal[True]
+    stored_available_at_timezone: str
+    observation_alignment: str
+    availability_policy: str
+    vintage_selection: str
+    final_reference: str
+    final_cutoff_at: datetime
+    a1_methodology_version: str
+    a2_methodology_version: str
+    a3_methodology_version: str
+
+
+class CycleBacktestCoverageOut(BaseModel):
+    scheduled_months: int
+    display_evaluable_months: int
+    display_evaluable_rate: float | None = None
+    decision_evaluable_months: int
+    decision_evaluable_rate: float | None = None
+    unavailable_months: int
+    reason_counts: dict[str, int]
+
+
+class CycleBacktestConfusionOut(BaseModel):
+    realtime_phase: RelativeCyclePhase
+    final_phase: RelativeCyclePhase
+    count: int
+
+
+class CycleBacktestStabilityOut(BaseModel):
+    comparable_months: int
+    agreement_count: int | None = None
+    agreement_rate: float | None = None
+    flip_count: int | None = None
+    flip_rate: float | None = None
+    decision_comparable_months: int
+    decision_agreement_count: int | None = None
+    decision_agreement_rate: float | None = None
+    level_axis_comparable_months: int
+    level_axis_agreement_rate: float | None = None
+    momentum_axis_comparable_months: int
+    momentum_axis_agreement_rate: float | None = None
+    confusion: list[CycleBacktestConfusionOut]
+    minimum_rate_sample: int
+    sample_note: str | None = None
+
+
+class CycleBacktestTransitionEventOut(BaseModel):
+    final_phase: RelativeCyclePhase
+    final_confirmation_period: str
+    realtime_confirmation_period: str | None = None
+    signed_lag_months: int | None = None
+    match_status: Literal["matched", "unmatched"]
+
+
+class CycleBacktestTransitionsOut(BaseModel):
+    matched_count: int
+    lag_median_months: float | None = None
+    lag_q1_months: float | None = None
+    lag_q3_months: float | None = None
+    unmatched_realtime: int
+    unmatched_final: int
+    minimum_lag_sample: int
+    events: list[CycleBacktestTransitionEventOut]
+
+
+class CycleBacktestRobustnessOut(BaseModel):
+    full_sample: CycleBacktestStabilityOut
+    exclude_covid_2020: CycleBacktestStabilityOut
+
+
+class CycleBacktestInputReadinessOut(BaseModel):
+    code: str
+    name: str
+    role: str
+    final_observations: int
+    known_available_at_observations: int
+    on_schedule_observations: int
+    unknown_available_at_observations: int
+    ambiguous_revision_observations: int
+    unknown_revision_observations: int
+    non_reconstructable_observations: int
+    availability_rate: float | None = None
+    on_schedule_rate: float | None = None
+    first_known_period: str | None = None
+    last_known_period: str | None = None
+
+
+class CycleBacktestAvailabilityOut(BaseModel):
+    final_observations: int
+    strict_observations: int
+    observation_coverage: float | None = None
+    required_input_codes: int
+    available_input_codes: int
+    input_code_coverage: float
+    unknown_available_at_observations: int
+    not_yet_available_observations: int
+    ambiguous_revisions_excluded: int
+    unknown_revisions_excluded: int
+    non_reconstructable_observations_excluded: int
+    revised_observations: int
+    missing_final_observations: int
+
+
+class CycleBacktestPhaseSnapshotOut(BaseModel):
+    phase: RelativeCyclePhase | None = None
+    phase_label: str
+    phase_status: RegimeStatus
+    confirmed_phase: RelativeCyclePhase | None = None
+    confirmed_since: str | None = None
+    last_decision_period: str | None = None
+    decision_eligible: bool
+    level_axis: Literal["above", "below", "neutral", "unavailable"]
+    momentum_axis: Literal["rising", "falling", "neutral", "unavailable"]
+    level_3m: float | None = None
+    momentum_3m: float | None = None
+    coincident_index: float | None = None
+    leading_index: float | None = None
+    confidence: Literal["high", "medium", "low", "insufficient"]
+
+
+class CycleBacktestMonthOut(BaseModel):
+    observation_period: str
+    decision_as_of: datetime
+    status: Literal["evaluable", "limited", "unavailable"]
+    exclusion_reasons: list[str]
+    availability: CycleBacktestAvailabilityOut
+    realtime: CycleBacktestPhaseSnapshotOut | None = None
+    final: CycleBacktestPhaseSnapshotOut | None = None
+    comparable: bool
+    phase_agreement: bool | None = None
+    phase_changed: bool | None = None
+    decision_comparable: bool
+    decision_phase_agreement: bool | None = None
+    comparison_type: Literal[
+        "same",
+        "phase_changed",
+        "realtime_unclassified",
+        "final_unclassified",
+        "both_unclassified",
+        "unavailable",
+    ]
+    coincident_revision_delta: float | None = None
+    leading_revision_delta: float | None = None
+
+
+class ChinaCycleBacktestOut(BaseModel):
+    region: Literal["CN"]
+    country: str
+    title: str
+    mode: Literal["pseudo_realtime"]
+    data_basis: Literal["strict_available_at_vintage"]
+    status: Literal["ok", "limited", "unavailable"]
+    as_of: str | None = None
+    start_period: str | None = None
+    end_period: str | None = None
+    methodology_note: str
+    summary: str
+    backtest_definition: CycleBacktestDefinitionOut
+    coverage: CycleBacktestCoverageOut
+    stability: CycleBacktestStabilityOut
+    transitions: CycleBacktestTransitionsOut
+    robustness: CycleBacktestRobustnessOut
+    input_readiness: list[CycleBacktestInputReadinessOut]
+    latest: CycleBacktestMonthOut | None = None
+    months: list[CycleBacktestMonthOut]
+    warnings: list[str]

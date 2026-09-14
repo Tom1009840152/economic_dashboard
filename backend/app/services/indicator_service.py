@@ -21,6 +21,7 @@ from app.services.data_quality import (
 
 logger = logging.getLogger(__name__)
 _STATUS_PRIORITY = {
+    "revision_metadata_unknown": 0,
     "backfilled": 0,
     "mirror_backfill": 0,
     "historical_backfill": 1,
@@ -101,7 +102,20 @@ def _avoid_metadata_downgrade(point: DataPoint, value: Decimal, metadata: dict) 
     current_value = Decimal(point.value).quantize(Decimal("0.000001"))
     incoming_status = metadata.get("status")
     if current_value != value:
-        return metadata
+        # Publication metadata belongs to a specific numeric vintage.  A sparse
+        # revision must never inherit the previous vintage's timestamp: doing so
+        # would make a value learned later appear visible in strict as-of views.
+        # Formula/source provenance belongs to that vintage as well.  Keep an
+        # explicitly supplied field, otherwise clear the stale value and label
+        # the revision honestly instead of silently calling it published.
+        return {
+            **metadata,
+            "release_date": metadata.get("release_date"),
+            "available_at": metadata.get("available_at"),
+            "source_url": metadata.get("source_url"),
+            "formula_version": metadata.get("formula_version"),
+            "status": metadata.get("status", "revision_metadata_unknown"),
+        }
     if incoming_status is not None and _STATUS_PRIORITY.get(
         incoming_status, 0
     ) < _STATUS_PRIORITY.get(point.status, 0):
@@ -146,7 +160,9 @@ def _store_points(
 
     Fetchers may return the original ``date, value`` pair or additionally provide
     ``release_date``, ``available_at``, ``source_url`` and ``status``. Missing
-    metadata never erases metadata captured by an earlier, richer source.
+    metadata only preserves metadata captured by an earlier, richer source when
+    the numeric value is unchanged.  A sparse numeric revision clears the old
+    release timestamp so it cannot leak into strict vintage queries.
     """
     if df is None or df.empty:
         return 0

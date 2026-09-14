@@ -1,0 +1,667 @@
+import unittest
+from datetime import date
+from unittest.mock import patch
+
+import pandas as pd
+
+from app.main import app
+from app.schemas import ChinaCycleRegimeOut
+from app.services.china_cycle_regime import (
+    RegimeTracker,
+    _absolute_anchor,
+    _advance_tracker,
+    _axis,
+    _balanced_role_panels,
+    _buffered_matrix,
+    _build_regime_from_matrix,
+    _confidence,
+    _drivers,
+    _inflation_by_month,
+    _leading_direction,
+    _outlook,
+)
+
+
+class ChinaCycleRegimeTests(unittest.TestCase):
+    def test_two_confirmed_months_switch_without_backfill(self) -> None:
+        tracker = RegimeTracker()
+        first = _advance_tracker(
+            tracker,
+            period="2025-01",
+            raw_phase="expansion",
+            decision_eligible=True,
+            leading_direction="up",
+        )
+        second = _advance_tracker(
+            tracker,
+            period="2025-02",
+            raw_phase="expansion",
+            decision_eligible=True,
+            leading_direction="up",
+        )
+
+        self.assertEqual(first["phase_status"], "candidate")
+        self.assertFalse(first["confirmed"])
+        self.assertEqual(first["candidate_since"], "2025-01")
+        self.assertEqual(second["phase_status"], "confirmed")
+        self.assertEqual(second["confirmed_phase"], "expansion")
+        self.assertEqual(second["confirmed_since"], "2025-02")
+
+    def test_divergent_leading_needs_three_months_and_opposite_is_not_relabelled(self) -> None:
+        tracker = RegimeTracker(
+            confirmed_phase="expansion",
+            confirmed_since="2024-01",
+        )
+        states = [
+            _advance_tracker(
+                tracker,
+                period=f"2025-0{month}",
+                raw_phase="contraction",
+                decision_eligible=True,
+                leading_direction="up",
+            )
+            for month in (1, 2, 3)
+        ]
+
+        self.assertEqual(states[0]["candidate_phase"], "contraction")
+        self.assertEqual(states[0]["required_confirmation_months"], 3)
+        self.assertEqual(states[1]["confirmed_phase"], "expansion")
+        self.assertEqual(states[2]["confirmed_phase"], "contraction")
+        self.assertEqual(states[2]["confirmed_since"], "2025-03")
+
+    def test_reverse_adjacent_transition_keeps_observed_direction(self) -> None:
+        tracker = RegimeTracker(
+            confirmed_phase="slowdown",
+            confirmed_since="2024-01",
+        )
+        state = _advance_tracker(
+            tracker,
+            period="2025-01",
+            raw_phase="expansion",
+            decision_eligible=True,
+            leading_direction="up",
+        )
+
+        self.assertEqual(state["phase"], "slowdown")
+        self.assertEqual(state["phase_status"], "transition")
+        self.assertEqual(state["candidate_phase"], "expansion")
+        self.assertEqual(state["required_confirmation_months"], 2)
+
+    def test_opposite_transition_needs_three_months_even_with_leading(self) -> None:
+        tracker = RegimeTracker(
+            confirmed_phase="expansion",
+            confirmed_since="2024-01",
+        )
+        states = [
+            _advance_tracker(
+                tracker,
+                period=f"2025-0{month}",
+                raw_phase="contraction",
+                decision_eligible=True,
+                leading_direction="down",
+            )
+            for month in (1, 2, 3)
+        ]
+
+        self.assertEqual(states[0]["candidate_phase"], "contraction")
+        self.assertEqual(states[0]["required_confirmation_months"], 3)
+        self.assertEqual(states[1]["confirmed_phase"], "expansion")
+        self.assertEqual(states[2]["confirmed_phase"], "contraction")
+
+    def test_uncomparable_month_never_accumulates_or_switches(self) -> None:
+        tracker = RegimeTracker(
+            confirmed_phase="recovery",
+            confirmed_since="2024-10",
+            candidate_phase="expansion",
+            candidate_since="2025-01",
+            candidate_streak=1,
+        )
+        first = _advance_tracker(
+            tracker,
+            period="2025-02",
+            raw_phase="expansion",
+            decision_eligible=False,
+            leading_direction="up",
+        )
+        second = _advance_tracker(
+            tracker,
+            period="2025-03",
+            raw_phase="expansion",
+            decision_eligible=False,
+            leading_direction="up",
+        )
+        resumed = _advance_tracker(
+            tracker,
+            period="2025-04",
+            raw_phase="expansion",
+            decision_eligible=True,
+            leading_direction="up",
+        )
+
+        self.assertEqual(first["phase_status"], "held_uncomparable")
+        self.assertIsNone(first["candidate_phase"])
+        self.assertIsNone(first["candidate_since"])
+        self.assertEqual(first["candidate_streak"], 0)
+        self.assertEqual(second["phase_status"], "stale")
+        self.assertEqual(second["confirmed_phase"], "recovery")
+        self.assertIsNone(second["candidate_phase"])
+        self.assertEqual(second["candidate_streak"], 0)
+        self.assertEqual(resumed["phase_status"], "transition")
+        self.assertEqual(resumed["candidate_phase"], "expansion")
+        self.assertEqual(resumed["candidate_since"], "2025-04")
+        self.assertEqual(resumed["candidate_streak"], 1)
+
+    def test_paused_raw_target_cannot_override_leading_reference(self) -> None:
+        tracker = RegimeTracker(
+            confirmed_phase="expansion",
+            confirmed_since="2024-01",
+            candidate_phase="contraction",
+            candidate_since="2025-01",
+            candidate_streak=2,
+        )
+        state = _advance_tracker(
+            tracker,
+            period="2025-02",
+            raw_phase="contraction",
+            decision_eligible=False,
+            leading_direction="up",
+        )
+
+        self.assertEqual(state["phase"], "expansion")
+        self.assertIsNone(state["candidate_phase"])
+        self.assertEqual(state["leading_confirmation"], "confirmed")
+
+    def test_outlook_names_candidate_only_when_candidate_exists(self) -> None:
+        supported = _outlook(
+            "up",
+            "confirmed",
+            candidate_phase=None,
+            confirmed_phase="expansion",
+        )
+        divergent = _outlook(
+            "down",
+            "divergent",
+            candidate_phase=None,
+            confirmed_phase="expansion",
+        )
+        candidate = _outlook(
+            "up",
+            "confirmed",
+            candidate_phase="recovery",
+            confirmed_phase="contraction",
+        )
+
+        self.assertIn("已确认的扩张阶段", supported)
+        self.assertNotIn("候选", supported)
+        self.assertIn("转向风险", divergent)
+        self.assertIn("尚无候选切换", divergent)
+        self.assertIn("复苏候选", candidate)
+
+    def test_first_uncomparable_month_has_no_formal_phase(self) -> None:
+        tracker = RegimeTracker()
+        state = _advance_tracker(
+            tracker,
+            period="2025-01",
+            raw_phase="expansion",
+            decision_eligible=False,
+            leading_direction="up",
+        )
+        second = _advance_tracker(
+            tracker,
+            period="2025-02",
+            raw_phase="expansion",
+            decision_eligible=False,
+            leading_direction="up",
+        )
+
+        self.assertEqual(state["phase_status"], "insufficient")
+        self.assertIsNone(state["phase"])
+        self.assertEqual(state["confirmed_phase"], None)
+        self.assertEqual(second["phase_status"], "insufficient")
+        self.assertIsNone(second["phase"])
+
+    def test_leading_dead_zone_is_neutral_even_when_level_is_high(self) -> None:
+        self.assertEqual(_leading_direction(1.5), "up")
+        self.assertEqual(_leading_direction(-1.5), "down")
+        self.assertEqual(_leading_direction(1.49), "neutral")
+        self.assertEqual(_leading_direction(-1.49), "neutral")
+        self.assertEqual(_leading_direction(None), "unavailable")
+
+    def test_dead_zone_inherits_confirmed_axis(self) -> None:
+        self.assertEqual(_axis(0.2, kind="level", fallback_phase="slowdown"), "above")
+        self.assertEqual(_axis(-0.2, kind="momentum", fallback_phase="recovery"), "rising")
+        self.assertEqual(_axis(0.2, kind="level", fallback_phase=None), "neutral")
+        self.assertEqual(_axis(1.5, kind="level", fallback_phase=None), "above")
+        self.assertEqual(_axis(-1.5, kind="level", fallback_phase=None), "below")
+        self.assertEqual(_axis(1.5, kind="momentum", fallback_phase=None), "rising")
+        self.assertEqual(_axis(-1.5, kind="momentum", fallback_phase=None), "falling")
+
+    def test_one_uncomparable_month_is_low_but_two_are_insufficient(self) -> None:
+        one_month = _confidence(
+            coincident_confidence="high",
+            phase_status="held_uncomparable",
+            confirmed=True,
+            leading_confirmation="unavailable",
+            absolute_conflict=False,
+            recent_two_comparable=False,
+            diagnostics_available=False,
+            undecidable_streak=1,
+        )
+        two_months = _confidence(
+            coincident_confidence="high",
+            phase_status="stale",
+            confirmed=True,
+            leading_confirmation="unavailable",
+            absolute_conflict=False,
+            recent_two_comparable=False,
+            diagnostics_available=False,
+            undecidable_streak=2,
+        )
+
+        self.assertEqual(one_month[0], "low")
+        self.assertEqual(two_months[0], "insufficient")
+
+    def test_unclassified_dead_zone_is_insufficient_not_low(self) -> None:
+        confidence, reasons = _confidence(
+            coincident_confidence="high",
+            phase_status="insufficient",
+            confirmed=False,
+            leading_confirmation="neutral",
+            absolute_conflict=False,
+            recent_two_comparable=True,
+            diagnostics_available=True,
+            undecidable_streak=0,
+        )
+
+        self.assertEqual(confidence, "insufficient")
+        self.assertTrue(reasons)
+
+    def test_balanced_panel_keeps_january_hard_data_gap_decidable_after_change_month(self) -> None:
+        periods = pd.period_range("2024-01", periods=18, freq="M")
+        months = [
+            self._a1_month(str(period), 82 + index, 83 + index)
+            for index, period in enumerate(periods)
+        ]
+        january_index = next(index for index, period in enumerate(periods) if str(period) == "2025-01")
+        for signal in months[january_index]["blocks"][0]["signals"]:
+            if signal["code"] in {"CN_RETAIL", "CN_IP"}:
+                signal["standardized_score"] = None
+        panels = _balanced_role_panels(months, "coincident")
+
+        self.assertTrue(panels[january_index]["valid"])
+        self.assertTrue(panels[january_index]["changed"])
+        for index in range(january_index + 1, january_index + 5):
+            self.assertTrue(panels[index]["valid"])
+            self.assertFalse(panels[index]["changed"])
+            self.assertIsNotNone(panels[index]["momentum"])
+
+        matrix = {
+            "mode": "current",
+            "data_basis": "final",
+            "as_of": str(periods[-1]),
+            "methodology_version": "1.0.0",
+            "months": months,
+            "warnings": [],
+        }
+        payload = _build_regime_from_matrix(matrix, [], output_months=18)
+        rows = {item["period"]: item for item in payload["months"]}
+        self.assertFalse(rows["2025-01"]["decision_eligible"])
+        self.assertTrue(rows["2025-01"]["coincident_basis_changed"])
+        for period in ("2025-02", "2025-03", "2025-04", "2025-05"):
+            self.assertTrue(rows[period]["decision_eligible"])
+
+    def test_low_weight_two_signal_block_is_not_basis_eligible(self) -> None:
+        periods = pd.period_range("2025-01", periods=6, freq="M")
+        months = [self._a1_month(str(period), 95, 95) for period in periods]
+        property_block_index = 3
+        for month in months:
+            for signal in month["blocks"][property_block_index]["signals"]:
+                if signal["code"] not in {
+                    "CN_RE_STARTS_YTD_YOY",
+                    "CN_FISCAL_IMPULSE_PROXY",
+                }:
+                    signal["standardized_score"] = None
+        panel = _balanced_role_panels(months, "leading")[-1]
+
+        self.assertNotIn("CN_RE_STARTS_YTD_YOY", panel["codes"])
+        self.assertNotIn("CN_FISCAL_IMPULSE_PROXY", panel["codes"])
+
+    def test_absolute_breadth_is_separate_and_flags_hard_conflict(self) -> None:
+        above = [self._a1_month(f"2025-0{month}", 100, 100, anchor_value=51) for month in (1, 2, 3)]
+        supportive = _absolute_anchor(above, 2, "expansion")
+        self.assertEqual(supportive["state"], "expansionary")
+        self.assertEqual(supportive["breadth"], 1.0)
+        self.assertFalse(supportive["conflict"])
+
+        below = [self._a1_month(f"2025-0{month}", 100, 100, anchor_value=49) for month in (1, 2, 3)]
+        conflicting = _absolute_anchor(below, 2, "expansion")
+        self.assertEqual(conflicting["state"], "contractionary")
+        self.assertTrue(conflicting["conflict"])
+
+    def test_phase_drivers_exclude_leading_blocks(self) -> None:
+        month = self._a1_month("2025-01", 105, 100)
+        positives = _drivers(month, True)
+
+        self.assertTrue(positives)
+        self.assertTrue(all(item["block_key"] in {"activity", "employment_external"} for item in positives))
+        self.assertFalse(any(item["block_key"] == "demand_expectations" for item in positives))
+        self.assertAlmostEqual(sum(item["contribution"] for item in positives), 5.0)
+
+    def test_missing_leading_role_does_not_block_three_month_confirmation(self) -> None:
+        periods = pd.period_range("2025-01", periods=10, freq="M")
+        months = []
+        for index, period in enumerate(periods):
+            month = self._a1_month(str(period), 80 + index, 100)
+            month["leading_index"] = None
+            month["leading_coverage"] = 0.0
+            month["confidence"] = "insufficient"
+            for block in month["blocks"]:
+                if block["role"] != "leading":
+                    continue
+                block["score"] = None
+                for signal in block["signals"]:
+                    signal["standardized_score"] = None
+                    signal["contribution"] = None
+            months.append(month)
+        matrix = {
+            "mode": "current",
+            "data_basis": "final",
+            # Deliberately emulate A1 overall as_of falling behind.
+            "as_of": "2025-06",
+            "methodology_version": "1.0.0",
+            "months": months,
+            "warnings": [],
+        }
+
+        payload = _build_regime_from_matrix(matrix, [], output_months=10)
+
+        self.assertEqual(payload["as_of"], "2025-10")
+        self.assertEqual(payload["latest"]["period"], "2025-10")
+        self.assertEqual(payload["latest"]["confirmed_phase"], "recovery")
+        self.assertEqual(payload["latest"]["phase_status"], "confirmed")
+        self.assertEqual(payload["latest"]["leading_direction"], "unavailable")
+        self.assertEqual(payload["latest"]["confidence"], "medium")
+        self.assertTrue(
+            payload["latest"]["positive_contributions"]
+            or payload["latest"]["negative_contributions"]
+        )
+
+    def test_inflation_uses_core_cpi_and_ppi_without_cpi_fallback(self) -> None:
+        calendar = pd.period_range("2024-01", periods=24, freq="M")
+        core_values = [-0.2] * 6 + [0.3] * 6 + [1.0] * 6 + [1.0, 1.0, 1.0, 1.7, 1.9, 2.1]
+        ppi_values = [-2.0] * 6 + [0.2] * 6 + [0.0] * 6 + [0.0] * 6
+        rows = []
+        for code, values in (("CN_CORE_CPI", core_values), ("CN_PPI", ppi_values)):
+            rows.extend(
+                {
+                    "indicator_code": code,
+                    "date": period.end_time.date(),
+                    "value": value,
+                }
+                for period, value in zip(calendar, values)
+            )
+        result = _inflation_by_month(rows, calendar)
+
+        self.assertEqual(result["2024-06"]["state"], "deflation_pressure")
+        self.assertEqual(result["2024-12"]["state"], "low_inflation")
+        self.assertEqual(result["2025-06"]["state"], "moderate")
+        self.assertEqual(result["2025-12"]["state"], "heating")
+        self.assertEqual(result["2025-12"]["direction"], "reflation")
+
+        stable_high = _inflation_by_month(
+            [
+                {
+                    "indicator_code": "CN_CORE_CPI",
+                    "date": period.end_time.date(),
+                    "value": 2.0,
+                }
+                for period in pd.period_range("2025-01", periods=6, freq="M")
+            ],
+            pd.period_range("2025-01", periods=6, freq="M"),
+        )
+        self.assertEqual(stable_high["2025-06"]["state"], "moderate")
+        self.assertEqual(stable_high["2025-06"]["direction"], "stable")
+
+        no_core = _inflation_by_month(
+            [
+                {"indicator_code": "CN_CPI", "date": date(2025, 1, 31), "value": 3.0}
+            ],
+            pd.period_range("2025-01", periods=3, freq="M"),
+        )
+        self.assertEqual(no_core["2025-03"]["state"], "unavailable")
+
+    def test_full_payload_validates_and_api_contract_is_registered(self) -> None:
+        periods = pd.period_range("2023-01", periods=24, freq="M")
+        months = [
+            self._a1_month(
+                str(period),
+                94.0 + index * 0.7,
+                95.0 + index * 0.8,
+                anchor_value=49.0 + index * 0.1,
+            )
+            for index, period in enumerate(periods)
+        ]
+        matrix = {
+            "mode": "current",
+            "data_basis": "final",
+            "as_of": str(periods[-1]),
+            "methodology_version": "1.0.0",
+            "months": months,
+            "warnings": ["A1 warning"],
+        }
+        inflation_rows = []
+        for code, base in (("CN_CORE_CPI", 0.8), ("CN_PPI", -0.5)):
+            inflation_rows.extend(
+                {
+                    "indicator_code": code,
+                    "date": period.end_time.date(),
+                    "value": base + index * 0.01,
+                }
+                for index, period in enumerate(periods)
+            )
+
+        payload = _build_regime_from_matrix(matrix, inflation_rows, output_months=12)
+        validated = ChinaCycleRegimeOut.model_validate(payload)
+        self.assertEqual(len(validated.months), 12)
+        self.assertEqual(validated.as_of, "2024-12")
+        self.assertEqual(validated.data_basis, "final")
+        self.assertEqual(validated.a1_warnings, ["A1 warning"])
+        self.assertLessEqual(len(validated.trajectory), 12)
+        self.assertIn("immediately resets", validated.methodology.basis_change_policy)
+        self.assertTrue(any("清空未确认候选" in item for item in validated.change_conditions))
+
+        operation = app.openapi()["paths"]["/api/analysis/cn/business-cycle/regime"]["get"]
+        parameters = {item["name"]: item for item in operation["parameters"]}
+        self.assertEqual(parameters["months"]["schema"]["default"], 120)
+        self.assertEqual(parameters["months"]["schema"]["maximum"], 240)
+
+    def test_display_window_does_not_change_latest_state(self) -> None:
+        periods = pd.period_range("2010-01", periods=180, freq="M")
+        months = [
+            self._a1_month(
+                str(period),
+                100 + 4 * ((index % 24) - 12) / 12,
+                100 + 5 * (((index + 3) % 24) - 12) / 12,
+                anchor_value=49.5 + (index % 5) * 0.25,
+            )
+            for index, period in enumerate(periods)
+        ]
+        matrix = {
+            "mode": "current",
+            "data_basis": "final",
+            "as_of": str(periods[-1]),
+            "methodology_version": "1.0.0",
+            "months": months,
+            "warnings": [],
+        }
+
+        short = _build_regime_from_matrix(matrix, [], output_months=24)
+        long = _build_regime_from_matrix(matrix, [], output_months=120)
+
+        for key in ("period", "phase", "phase_status", "confirmed_phase", "confirmed_since", "duration_months"):
+            self.assertEqual(short["latest"][key], long["latest"][key])
+
+    def test_appending_future_months_does_not_rewrite_prior_state(self) -> None:
+        periods = pd.period_range("2018-01", periods=60, freq="M")
+        months = [
+            self._a1_month(
+                str(period),
+                96 + index * 0.18,
+                95 + index * 0.2,
+                anchor_value=49 + index * 0.02,
+            )
+            for index, period in enumerate(periods)
+        ]
+        base_matrix = {
+            "mode": "current",
+            "data_basis": "final",
+            "as_of": str(periods[47]),
+            "methodology_version": "1.0.0",
+            "months": months[:48],
+            "warnings": [],
+        }
+        extended_matrix = {
+            **base_matrix,
+            "as_of": str(periods[-1]),
+            "months": months,
+        }
+
+        base = _build_regime_from_matrix(base_matrix, [], output_months=48)
+        extended = _build_regime_from_matrix(extended_matrix, [], output_months=60)
+        before = base["months"][-1]
+        after = next(item for item in extended["months"] if item["period"] == before["period"])
+
+        for key in (
+            "phase",
+            "raw_phase",
+            "phase_status",
+            "confirmed_phase",
+            "candidate_phase",
+            "confirmed_since",
+            "level_3m",
+            "momentum_3m",
+        ):
+            self.assertEqual(before[key], after[key])
+
+    def test_matrix_loader_always_uses_maximum_history_even_with_start(self) -> None:
+        fake = {
+            "months": [{"period": "2025-12"}],
+            "as_of": "2025-12",
+        }
+        db = object()
+        with patch(
+            "app.services.china_cycle_regime.build_china_business_cycle_matrix",
+            return_value=fake,
+        ) as build:
+            matrix, output_start = _buffered_matrix(
+                db,
+                start=date(2025, 1, 1),
+                end=None,
+                months=24,
+            )
+
+        self.assertIs(matrix, fake)
+        self.assertEqual(output_start, pd.Period("2025-01", freq="M"))
+        build.assert_called_once_with(db, end=None, months=240)
+
+    @staticmethod
+    def _a1_month(
+        period: str,
+        coincident: float,
+        leading: float | None,
+        *,
+        anchor_value: float = 51.0,
+    ) -> dict:
+        coincident_score = (coincident - 100.0) / 10.0
+        leading_score = None if leading is None else (leading - 100.0) / 10.0
+
+        def signal(
+            code: str,
+            weight: float,
+            score: float | None,
+            raw: float = anchor_value,
+        ) -> dict:
+            return {
+                "code": code,
+                "name": code,
+                "raw_value": raw,
+                "source_period": period,
+                "weight": weight,
+                "standardized_score": score,
+                "contribution": 0.2,
+            }
+
+        return {
+            "period": period,
+            "coincident_index": coincident,
+            "leading_index": leading,
+            "confidence": "high",
+            "realtime_coverage": 0.8,
+            "coincident_coverage": 1.0,
+            "leading_coverage": 1.0,
+            "blocks": [
+                {
+                    "key": "activity",
+                    "role": "coincident",
+                    "weight": 0.2,
+                    "score": coincident,
+                    "signals": [
+                        signal("CN_PMI_PRODUCTION", 0.30, coincident_score),
+                        signal("CN_NMI", 0.30, coincident_score),
+                        signal("CN_RETAIL", 0.25, coincident_score),
+                        signal("CN_IP", 0.15, coincident_score),
+                    ],
+                },
+                {
+                    "key": "demand_expectations",
+                    "role": "leading",
+                    "weight": 0.2,
+                    "score": leading,
+                    "signals": [
+                        signal("CN_DOMESTIC_NEW_ORDERS", 0.30, leading_score),
+                        signal("CN_PMI_NEW_EXPORT_ORDERS", 0.20, leading_score),
+                        signal("CN_FINISHED_GOODS_INVENTORY_PRESSURE", 0.15, leading_score),
+                        signal("CN_BUSINESS_EXPECTATIONS", 0.20, leading_score),
+                        signal("CN_CONSUMER_EXPECTATIONS", 0.15, leading_score),
+                    ],
+                },
+                {
+                    "key": "credit_policy",
+                    "role": "leading",
+                    "weight": 0.2,
+                    "score": leading,
+                    "signals": [
+                        signal("CN_CREDIT_IMPULSE", 0.60, leading_score),
+                        signal("CN_M1M2", 0.40, leading_score),
+                    ],
+                },
+                {
+                    "key": "property_fiscal",
+                    "role": "leading",
+                    "weight": 0.2,
+                    "score": leading,
+                    "signals": [
+                        signal("CN_RE_SALES_AREA_YTD_YOY", 0.25, leading_score),
+                        signal("CN_RE_STARTS_YTD_YOY", 0.20, leading_score),
+                        signal("CN_RE_INVEST_YTD_YOY", 0.20, leading_score),
+                        signal("CN_RE_PRICE_RISING_SHARE", 0.20, leading_score),
+                        signal("CN_FISCAL_IMPULSE_PROXY", 0.15, leading_score),
+                    ],
+                },
+                {
+                    "key": "employment_external",
+                    "role": "coincident",
+                    "weight": 0.2,
+                    "score": coincident,
+                    "signals": [
+                        signal("CN_PMI_EMPLOYMENT", 0.30, coincident_score),
+                        signal("CN_NMI_EMPLOYMENT", 0.30, coincident_score),
+                        signal("CN_EXPORTS_3M_AVG", 0.40, coincident_score),
+                    ],
+                },
+            ],
+        }
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -414,3 +414,368 @@ export function getChinaActivityMatrix(months = 120): Promise<ActivityMatrixDash
   const query = new URLSearchParams({ months: String(months) });
   return apiFetch(`/api/analysis/cn/business-cycle/matrix?${query}`);
 }
+
+export type BusinessCyclePhase =
+  | "recovery"
+  | "expansion"
+  | "slowdown"
+  | "contraction";
+
+export type BusinessCyclePhaseStatus =
+  | "confirmed"
+  | "candidate"
+  | "transition"
+  | "held_uncomparable"
+  | "stale"
+  | "insufficient";
+
+export interface BusinessCycleDriver {
+  code: string;
+  name: string;
+  block_key: string;
+  source_period: string | null;
+  contribution: number;
+}
+
+export interface BusinessCycleAbsoluteAnchorPoint {
+  code: string;
+  name: string;
+  three_month_average: number | null;
+  threshold: number;
+  gap: number | null;
+  state: "above" | "below" | "unavailable";
+}
+
+export interface BusinessCycleAbsoluteAnchor {
+  state: "expansionary" | "mixed" | "contractionary" | "unavailable";
+  breadth: number | null;
+  gap: number | null;
+  valid_count: number;
+  total_count: number;
+  conflict: boolean;
+  anchors: BusinessCycleAbsoluteAnchorPoint[];
+}
+
+export interface BusinessCycleInflation {
+  period: string;
+  value: number | null;
+  level: "very_low" | "mild" | "elevated" | "unavailable";
+  three_month_average: number | null;
+  momentum: number | null;
+  state:
+    | "deflation_pressure"
+    | "low_inflation"
+    | "moderate"
+    | "heating"
+    | "unavailable";
+  direction: "reflation" | "disinflation" | "stable" | "unavailable";
+  ppi_value: number | null;
+  ppi_three_month_average: number | null;
+  rationale: string;
+}
+
+export interface BusinessCycleRegimePoint {
+  period: string;
+  phase: BusinessCyclePhase | null;
+  phase_label: string;
+  raw_phase: BusinessCyclePhase | null;
+  phase_status: BusinessCyclePhaseStatus;
+  confirmed: boolean;
+  confirmed_phase: BusinessCyclePhase | null;
+  candidate_phase: BusinessCyclePhase | null;
+  candidate_since: string | null;
+  confirmed_since: string | null;
+  candidate_streak: number;
+  required_confirmation_months: number | null;
+  duration_months: number | null;
+  undecidable_streak: number;
+  decision_eligible: boolean;
+  decision_reasons: string[];
+  coincident_comparable: boolean;
+  leading_comparable: boolean;
+  coincident_coverage: number | null;
+  leading_coverage: number | null;
+  coincident_basis: string[];
+  leading_basis: string[];
+  coincident_basis_signature: string | null;
+  leading_basis_signature: string | null;
+  coincident_basis_coverage: number | null;
+  leading_basis_coverage: number | null;
+  coincident_basis_changed: boolean;
+  leading_basis_changed: boolean;
+  coincident_index: number | null;
+  leading_index: number | null;
+  level_3m: number | null;
+  level_gap: number | null;
+  momentum_3m: number | null;
+  diagnostic_level_3m: number | null;
+  diagnostic_momentum_3m: number | null;
+  level_axis: "above" | "below" | "neutral" | "unavailable";
+  momentum_axis: "rising" | "falling" | "neutral" | "unavailable";
+  leading_level_3m: number | null;
+  leading_gap: number | null;
+  leading_momentum_3m: number | null;
+  leading_diagnostic_level_3m: number | null;
+  leading_diagnostic_momentum_3m: number | null;
+  leading_direction: "up" | "down" | "neutral" | "unavailable";
+  leading_confirmation: "confirmed" | "divergent" | "neutral" | "unavailable";
+  confidence: ActivityMatrixConfidence;
+  confidence_reasons: string[];
+  data_basis: "final";
+  realtime_coverage: number;
+  absolute_anchor: BusinessCycleAbsoluteAnchor;
+  inflation: BusinessCycleInflation;
+  summary: string;
+  outlook: string;
+  triggers: string[];
+  positive_contributions: BusinessCycleDriver[];
+  negative_contributions: BusinessCycleDriver[];
+}
+
+export interface BusinessCycleTrajectoryPoint {
+  period: string;
+  level_gap: number;
+  momentum_3m: number | null;
+  diagnostic_momentum_3m: number | null;
+  phase: BusinessCyclePhase | null;
+  phase_status: BusinessCyclePhaseStatus;
+  comparable: boolean;
+}
+
+export interface BusinessCycleTimelineItem {
+  phase: BusinessCyclePhase;
+  phase_label: string;
+  start_period: string;
+  end_period: string;
+  duration_months: number;
+  ongoing: boolean;
+}
+
+export interface BusinessCycleRegimeDashboard {
+  region: "CN";
+  country: string;
+  title: string;
+  as_of: string | null;
+  last_decision_period: string | null;
+  mode: "current";
+  data_basis: "final";
+  realtime_coverage: number | null;
+  a1_methodology_version: string | null;
+  methodology_version: string;
+  methodology_note: string;
+  methodology: BusinessCycleMethodology;
+  latest: BusinessCycleRegimePoint | null;
+  months: BusinessCycleRegimePoint[];
+  trajectory: BusinessCycleTrajectoryPoint[];
+  timeline: BusinessCycleTimelineItem[];
+  change_conditions: string[];
+  a1_warnings: string[];
+  warnings: string[];
+}
+
+export interface BusinessCycleMethodology {
+  classification_scope: "relative_growth_cycle_not_recession_call";
+  level_source: string;
+  level_smoothing_months: number;
+  momentum_definition: string;
+  momentum_comparison_months: number;
+  level_neutral: number;
+  level_buffer: number;
+  momentum_buffer: number;
+  confirmation_months_with_leading: number;
+  confirmation_months_without_leading: number;
+  phase_order: BusinessCyclePhase[];
+  role_comparability: string;
+  balanced_panel_months: number;
+  basis_change_policy: string;
+  coincident_min_coverage: number;
+  coincident_high_coverage: number;
+  absolute_anchor_min_valid: number;
+  absolute_breadth_expansionary: number;
+  absolute_breadth_contractionary: number;
+  inflation_direction_buffer_pp: number;
+}
+
+export function getChinaBusinessCycleRegime(months = 120): Promise<BusinessCycleRegimeDashboard> {
+  const query = new URLSearchParams({ months: String(months) });
+  return apiFetch(`/api/analysis/cn/business-cycle/regime?${query}`);
+}
+
+export type BusinessCycleBacktestStatus = "ok" | "limited" | "unavailable";
+export type BusinessCycleBacktestMonthStatus = "evaluable" | "limited" | "unavailable";
+export type BusinessCycleBacktestComparison =
+  | "same"
+  | "phase_changed"
+  | "realtime_unclassified"
+  | "final_unclassified"
+  | "both_unclassified"
+  | "unavailable";
+
+export interface BusinessCycleBacktestDefinition {
+  timezone: string;
+  decision_schedule: string;
+  strict: boolean;
+  stored_available_at_timezone: string;
+  observation_alignment: string;
+  availability_policy: string;
+  vintage_selection: string;
+  final_reference: string;
+  final_cutoff_at: string;
+  a1_methodology_version: string;
+  a2_methodology_version: string;
+  a3_methodology_version: string;
+}
+
+export interface BusinessCycleBacktestCoverage {
+  scheduled_months: number;
+  display_evaluable_months: number;
+  display_evaluable_rate: number | null;
+  decision_evaluable_months: number;
+  decision_evaluable_rate: number | null;
+  unavailable_months: number;
+  reason_counts: Record<string, number>;
+}
+
+export interface BusinessCycleBacktestConfusionItem {
+  realtime_phase: BusinessCyclePhase;
+  final_phase: BusinessCyclePhase;
+  count: number;
+}
+
+export interface BusinessCycleBacktestStability {
+  comparable_months: number;
+  agreement_count: number | null;
+  agreement_rate: number | null;
+  flip_count: number | null;
+  flip_rate: number | null;
+  decision_comparable_months: number;
+  decision_agreement_count: number | null;
+  decision_agreement_rate: number | null;
+  level_axis_comparable_months: number;
+  level_axis_agreement_rate: number | null;
+  momentum_axis_comparable_months: number;
+  momentum_axis_agreement_rate: number | null;
+  confusion: BusinessCycleBacktestConfusionItem[];
+  minimum_rate_sample: number;
+  sample_note: string | null;
+}
+
+export interface BusinessCycleBacktestTransitionEvent {
+  final_phase: BusinessCyclePhase;
+  final_confirmation_period: string;
+  realtime_confirmation_period: string | null;
+  signed_lag_months: number | null;
+  match_status: "matched" | "unmatched";
+}
+
+export interface BusinessCycleBacktestTransitions {
+  matched_count: number;
+  lag_median_months: number | null;
+  lag_q1_months: number | null;
+  lag_q3_months: number | null;
+  unmatched_realtime: number;
+  unmatched_final: number;
+  minimum_lag_sample: number;
+  events: BusinessCycleBacktestTransitionEvent[];
+}
+
+export interface BusinessCycleBacktestRobustness {
+  full_sample: BusinessCycleBacktestStability;
+  exclude_covid_2020: BusinessCycleBacktestStability;
+}
+
+export interface BusinessCycleBacktestInputReadiness {
+  code: string;
+  name: string;
+  role: string;
+  final_observations: number;
+  known_available_at_observations: number;
+  on_schedule_observations: number;
+  unknown_available_at_observations: number;
+  ambiguous_revision_observations: number;
+  unknown_revision_observations: number;
+  non_reconstructable_observations: number;
+  availability_rate: number | null;
+  on_schedule_rate: number | null;
+  first_known_period: string | null;
+  last_known_period: string | null;
+}
+
+export interface BusinessCycleBacktestAvailability {
+  final_observations: number;
+  strict_observations: number;
+  observation_coverage: number | null;
+  required_input_codes: number;
+  available_input_codes: number;
+  input_code_coverage: number;
+  unknown_available_at_observations: number;
+  not_yet_available_observations: number;
+  ambiguous_revisions_excluded: number;
+  unknown_revisions_excluded: number;
+  non_reconstructable_observations_excluded: number;
+  revised_observations: number;
+  missing_final_observations: number;
+}
+
+export interface BusinessCycleBacktestRegimeSnapshot {
+  phase: BusinessCyclePhase | null;
+  phase_label: string;
+  phase_status: BusinessCyclePhaseStatus;
+  confirmed_phase: BusinessCyclePhase | null;
+  confirmed_since: string | null;
+  last_decision_period: string | null;
+  decision_eligible: boolean;
+  level_axis: "above" | "below" | "neutral" | "unavailable";
+  momentum_axis: "rising" | "falling" | "neutral" | "unavailable";
+  level_3m: number | null;
+  momentum_3m: number | null;
+  coincident_index: number | null;
+  leading_index: number | null;
+  confidence: ActivityMatrixConfidence;
+}
+
+export interface BusinessCycleBacktestMonth {
+  observation_period: string;
+  decision_as_of: string;
+  status: BusinessCycleBacktestMonthStatus;
+  exclusion_reasons: string[];
+  availability: BusinessCycleBacktestAvailability;
+  realtime: BusinessCycleBacktestRegimeSnapshot | null;
+  final: BusinessCycleBacktestRegimeSnapshot | null;
+  comparable: boolean;
+  phase_agreement: boolean | null;
+  phase_changed: boolean | null;
+  decision_comparable: boolean;
+  decision_phase_agreement: boolean | null;
+  comparison_type: BusinessCycleBacktestComparison;
+  coincident_revision_delta: number | null;
+  leading_revision_delta: number | null;
+}
+
+export interface BusinessCycleBacktestDashboard {
+  region: "CN";
+  country: string;
+  title: string;
+  as_of: string | null;
+  mode: "pseudo_realtime";
+  data_basis: "strict_available_at_vintage";
+  methodology_note: string;
+  summary: string;
+  status: BusinessCycleBacktestStatus;
+  start_period: string | null;
+  end_period: string | null;
+  backtest_definition: BusinessCycleBacktestDefinition;
+  coverage: BusinessCycleBacktestCoverage;
+  stability: BusinessCycleBacktestStability;
+  transitions: BusinessCycleBacktestTransitions;
+  robustness: BusinessCycleBacktestRobustness;
+  input_readiness: BusinessCycleBacktestInputReadiness[];
+  latest: BusinessCycleBacktestMonth | null;
+  months: BusinessCycleBacktestMonth[];
+  warnings: string[];
+}
+
+export function getChinaBusinessCycleBacktest(months = 120): Promise<BusinessCycleBacktestDashboard> {
+  const query = new URLSearchParams({ months: String(months) });
+  return apiFetch(`/api/analysis/cn/business-cycle/backtest?${query}`);
+}

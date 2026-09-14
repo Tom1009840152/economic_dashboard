@@ -63,12 +63,40 @@ class IndicatorVintageTests(unittest.TestCase):
         self.assertEqual(float(point.value), 1.2)
         self.assertEqual(self.vintage_count(), 2)
 
-    def test_sparse_refresh_does_not_erase_release_metadata(self) -> None:
+    def test_sparse_revision_clears_stale_release_metadata(self) -> None:
         upsert_points(self.db, "TEST", self.frame(1.0))
         upsert_points(self.db, "TEST", self.frame(1.1, with_metadata=False))
         point = self.db.scalar(select(DataPoint))
-        self.assertEqual(point.release_date, dt.date(2026, 2, 1))
-        self.assertEqual(point.source_url, "https://example.test/release")
+        vintages = list(
+            self.db.scalars(
+                select(DataPointVintage).order_by(DataPointVintage.version)
+            )
+        )
+
+        self.assertIsNone(point.release_date)
+        self.assertIsNone(point.available_at)
+        self.assertIsNone(point.source_url)
+        self.assertEqual(point.status, "revision_metadata_unknown")
+        self.assertEqual(point.version, 2)
+        self.assertEqual(vintages[0].available_at, dt.datetime(2026, 2, 1, 9, 30))
+        self.assertIsNone(vintages[1].available_at)
+
+    def test_sparse_revision_does_not_inherit_formula_version(self) -> None:
+        initial = self.frame(1.0)
+        initial["formula_version"] = "1.0.0"
+        upsert_points(self.db, "TEST", initial)
+
+        upsert_points(self.db, "TEST", self.frame(1.1, with_metadata=False))
+
+        point = self.db.scalar(select(DataPoint))
+        vintages = list(
+            self.db.scalars(
+                select(DataPointVintage).order_by(DataPointVintage.version)
+            )
+        )
+        self.assertIsNone(point.formula_version)
+        self.assertEqual(vintages[0].formula_version, "1.0.0")
+        self.assertIsNone(vintages[1].formula_version)
 
     def test_equal_backfill_does_not_downgrade_published_metadata(self) -> None:
         upsert_points(self.db, "TEST", self.frame(1.0))
