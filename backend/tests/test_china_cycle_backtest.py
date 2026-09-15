@@ -7,6 +7,7 @@ import pandas as pd
 from app.main import app
 from app.schemas import ChinaCycleBacktestOut
 from app.services.china_cycle_backtest import (
+    FORMULA_VERSIONED_CYCLE_INPUTS,
     MAX_BACKTEST_MONTHS,
     _authoritative_vintage_rows,
     _build_backtest_from_rows,
@@ -530,6 +531,61 @@ class ChinaCycleBacktestTests(unittest.TestCase):
         )
         self.assertEqual(readiness["CN_NMI"]["observation_lag_months"], 0)
         self.assertEqual(readiness["CN_NMI"]["on_schedule_observations"], 0)
+
+    def test_input_readiness_uses_only_the_current_formula_regime(self) -> None:
+        current_version = FORMULA_VERSIONED_CYCLE_INPUTS["CN_M1M2"]
+        legacy = self.vintage(
+            row_id=1,
+            observation_date=date(2023, 12, 1),
+            value=-8.0,
+            available_at=datetime(2024, 1, 15, 9),
+            code="CN_M1M2",
+            formula_version="1.0.0",
+        )
+        legacy_same_period = self.vintage(
+            row_id=2,
+            observation_date=date(2024, 1, 1),
+            value=-7.0,
+            available_at=None,
+            code="CN_M1M2",
+            formula_version="1.0.0",
+        )
+        current_known = self.vintage(
+            row_id=3,
+            observation_date=date(2024, 1, 1),
+            value=-5.4,
+            available_at=datetime(2024, 2, 15),
+            version=2,
+            code="CN_M1M2",
+            formula_version=current_version,
+        )
+        current_unknown = self.vintage(
+            row_id=4,
+            observation_date=date(2024, 2, 1),
+            value=-6.1,
+            available_at=None,
+            code="CN_M1M2",
+            formula_version=current_version,
+        )
+
+        readiness = {
+            item["code"]: item
+            for item in _input_readiness(
+                [legacy, legacy_same_period, current_known, current_unknown],
+                [legacy, current_known, current_unknown],
+            )
+        }["CN_M1M2"]
+
+        self.assertEqual(readiness["final_observations"], 2)
+        self.assertEqual(readiness["known_available_at_observations"], 1)
+        self.assertEqual(readiness["on_schedule_observations"], 1)
+        self.assertEqual(readiness["unknown_available_at_observations"], 1)
+        self.assertEqual(readiness["unknown_revision_observations"], 0)
+        self.assertEqual(readiness["non_reconstructable_observations"], 0)
+        self.assertEqual(readiness["availability_rate"], 0.5)
+        self.assertEqual(readiness["on_schedule_rate"], 0.5)
+        self.assertEqual(readiness["first_known_period"], "2024-01")
+        self.assertEqual(readiness["last_known_period"], "2024-01")
 
     def test_accuracy_rate_is_suppressed_below_24_comparable_months(self) -> None:
         def row(index: int) -> dict:

@@ -1095,6 +1095,17 @@ class ChinaCycleArchiveTests(unittest.TestCase):
         request.assert_called_once_with(f"{cycle._PBOC_RELEASE_BASE}index.html")
         self.assertNotEqual(releases[0][0], "https://cached.test")
 
+    def test_pboc_cache_validator_accepts_financial_report_without_tsf_text(self) -> None:
+        source = (
+            '<html><body><span id="shijian">文章来源：2025-02-14 17:00:00</span>'
+            "<p>2025年1月金融统计数据报告</p>"
+            "<p>广义货币(M2)余额同比增长7%，狭义货币(M1)余额同比增长0.4%。</p>"
+            + (" " * 600)
+            + "</body></html>"
+        )
+
+        self.assertTrue(cycle._valid_pboc_release_source(source))
+
     def test_pboc_news_catalog_discovers_total_pages_and_monthly_flow_titles(self) -> None:
         first = """
         <input type="hidden" totalpage="410">
@@ -1439,6 +1450,88 @@ class ChinaCycleArchiveTests(unittest.TestCase):
         self.assertEqual(
             monthly[1]["formula_version"], cycle.PBOC_YTD_DIFF_FORMULA_VERSION
         )
+
+    def test_credit_current_merge_keeps_precise_table_value_over_ytd_difference(
+        self,
+    ) -> None:
+        observed = dt.date(2026, 7, 1)
+        current_tables = {
+            "CN_TSF": cycle._frame(
+                [
+                    {
+                        "date": observed,
+                        "value": 11537.0,
+                        "source_url": cycle._MOFCOM_TSF_URL,
+                        "status": "mirror_backfill",
+                    }
+                ]
+            )
+        }
+        pboc_releases = {
+            "CN_TSF": cycle._frame(
+                [
+                    {
+                        "date": observed,
+                        "value": 11500.0,
+                        "release_date": dt.date(2026, 8, 14),
+                        "available_at": dt.datetime(2026, 8, 14, 17),
+                        "source_url": "https://www.pbc.gov.cn/rounded-ytd",
+                        "status": "derived",
+                        "formula_version": cycle.PBOC_YTD_DIFF_FORMULA_VERSION,
+                    }
+                ]
+            )
+        }
+
+        result = cycle._merge_credit_current_values(current_tables, pboc_releases)
+        row = result["CN_TSF"].iloc[0]
+
+        self.assertEqual(row["value"], 11537.0)
+        self.assertEqual(row["status"], "mirror_backfill")
+        self.assertEqual(row["source_url"], cycle._MOFCOM_TSF_URL)
+
+    def test_credit_current_merge_keeps_pboc_only_ytd_difference_provisional(
+        self,
+    ) -> None:
+        table_period = dt.date(2026, 7, 1)
+        newest_period = dt.date(2026, 8, 1)
+        current_tables = {
+            "CN_TSF": cycle._frame(
+                [
+                    {
+                        "date": table_period,
+                        "value": 11537.0,
+                        "source_url": cycle._MOFCOM_TSF_URL,
+                        "status": "mirror_backfill",
+                    }
+                ]
+            )
+        }
+        pboc_releases = {
+            "CN_TSF": cycle._frame(
+                [
+                    {
+                        "date": newest_period,
+                        "value": 25700.0,
+                        "release_date": dt.date(2026, 9, 14),
+                        "available_at": dt.datetime(2026, 9, 14, 17),
+                        "source_url": "https://www.pbc.gov.cn/latest-ytd",
+                        "status": "derived",
+                        "formula_version": cycle.PBOC_YTD_DIFF_FORMULA_VERSION,
+                    }
+                ]
+            )
+        }
+
+        result = cycle._merge_credit_current_values(current_tables, pboc_releases)
+        row = result["CN_TSF"].set_index("date").loc[newest_period]
+
+        self.assertEqual(row["value"], 25700.0)
+        self.assertEqual(row["status"], "derived")
+        self.assertEqual(
+            row["formula_version"], cycle.PBOC_YTD_DIFF_FORMULA_VERSION
+        )
+        self.assertEqual(row["source_url"], "https://www.pbc.gov.cn/latest-ytd")
 
     def test_wide_stock_pdf_text_keeps_backfill_availability_unknown(self) -> None:
         text = """

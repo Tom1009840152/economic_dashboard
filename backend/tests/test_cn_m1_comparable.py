@@ -52,7 +52,7 @@ class ChinaM1ComparableTests(unittest.TestCase):
         self.assertEqual(actual_balances["value"].tolist(), expected_balances)
         self.assertEqual(actual_yoy["value"].tolist(), expected_yoy)
         self.assertTrue(
-            actual_yoy["available_at"].eq(dt.datetime(2025, 2, 14, 23, 59, 59)).all()
+            actual_yoy["available_at"].eq(dt.datetime(2025, 2, 14, 17, 0)).all()
         )
 
     def test_january_2024_mom_is_excluded_without_a_comparable_prior_balance(self) -> None:

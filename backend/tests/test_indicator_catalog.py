@@ -18,7 +18,7 @@ class IndicatorCatalogContractTests(unittest.TestCase):
         catalog = get_indicator_catalog()
         codes = {definition["code"] for definition in INDICATOR_DEFS}
 
-        self.assertEqual(len(INDICATOR_DEFS), 147)
+        self.assertEqual(len(INDICATOR_DEFS), 150)
         self.assertEqual(set(catalog), codes)
         self.assertEqual(len(catalog), len(codes))
 

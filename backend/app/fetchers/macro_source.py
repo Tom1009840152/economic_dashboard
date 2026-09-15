@@ -17,6 +17,11 @@ from app.services.derived_metrics import (
     DERIVED_METRIC_SPECS,
     calculate_spread,
 )
+from app.services.china_money_definition import (
+    CN_M1_2024_COMPARABLE as _CN_M1_2024_COMPARABLE,
+    CN_M1_2024_COMPARABLE_AVAILABLE_AT as _CN_M1_2024_COMPARABLE_AVAILABLE_AT,
+    CN_M1_2024_COMPARABLE_SOURCE_URL as _CN_M1_2024_COMPARABLE_SOURCE_URL,
+)
 
 from app.fetchers.akshare_source import DATA_FLOOR_DATE, _clean
 
@@ -115,30 +120,6 @@ _MONEY_SUPPLY_CACHE_TTL = 60  # M2/M1/M0/剪刀差四个指标共用同一个接
 # 可比口径回溯。上游聚合表曾出现“余额已回溯、同比仍是旧口径”的混合状态，
 # 所以不能原样用于 M1-M2 剪刀差。这里固定覆盖人民银行公布的 12 个月，
 # 同时保存它们真正变得可用的日期；2023 年及以前仍属于旧统计口径。
-_CN_M1_2024_COMPARABLE_SOURCE_URL = (
-    "https://www.pbc.gov.cn/diaochatongjisi/attachDir/2025/11/"
-    "2025111913535682666.pdf"
-)
-# Official page gives a publication date but no verified intraday timestamp.
-# Use end-of-day conservatively so a strict as-of query cannot leak the table
-# into the morning of 2025-02-14.
-_CN_M1_2024_COMPARABLE_AVAILABLE_AT = dt.datetime(2025, 2, 14, 23, 59, 59)
-_CN_M1_2024_COMPARABLE: tuple[tuple[dt.date, float, float], ...] = (
-    (dt.date(2024, 1, 1), 1120120.0, 3.3),
-    (dt.date(2024, 2, 1), 1093158.0, 2.6),
-    (dt.date(2024, 3, 1), 1117433.0, 2.3),
-    (dt.date(2024, 4, 1), 1075084.0, 0.6),
-    (dt.date(2024, 5, 1), 1064391.0, -0.8),
-    (dt.date(2024, 6, 1), 1089170.0, -1.7),
-    (dt.date(2024, 7, 1), 1051800.0, -2.6),
-    (dt.date(2024, 8, 1), 1049684.0, -3.0),
-    (dt.date(2024, 9, 1), 1055410.0, -3.3),
-    (dt.date(2024, 10, 1), 1054884.0, -2.3),
-    (dt.date(2024, 11, 1), 1076379.0, -0.7),
-    (dt.date(2024, 12, 1), 1113069.0, 1.2),
-)
-
-
 def _raw_money_supply_df() -> pd.DataFrame:
     now = time.time()
     if _money_supply_cache["df"] is None or now - _money_supply_cache["ts"] > _MONEY_SUPPLY_CACHE_TTL:

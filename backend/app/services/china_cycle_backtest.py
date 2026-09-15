@@ -45,7 +45,7 @@ from app.services.china_cycle_regime import (
 )
 
 
-METHODOLOGY_VERSION = "1.3.1"
+METHODOLOGY_VERSION = "1.3.2"
 DEFAULT_BACKTEST_MONTHS = 120
 MAX_BACKTEST_MONTHS = 120
 MIN_RATE_SAMPLE = 24
@@ -528,17 +528,37 @@ def _has_minimum_coincident_inputs(rows: list[dict]) -> bool:
     return True
 
 
+def _uses_current_formula_version(row) -> bool:
+    """Return whether a row belongs to the formula regime used by A1.
+
+    Formula-versioned indicators retain their legacy observations for audit
+    and display.  Those rows are not model inputs, so including them in A3's
+    readiness denominator would understate coverage and could let an obsolete
+    version contaminate the revision audit for the current regime.
+    """
+
+    code = _row_value(row, "indicator_code")
+    required = FORMULA_VERSIONED_CYCLE_INPUTS.get(code)
+    return required is None or _row_value(row, "formula_version") == required
+
+
 def _input_readiness(vintage_rows: list[dict], final_rows: list[dict]) -> list[dict]:
+    eligible_vintages = [
+        row for row in vintage_rows if _uses_current_formula_version(row)
+    ]
     (
         grouped,
         ambiguous_ids,
         unknown_revision_ids,
         non_reconstructable,
-    ) = _safe_vintage_groups(vintage_rows)
+    ) = _safe_vintage_groups(eligible_vintages)
     final_by_code: dict[str, set[date]] = defaultdict(set)
     for raw in final_rows:
         row = _plain_row(raw)
-        if row["indicator_code"] in REQUIRED_CODES:
+        if (
+            row["indicator_code"] in REQUIRED_CODES
+            and _uses_current_formula_version(row)
+        ):
             final_by_code[row["indicator_code"]].add(row["date"])
 
     result = []

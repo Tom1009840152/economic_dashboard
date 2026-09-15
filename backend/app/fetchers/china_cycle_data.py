@@ -246,7 +246,16 @@ def _valid_pboc_release_source(source: str) -> bool:
         text = _text_from_html(source)
     except (TypeError, ValueError):
         return False
-    return "社会融资规模增量" in text and any(
+    is_credit_or_money_release = any(
+        marker in text
+        for marker in (
+            "社会融资规模增量",
+            "社会融资规模存量",
+            "广义货币",
+            "狭义货币",
+        )
+    )
+    return is_credit_or_money_release and any(
         marker in text or marker in source
         for marker in ("文章来源", "发布时间", "发布日期", "PubDate")
     )
@@ -2652,8 +2661,38 @@ def _load_pboc_credit(
     return _series_frames(output)
 
 
+def _merge_credit_current_values(
+    current_tables: dict[str, pd.DataFrame],
+    pboc_releases: dict[str, pd.DataFrame],
+) -> dict[str, pd.DataFrame]:
+    """Merge current credit values without losing table precision.
+
+    Recent PBOC releases often report rounded year-to-date amounts.  Their
+    derived monthly differences are useful for a newest month that has not yet
+    reached the current table, but they must not replace an overlapping table
+    observation with a less precise residual.  Direct monthly PBOC values keep
+    their normal published priority.
+    """
+    filtered_pboc: dict[str, pd.DataFrame] = {}
+    for code, frame in pboc_releases.items():
+        current = current_tables.get(code)
+        if current is None or current.empty or frame.empty:
+            filtered_pboc[code] = frame
+            continue
+
+        current_periods = set(current["date"].dropna())
+        rounded_ytd_difference = (
+            frame["date"].isin(current_periods)
+            & frame["status"].eq("derived")
+            & frame["formula_version"].eq(PBOC_YTD_DIFF_FORMULA_VERSION)
+        )
+        filtered_pboc[code] = frame.loc[~rounded_ytd_difference].copy()
+
+    return _merge_bundles(current_tables, filtered_pboc)
+
+
 def _load_credit_data() -> dict[str, pd.DataFrame]:
-    return _merge_bundles(_load_tsf_components(), _load_pboc_credit())
+    return _merge_credit_current_values(_load_tsf_components(), _load_pboc_credit())
 
 
 def _mof_catalog(base_url: str, pages: int = 2) -> tuple[tuple[str, str], ...]:
