@@ -119,6 +119,79 @@ class ChinaCycleArchiveTests(unittest.TestCase):
         self.assertEqual(metadata["release_date"], dt.date(2026, 7, 31))
         self.assertIsNone(metadata["available_at"])
 
+    def test_nbs_migrated_title_clock_restores_original_availability(self) -> None:
+        source = """
+        <html>
+          <body>
+            <div class="detail-title-des">
+              <h2><p>2021/09/15 10:00</p></h2>
+            </div>
+            <div class="detail-content"><p>正文提到 2024/06/07 12:00</p></div>
+          </body>
+        </html>
+        """
+
+        metadata = cycle._publication_metadata(
+            source,
+            "https://www.stats.gov.cn/sj/zxfb/202302/release.html",
+        )
+
+        self.assertEqual(metadata["release_date"], dt.date(2021, 9, 15))
+        self.assertEqual(metadata["available_at"], dt.datetime(2021, 9, 15, 10, 0))
+
+    def test_nbs_title_clock_fallback_is_not_used_for_other_hosts(self) -> None:
+        source = """
+        <div class="detail-title-des"><p>2021/09/15 10:00</p></div>
+        """
+
+        metadata = cycle._publication_metadata(
+            source,
+            "https://example.com/release.html",
+        )
+
+        self.assertIsNone(metadata["release_date"])
+        self.assertIsNone(metadata["available_at"])
+
+    def test_nbs_title_clock_fallback_requires_https(self) -> None:
+        source = '<div class="detail-title-des"><p>2021/09/15 10:00</p></div>'
+
+        metadata = cycle._publication_metadata(
+            source,
+            "http://www.stats.gov.cn/sj/zxfb/release.html",
+        )
+
+        self.assertIsNone(metadata["release_date"])
+        self.assertIsNone(metadata["available_at"])
+
+    def test_nbs_title_clock_beats_body_and_migration_times(self) -> None:
+        source = """
+        <meta name="createDate" content="2026/01/22 19:08:41">
+        <div class="detail-title-des"><p>2021年9月15日 10:00</p></div>
+        <div class="detail-content">发布时间：2024年6月7日 12:00</div>
+        """
+
+        metadata = cycle._publication_metadata(
+            source,
+            "https://www.stats.gov.cn/sj/zxfb/202302/release.html",
+        )
+
+        self.assertEqual(metadata["release_date"], dt.date(2021, 9, 15))
+        self.assertEqual(metadata["available_at"], dt.datetime(2021, 9, 15, 10, 0))
+
+    def test_pboc_mixed_label_formats_keep_numeric_pattern_priority(self) -> None:
+        source = """
+        <div>发布日期：2024/06/07 12:00</div>
+        <div>发布时间：2021年9月15日 10:00</div>
+        """
+
+        metadata = cycle._publication_metadata(
+            source,
+            "https://www.pbc.gov.cn/goutongjiaoliu/release.html",
+        )
+
+        self.assertEqual(metadata["release_date"], dt.date(2024, 6, 7))
+        self.assertEqual(metadata["available_at"], dt.datetime(2024, 6, 7, 12, 0))
+
     def test_pboc_visible_original_time_beats_cms_migration_metadata(self) -> None:
         source = """
         <meta name="PubDate" content="2015-07-13">
@@ -419,7 +492,9 @@ class ChinaCycleArchiveTests(unittest.TestCase):
                 ],
             ) as links,
             patch.object(cycle, "_get_nbs_archive_text", return_value=source) as request,
-            patch.object(cycle.pd, "read_html", return_value=[summary]),
+            # Migrated NBS pages can render the same nationwide table twice
+            # (desktop/mobile). The final series must still contain one row.
+            patch.object(cycle.pd, "read_html", return_value=[summary, summary]),
         ):
             result = cycle._load_real_estate_activity(page_count=70)
 
@@ -439,6 +514,17 @@ class ChinaCycleArchiveTests(unittest.TestCase):
         self.assertEqual(
             result["CN_RE_INVEST_YTD_YOY"].iloc[0]["available_at"],
             dt.datetime(2022, 9, 16, 10, 0),
+        )
+        self.assertEqual(len(result["CN_RE_INVEST_YTD_YOY"]), 1)
+
+    def test_property_period_titles_keep_combined_and_annual_observations(self) -> None:
+        self.assertEqual(
+            cycle._period_date("2019年1-2月份全国房地产开发投资增长11.6%"),
+            dt.date(2019, 2, 1),
+        )
+        self.assertEqual(
+            cycle._period_date("2016年全国房地产开发投资和销售情况"),
+            dt.date(2016, 12, 1),
         )
 
     def test_property_parser_accepts_new_labels_without_confusing_subrows(self) -> None:

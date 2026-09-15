@@ -23,6 +23,14 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import {
+  absoluteAnchorQualifier,
+  comparableMonthExplanation,
+  contributionExplanation,
+  phaseAxisSummary,
+  phasePlainHeadline,
+  previousComparableMonth,
+} from "@/lib/china-business-cycle-presentation";
 import type {
   BusinessCycleDriver,
   BusinessCyclePhase,
@@ -363,6 +371,7 @@ export function ChinaBusinessCycleDetail({ data }: { data: BusinessCycleRegimeDa
   const relativeImprovementAbsoluteWeakness =
     (latest.phase === "recovery" || latest.phase === "expansion") &&
     latest.absolute_anchor.state === "contractionary";
+  const previousComparable = previousComparableMonth(data.months, latest);
 
   return (
     <div className="space-y-8">
@@ -381,6 +390,13 @@ export function ChinaBusinessCycleDetail({ data }: { data: BusinessCycleRegimeDa
                 )}
               </CardTitle>
               <Badge variant="outline" className={statusClass(latest.phase_status)}>{STATUS_LABELS[latest.phase_status]}</Badge>
+            </div>
+            <div className="mt-4 max-w-3xl rounded-xl border bg-background/75 px-4 py-3">
+              <div className="text-[11px] font-medium tracking-wide text-muted-foreground">一句话解读</div>
+              <div className="mt-1 text-xl font-semibold">{phasePlainHeadline(latest)}</div>
+              <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                {phaseAxisSummary(latest)}{absoluteAnchorQualifier(latest)}
+              </p>
             </div>
             <CardDescription className="mt-3 max-w-3xl text-sm leading-6">{latest.summary}</CardDescription>
           </div>
@@ -415,12 +431,36 @@ export function ChinaBusinessCycleDetail({ data }: { data: BusinessCycleRegimeDa
               <div className="mt-1 text-xs text-muted-foreground">{LEADING_CONFIRMATION_LABELS[latest.leading_confirmation]}</div>
             </div>
             <div className="rounded-xl border bg-background/75 p-4">
-              <div className="text-xs text-muted-foreground">判断置信度</div>
+              <div className="text-xs text-muted-foreground">本期证据质量</div>
               <div className="mt-2 text-2xl font-semibold">{CONFIDENCE_LABELS[latest.confidence]}</div>
               <div className="mt-1 text-xs leading-5 text-muted-foreground">
                 {latest.decision_reasons[0] ?? latest.confidence_reasons[0] ?? (latest.decision_eligible ? "本月可参与阶段判断" : "本月不触发阶段更新")}
               </div>
+              <div className="mt-1 text-[11px] leading-4 text-muted-foreground">只衡量本期覆盖、口径可比性与规则满足度</div>
             </div>
+          </div>
+
+          <div className="mt-3 grid gap-3 lg:grid-cols-2">
+            <div className="rounded-xl border bg-background/75 p-4">
+              <div className="text-xs font-medium">与上一可比月相比</div>
+              <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                {comparableMonthExplanation(latest, previousComparable)}
+              </p>
+            </div>
+            <div className="rounded-xl border bg-background/75 p-4">
+              <div className="text-xs font-medium">模型为何得到当前读数</div>
+              <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                {contributionExplanation(latest)}
+              </p>
+            </div>
+          </div>
+
+          <div className="mt-3 text-xs leading-5 text-muted-foreground">
+            “本期证据质量”不是历史可靠性评分。数据修订会不会改写旧判断，请看
+            <Link href="/analysis/cn/business-cycle/backtest" className="ml-1 font-medium text-foreground hover:underline">
+              伪实时回测
+            </Link>
+            。
           </div>
 
           <div className={`mt-4 rounded-xl px-4 py-3 text-sm leading-6 ${latest.phase_status === "confirmed" ? "bg-emerald-50 text-emerald-900 dark:bg-emerald-950/45 dark:text-emerald-200" : "bg-amber-50 text-amber-950 dark:bg-amber-950/45 dark:text-amber-200"}`}>
@@ -535,8 +575,8 @@ export function ChinaBusinessCycleDetail({ data }: { data: BusinessCycleRegimeDa
       </section>
 
       <section className="grid gap-4 lg:grid-cols-2">
-        <DriverList title="同步活动主要支撑" direction="positive" items={latest.positive_contributions} />
-        <DriverList title="同步活动主要拖累" direction="negative" items={latest.negative_contributions} />
+        <DriverList title="同步指数模型内主要正贡献" direction="positive" items={latest.positive_contributions} />
+        <DriverList title="同步指数模型内主要负贡献" direction="negative" items={latest.negative_contributions} />
       </section>
 
       <section className="grid gap-4 xl:grid-cols-[1.25fr_0.75fr]">

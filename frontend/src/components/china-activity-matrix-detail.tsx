@@ -510,12 +510,12 @@ export function ChinaActivityMatrixDetail({ data }: { data: ActivityMatrixDashbo
 
       <section>
         <div className="mb-4">
-          <h2 className="text-lg font-semibold">本月推动与拖累</h2>
-          <p className="mt-1 text-sm text-muted-foreground">贡献只解释本月指数构成，不代表因果关系，也不等同于对未来GDP的预测。</p>
+          <h2 className="text-lg font-semibold">本月模型内贡献</h2>
+          <p className="mt-1 text-sm text-muted-foreground">贡献只解释本月指数构成，不代表现实因果关系，也不等同于对未来GDP的预测。</p>
         </div>
         <div className="grid gap-4 lg:grid-cols-2">
-          <ContributionList title="主要推动" direction="positive" items={latest.positive_contributions} />
-          <ContributionList title="主要拖累" direction="negative" items={latest.negative_contributions} />
+          <ContributionList title="主要正贡献" direction="positive" items={latest.positive_contributions} />
+          <ContributionList title="主要负贡献" direction="negative" items={latest.negative_contributions} />
         </div>
       </section>
 

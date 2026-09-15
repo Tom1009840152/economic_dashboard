@@ -224,8 +224,12 @@ def _get_pboc_archive_text(url: str) -> str:
 
 def _publication_metadata(source: str, source_url: str) -> dict:
     text = _text_from_html(source)
-    hostname = (urlparse(source_url).hostname or "").lower()
+    parsed_url = urlparse(source_url)
+    hostname = (parsed_url.hostname or "").lower().rstrip(".")
     is_pboc = hostname == "pbc.gov.cn" or hostname.endswith(".pbc.gov.cn")
+    is_nbs = parsed_url.scheme.lower() == "https" and (
+        hostname == "stats.gov.cn" or hostname.endswith(".stats.gov.cn")
+    )
 
     # Prefer a visibly labelled clock time over metadata. Old PBOC articles
     # were migrated to new CMS URLs whose ``createDate`` is the migration time,
@@ -236,8 +240,25 @@ def _publication_metadata(source: str, source_url: str) -> dict:
             " ".join(node.text_content().split())
             for node in document.xpath("//*[@id='shijian']")
         )
+        # Migrated NBS releases often lost their PubDate metadata while the
+        # original publication clock remains visibly rendered immediately
+        # below the article title. Restrict this fallback to that named title
+        # block on the official NBS host so dates mentioned in the article body
+        # can never become availability evidence.
+        nbs_title_time_text = (
+            " ".join(
+                " ".join(node.text_content().split())
+                for node in document.xpath(
+                    "//*[contains(concat(' ', normalize-space(@class), ' '), "
+                    "' detail-title-des ')]//p"
+                )
+            )
+            if is_nbs
+            else ""
+        )
     except (TypeError, ValueError):
         dom_time_text = ""
+        nbs_title_time_text = ""
 
     exact_patterns: list[tuple[str, str, int]] = [
         (
@@ -253,9 +274,28 @@ def _publication_metadata(source: str, source_url: str) -> dict:
             0,
         ),
         (
+            nbs_title_time_text,
+            r"(20\d{2})[/-](\d{1,2})[/-](\d{1,2})\s+"
+            r"(\d{1,2}):(\d{2})(?::\d{2})?",
+            0,
+        ),
+        (
+            nbs_title_time_text,
+            r"(20\d{2})年(\d{1,2})月(\d{1,2})日?\s+"
+            r"(\d{1,2}):(\d{2})(?::\d{2})?",
+            0,
+        ),
+        (
             text,
             r"(?:文章来源|发布时间|发布日期)[:：]?\s*"
             r"(20\d{2})[/-](\d{1,2})[/-](\d{1,2})\s+"
+            r"(\d{1,2}):(\d{2})(?::\d{2})?",
+            0,
+        ),
+        (
+            text,
+            r"(?:文章来源|发布时间|发布日期)[:：]?\s*"
+            r"(20\d{2})年(\d{1,2})月(\d{1,2})日?\s+"
             r"(\d{1,2}):(\d{2})(?::\d{2})?",
             0,
         ),
@@ -267,16 +307,6 @@ def _publication_metadata(source: str, source_url: str) -> dict:
             re.I,
         ),
     ]
-    exact_patterns.insert(
-        3,
-        (
-            text,
-            r"(?:文章来源|发布时间|发布日期)[:：]?\s*"
-            r"(20\d{2})年(\d{1,2})月(\d{1,2})日?\s+"
-            r"(\d{1,2}):(\d{2})(?::\d{2})?",
-            0,
-        ),
-    )
     if not is_pboc:
         exact_patterns.append(
             (

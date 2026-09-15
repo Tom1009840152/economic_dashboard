@@ -9,6 +9,11 @@ import {
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  absoluteAnchorQualifier,
+  phaseAxisSummary,
+  phasePlainHeadline,
+} from "@/lib/china-business-cycle-presentation";
 import type {
   BusinessCyclePhase,
   BusinessCyclePhaseStatus,
@@ -112,6 +117,13 @@ export function ChinaBusinessCycleSummaryCard({
                       {latest.duration_months == null ? "持续时间待确认" : `自模型确认起已沿用 ${latest.duration_months} 个月`}
                     </div>
                   </div>
+                  <div className="mt-4 rounded-xl border bg-background/75 px-4 py-3">
+                    <div className="text-[11px] font-medium tracking-wide text-muted-foreground">一句话解读</div>
+                    <div className="mt-1 text-lg font-semibold">{phasePlainHeadline(latest)}</div>
+                    <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                      {phaseAxisSummary(latest)}{absoluteAnchorQualifier(latest)}
+                    </p>
+                  </div>
                   <p className="mt-4 max-w-2xl text-sm leading-6 text-muted-foreground">
                     {latest.summary}
                   </p>
@@ -150,7 +162,7 @@ export function ChinaBusinessCycleSummaryCard({
                   <div className="rounded-lg border bg-background/70 px-3 py-2.5">
                     <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
                       <Gauge className="size-3.5" aria-hidden="true" />
-                      判断置信度
+                      本期证据质量
                     </div>
                     <div className="mt-1 font-medium">{CONFIDENCE_LABELS[latest.confidence]}</div>
                     <div className="mt-0.5 flex items-center gap-1 text-[11px] text-muted-foreground">
@@ -160,6 +172,9 @@ export function ChinaBusinessCycleSummaryCard({
                         : latest.phase_status === "transition"
                           ? "原阶段有效，候选正在累计"
                           : "暂不触发阶段切换"}
+                    </div>
+                    <div className="mt-1 text-[11px] leading-4 text-muted-foreground">
+                      衡量本期覆盖与可比性；历史修订稳定性另见回测
                     </div>
                   </div>
                 </div>

@@ -134,11 +134,14 @@ export function ChinaActivityMatrixSummaryCard({
               {(strongest || weakest) && (
                 <div className="mt-4 grid gap-2 text-xs sm:grid-cols-2">
                   <div className="rounded-lg border px-3 py-2 text-muted-foreground">
-                    主要推动：<span className="font-medium text-foreground">{strongest?.name ?? "--"}</span>
+                    模型内主要正贡献：<span className="font-medium text-foreground">{strongest?.name ?? "--"}</span>
                   </div>
                   <div className="rounded-lg border px-3 py-2 text-muted-foreground">
-                    主要拖累：<span className="font-medium text-foreground">{weakest?.name ?? "--"}</span>
+                    模型内主要负贡献：<span className="font-medium text-foreground">{weakest?.name ?? "--"}</span>
                   </div>
+                  <p className="text-[11px] leading-4 text-muted-foreground sm:col-span-2">
+                    贡献只解释本期指数构成，不代表这些指标造成了现实经济变化。
+                  </p>
                 </div>
               )}
             </>
