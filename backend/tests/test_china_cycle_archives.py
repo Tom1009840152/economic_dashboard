@@ -9,6 +9,82 @@ from app.fetchers import nbs_cycle
 from app.fetchers.akshare_source import FETCHERS
 
 
+_SEVENTY_CITIES = (
+    "北京", "天津", "石家庄", "太原", "呼和浩特", "沈阳", "大连", "长春",
+    "哈尔滨", "上海", "南京", "杭州", "宁波", "合肥", "福州", "厦门",
+    "南昌", "济南", "青岛", "郑州", "武汉", "长沙", "广州", "深圳",
+    "南宁", "海口", "重庆", "成都", "贵阳", "昆明", "西安", "兰州",
+    "西宁", "银川", "乌鲁木齐", "唐山", "秦皇岛", "包头", "丹东", "锦州",
+    "吉林", "牡丹江", "无锡", "徐州", "扬州", "温州", "金华", "蚌埠",
+    "安庆", "泉州", "九江", "赣州", "烟台", "济宁", "洛阳", "平顶山",
+    "宜昌", "襄阳", "岳阳", "常德", "韶关", "湛江", "惠州", "桂林",
+    "北海", "三亚", "泸州", "南充", "遵义", "大理",
+)
+
+
+def _price_table(cities, values, *, unit: str = "上月=100") -> str:
+    cells = []
+    for index in range(35):
+        row = []
+        for city_index in (index, index + 35):
+            if city_index < len(cities):
+                row.extend(
+                    [
+                        f"<td>{cities[city_index]}</td>",
+                        f"<td>{values[city_index]}</td>",
+                        "<td>95.0</td>",
+                        "<td>97.0</td>",
+                    ]
+                )
+            else:
+                row.extend(["<td></td>"] * 4)
+        cells.append(f"<tr>{''.join(row)}</tr>")
+    return f"""
+      <table>
+        <tr>
+          <td rowspan="2">城市</td><td>环比</td><td>同比</td><td>年度平均</td>
+          <td rowspan="2">城市</td><td>环比</td><td>同比</td><td>年度平均</td>
+        </tr>
+        <tr>
+          <td>{unit}</td><td>上年同月=100</td><td>上年同月=100</td>
+          <td>{unit}</td><td>上年同月=100</td><td>上年同月=100</td>
+        </tr>
+        {''.join(cells)}
+      </table>
+    """
+
+
+def _house_price_release_html(
+    cities=_SEVENTY_CITIES,
+    values=None,
+    *,
+    table_number: int = 1,
+    housing_type: str = "新建商品住宅",
+    unit: str = "上月=100",
+    include_second_hand: bool = False,
+) -> str:
+    values = values or ([100.5] * 14 + [99.5] * 56)
+    table_one = _price_table(cities, values, unit=unit)
+    second_hand = ""
+    if include_second_hand:
+        second_hand = f"""
+          <p>表2：2024年12月70个大中城市二手住宅销售价格指数</p>
+          {_price_table(_SEVENTY_CITIES, [110.0] * 70)}
+        """
+    return f"""
+      <html>
+        <head><title>2024年12月份70个大中城市商品住宅销售价格变动情况 - 国家统计局</title></head>
+        <body>
+          <h1>2024年12月份70个大中城市商品住宅销售价格变动情况</h1>
+          <div class="detail-title-des"><p>2025/01/17 09:30</p></div>
+          <p>表{table_number}：2024年12月70个大中城市{housing_type}销售价格指数</p>
+          {table_one}
+          {second_hand}
+        </body>
+      </html>
+    """
+
+
 class ChinaCycleArchiveTests(unittest.TestCase):
     def tearDown(self) -> None:
         cycle._cache.clear()
@@ -22,6 +98,19 @@ class ChinaCycleArchiveTests(unittest.TestCase):
             self.assertEqual(cycle._nbs_release_catalog(1, archive=True), ())
 
         request.assert_called_once_with(cycle._NBS_RELEASE_BASE, cache=False)
+
+    def test_nbs_archive_reader_rejects_non_https_and_lookalike_hosts(self) -> None:
+        for url in (
+            "http://www.stats.gov.cn/sj/zxfb/release.html",
+            "https://www.stats.gov.cn.evil.example/release.html",
+            "https://stats.gov.cn@example.test/release.html",
+        ):
+            with self.subTest(url=url), self.assertRaises(ValueError):
+                cycle._get_nbs_archive_text(url)
+
+        self.assertTrue(
+            cycle._is_nbs_https_url("https://data.stats.gov.cn/release.html")
+        )
 
     def test_mutable_nbs_index_failure_is_not_retried_in_a_burst(self) -> None:
         with patch.object(cycle, "_get_nbs_text", side_effect=RuntimeError("challenge")) as request:
@@ -546,6 +635,137 @@ class ChinaCycleArchiveTests(unittest.TestCase):
         self.assertEqual(len(rows["CN_RE_SALES_AREA_YTD_YOY"]), 1)
         self.assertEqual(rows["CN_RE_STARTS_YTD_YOY"][0]["value"], -3.0)
         self.assertEqual(rows["CN_RE_CONSTRUCTION_YOY"][0]["value"], -1.0)
+
+    def test_nbs_house_price_parser_uses_only_table_one_new_home_mom_index(self) -> None:
+        source = _house_price_release_html(include_second_hand=True)
+
+        values = cycle._nbs_new_home_mom_values(
+            source, dt.date(2024, 12, 1)
+        )
+
+        self.assertIsNotNone(values)
+        self.assertEqual(len(values), 70)
+        self.assertEqual(values["北京"], 100.5)
+        self.assertEqual(values["大理"], 99.5)
+        self.assertNotIn(110.0, values.values())
+
+    def test_nbs_house_price_parser_rejects_incomplete_duplicate_or_ambiguous_table(
+        self,
+    ) -> None:
+        cases = {
+            "only 69 cities": _house_price_release_html(
+                cities=_SEVENTY_CITIES[:-1],
+                values=[100.0] * 69,
+            ),
+            "duplicate city": _house_price_release_html(
+                cities=(*_SEVENTY_CITIES[:-1], _SEVENTY_CITIES[0]),
+                values=[100.0] * 70,
+            ),
+            "second-hand table": _house_price_release_html(
+                housing_type="二手住宅"
+            ),
+            "not table one": _house_price_release_html(table_number=2),
+            "not previous-month index": _house_price_release_html(
+                unit="上年同月=100"
+            ),
+        }
+
+        for label, source in cases.items():
+            with self.subTest(label=label):
+                self.assertIsNone(
+                    cycle._nbs_new_home_mom_values(
+                        source, dt.date(2024, 12, 1)
+                    )
+                )
+
+    def test_nbs_house_price_archive_derives_one_current_month_observation(self) -> None:
+        source_url = "https://www.stats.gov.cn/sj/zxfb/202501/release.html"
+        source = _house_price_release_html(include_second_hand=True)
+        with (
+            patch.object(
+                cycle,
+                "_nbs_links",
+                return_value=[
+                    (
+                        source_url,
+                        "2024年12月份70个大中城市商品住宅销售价格变动情况",
+                    )
+                ],
+            ) as links,
+            patch.object(
+                cycle, "_get_nbs_archive_text", return_value=source
+            ) as request,
+        ):
+            result = cycle._load_nbs_house_price_diffusion(
+                page_count=70,
+                start_page=20,
+                archive_shard=1000,
+            )
+
+        links.assert_called_once_with(
+            r"70个大中城市商品住宅销售价格变动情况",
+            70,
+            archive=True,
+            start_page=20,
+            archive_shard=1000,
+        )
+        request.assert_called_once_with(source_url)
+        rising = result["CN_RE_PRICE_RISING_SHARE"].iloc[0]
+        median = result["CN_RE_PRICE_MOM_MEDIAN"].iloc[0]
+        self.assertEqual(rising["date"], dt.date(2024, 12, 1))
+        self.assertAlmostEqual(rising["value"], 20.0)
+        self.assertAlmostEqual(median["value"], -0.5)
+        self.assertEqual(rising["status"], "derived")
+        self.assertEqual(
+            rising["formula_version"],
+            cycle.NBS_70_CITY_FORMULA_VERSIONS["CN_RE_PRICE_RISING_SHARE"],
+        )
+        self.assertEqual(
+            median["formula_version"],
+            cycle.NBS_70_CITY_FORMULA_VERSIONS["CN_RE_PRICE_MOM_MEDIAN"],
+        )
+        self.assertEqual(
+            rising["available_at"], dt.datetime(2025, 1, 17, 9, 30)
+        )
+
+    def test_nbs_house_price_archive_skips_untrusted_domain_before_fetch(self) -> None:
+        with (
+            patch.object(
+                cycle,
+                "_nbs_links",
+                return_value=[
+                    (
+                        "https://www.stats.gov.cn.evil.example/release.html",
+                        "2024年12月份70个大中城市商品住宅销售价格变动情况",
+                    )
+                ],
+            ),
+            patch.object(cycle, "_get_nbs_archive_text") as request,
+        ):
+            result = cycle._load_nbs_house_price_diffusion()
+
+        request.assert_not_called()
+        self.assertTrue(result["CN_RE_PRICE_RISING_SHARE"].empty)
+        self.assertTrue(result["CN_RE_PRICE_MOM_MEDIAN"].empty)
+
+    def test_nbs_house_price_archive_rejects_non_exact_release_title(self) -> None:
+        with (
+            patch.object(
+                cycle,
+                "_nbs_links",
+                return_value=[
+                    (
+                        "https://www.stats.gov.cn/sj/zxfb/release.html",
+                        "2024年12月份70个大中城市商品住宅销售价格变动情况解读",
+                    )
+                ],
+            ),
+            patch.object(cycle, "_get_nbs_archive_text") as request,
+        ):
+            result = cycle._load_nbs_house_price_diffusion()
+
+        request.assert_not_called()
+        self.assertTrue(result["CN_RE_PRICE_RISING_SHARE"].empty)
 
     def test_pboc_catalog_uses_real_archive_pagination(self) -> None:
         current = """

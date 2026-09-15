@@ -151,6 +151,66 @@ class D9ArchiveSafetyTests(unittest.TestCase):
             output.getvalue(),
         )
 
+    def test_property_archive_includes_official_70_city_diffusion_loader(self) -> None:
+        code = "CN_RE_PRICE_RISING_SHARE"
+        observed = dt.date(2024, 12, 1)
+        fallback = Mock()
+        row = self._row(
+            observed,
+            20.0,
+            "https://www.stats.gov.cn/sj/zxfb/202501/release.html",
+        )
+        row.update(
+            status="derived",
+            formula_version=backfill.NBS_70_CITY_FORMULA_VERSIONS[code],
+        )
+        house_price_loader = Mock(
+            return_value={code: pd.DataFrame([row])}
+        )
+        session = _FakeSession(
+            [SimpleNamespace(date=observed, value=20.0)]
+        )
+        output = io.StringIO()
+
+        with (
+            patch.dict(backfill.BACKFILL_FETCHERS, {code: fallback}, clear=True),
+            patch.dict(backfill.GROUPS, {"property": {code}}, clear=True),
+            patch.object(backfill, "_load_nbs_property_history", return_value={}),
+            patch.object(backfill, "_load_real_estate_activity", return_value={}),
+            patch.object(
+                backfill, "_load_nbs_house_price_diffusion", house_price_loader
+            ),
+            patch.object(backfill, "SessionLocal", return_value=session),
+            patch.object(
+                sys,
+                "argv",
+                [
+                    "backfill_china_cycle.py",
+                    "--group",
+                    "property",
+                    "--archive",
+                    "--archive-pages",
+                    "70",
+                    "--archive-start-page",
+                    "20",
+                    "--archive-shard",
+                    "1000",
+                    "--check-only",
+                ],
+            ),
+            redirect_stdout(output),
+        ):
+            backfill.main()
+
+        house_price_loader.assert_called_once_with(
+            page_count=70,
+            start_page=20,
+            archive_shard=1000,
+        )
+        fallback.assert_not_called()
+        self.assertTrue(session.closed)
+        self.assertIn(f"{code}: 1 verified releases", output.getvalue())
+
     def test_all_approved_official_domains_are_accepted(self) -> None:
         urls = (
             "https://www.stats.gov.cn/sj/zxfb/release.html",
@@ -173,7 +233,7 @@ class D9ArchiveSafetyTests(unittest.TestCase):
                 self.assertEqual(len(accepted), 1)
                 self.assertEqual(rejected, [])
 
-    def test_only_whitelisted_exact_official_derived_release_is_accepted(self) -> None:
+    def test_pboc_derived_formula_is_code_status_and_publisher_bound(self) -> None:
         derived_date = dt.date(2024, 1, 1)
         missing_formula_date = dt.date(2024, 2, 1)
         unknown_formula_date = dt.date(2024, 3, 1)
@@ -215,10 +275,16 @@ class D9ArchiveSafetyTests(unittest.TestCase):
                     SimpleNamespace(date=backfill_date, value=8.0),
                 ]
             ),
-            "CN_TEST",
+            "CN_TSF",
             pd.DataFrame(
                 [derived, missing_formula, unknown_formula, derived_backfill]
             ),
+            require_existing=True,
+        )
+        wrong_code, wrong_code_rejected = backfill._verified_release_evidence(
+            _FakeSession([SimpleNamespace(date=derived_date, value=5.0)]),
+            "CN_TEST",
+            pd.DataFrame([derived]),
             require_existing=True,
         )
 
@@ -229,6 +295,57 @@ class D9ArchiveSafetyTests(unittest.TestCase):
             ["pboc_ytd_diff_v1"],
         )
         self.assertEqual(rejected, [])
+        self.assertTrue(wrong_code.empty)
+        self.assertEqual(wrong_code_rejected, [])
+
+    def test_nbs_70_city_derived_formulas_are_code_and_publisher_bound(self) -> None:
+        code = "CN_RE_PRICE_RISING_SHARE"
+        formula = backfill.NBS_70_CITY_FORMULA_VERSIONS[code]
+        accepted_date = dt.date(2024, 1, 1)
+        wrong_code_date = dt.date(2024, 2, 1)
+        wrong_host_date = dt.date(2024, 3, 1)
+        rows = []
+        for observed, source_url in (
+            (
+                accepted_date,
+                "https://www.stats.gov.cn/sj/zxfb/release.html",
+            ),
+            (
+                wrong_code_date,
+                "https://www.stats.gov.cn/sj/zxfb/release.html",
+            ),
+            (
+                wrong_host_date,
+                "https://www.pbc.gov.cn/goutongjiaoliu/release.html",
+            ),
+        ):
+            row = self._row(observed, 5.0, source_url)
+            row.update(status="derived", formula_version=formula)
+            rows.append(row)
+
+        accepted, rejected = backfill._verified_release_evidence(
+            _FakeSession(
+                [
+                    SimpleNamespace(date=accepted_date, value=5.0),
+                    SimpleNamespace(date=wrong_code_date, value=5.0),
+                    SimpleNamespace(date=wrong_host_date, value=5.0),
+                ]
+            ),
+            code,
+            pd.DataFrame([rows[0], rows[2]]),
+            require_existing=True,
+        )
+        wrong_code, wrong_code_rejected = backfill._verified_release_evidence(
+            _FakeSession([SimpleNamespace(date=wrong_code_date, value=5.0)]),
+            "CN_RE_PRICE_MOM_MEDIAN",
+            pd.DataFrame([rows[1]]),
+            require_existing=True,
+        )
+
+        self.assertEqual(accepted["date"].tolist(), [accepted_date])
+        self.assertEqual(rejected, [])
+        self.assertTrue(wrong_code.empty)
+        self.assertEqual(wrong_code_rejected, [])
 
     def test_lookalike_or_non_https_domain_is_rejected(self) -> None:
         urls = (

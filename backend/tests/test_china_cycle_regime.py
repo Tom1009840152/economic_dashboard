@@ -1,4 +1,5 @@
 import unittest
+from copy import deepcopy
 from datetime import date
 from unittest.mock import patch
 
@@ -325,6 +326,83 @@ class ChinaCycleRegimeTests(unittest.TestCase):
 
         self.assertNotIn("CN_RE_STARTS_YTD_YOY", panel["codes"])
         self.assertNotIn("CN_FISCAL_IMPULSE_PROXY", panel["codes"])
+
+    def test_leading_role_coverage_requires_the_complete_missing_data_package(self) -> None:
+        periods = pd.period_range("2025-07", periods=6, freq="M")
+        complete = [self._a1_month(str(period), 100, 100) for period in periods]
+
+        def panel_with(*available: str) -> dict:
+            months = deepcopy(complete)
+            optional = {
+                "CN_CONSUMER_EXPECTATIONS",
+                "CN_CREDIT_IMPULSE",
+                "CN_M1M2",
+                "CN_RE_PRICE_RISING_SHARE",
+                "CN_FISCAL_IMPULSE_PROXY",
+            }
+            for month in months:
+                for block in month["blocks"]:
+                    if block["role"] != "leading":
+                        continue
+                    for signal in block["signals"]:
+                        if signal["code"] in optional and signal["code"] not in available:
+                            signal["standardized_score"] = None
+            return _balanced_role_panels(months, "leading")[-1]
+
+        baseline = panel_with()
+        house_price = panel_with("CN_RE_PRICE_RISING_SHARE")
+        complete_non_credit = panel_with(
+            "CN_CONSUMER_EXPECTATIONS",
+            "CN_RE_PRICE_RISING_SHARE",
+            "CN_FISCAL_IMPULSE_PROXY",
+        )
+        credit_without_house = panel_with("CN_CREDIT_IMPULSE", "CN_M1M2")
+        credit_with_house = panel_with(
+            "CN_CREDIT_IMPULSE",
+            "CN_M1M2",
+            "CN_RE_PRICE_RISING_SHARE",
+        )
+
+        self.assertEqual(baseline["coverage"], 0.5)
+        self.assertFalse(baseline["valid"])
+        self.assertEqual(house_price["coverage"], 0.5667)
+        self.assertFalse(house_price["valid"])
+        self.assertEqual(complete_non_credit["coverage"], 0.6667)
+        self.assertTrue(complete_non_credit["valid"])
+        self.assertEqual(credit_without_house["coverage"], 0.8333)
+        self.assertTrue(credit_without_house["valid"])
+        self.assertEqual(credit_with_house["coverage"], 0.9)
+        self.assertTrue(credit_with_house["valid"])
+
+    def test_credit_needs_consumer_expectations_when_property_ytd_is_absent(self) -> None:
+        periods = pd.period_range("2025-01", periods=6, freq="M")
+        complete = [self._a1_month(str(period), 100, 100) for period in periods]
+
+        def january_window(*, consumer_available: bool) -> dict:
+            months = deepcopy(complete)
+            for month in months:
+                for block in month["blocks"]:
+                    if block["key"] == "property_fiscal":
+                        for signal in block["signals"]:
+                            if signal["code"] in {
+                                "CN_RE_SALES_AREA_YTD_YOY",
+                                "CN_RE_STARTS_YTD_YOY",
+                                "CN_RE_INVEST_YTD_YOY",
+                            }:
+                                signal["standardized_score"] = None
+                    if block["key"] == "demand_expectations" and not consumer_available:
+                        for signal in block["signals"]:
+                            if signal["code"] == "CN_CONSUMER_EXPECTATIONS":
+                                signal["standardized_score"] = None
+            return _balanced_role_panels(months, "leading")[-1]
+
+        without_consumer = january_window(consumer_available=False)
+        with_consumer = january_window(consumer_available=True)
+
+        self.assertEqual(without_consumer["coverage"], 0.6167)
+        self.assertFalse(without_consumer["valid"])
+        self.assertEqual(with_consumer["coverage"], 0.6667)
+        self.assertTrue(with_consumer["valid"])
 
     def test_absolute_breadth_is_separate_and_flags_hard_conflict(self) -> None:
         above = [self._a1_month(f"2025-0{month}", 100, 100, anchor_value=51) for month in (1, 2, 3)]

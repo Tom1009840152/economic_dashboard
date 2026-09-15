@@ -12,12 +12,15 @@ from app.db import SessionLocal
 from app.fetchers.akshare_source import FETCHERS as ALL_FETCHERS
 from app.fetchers.china_cycle_data import (
     CHINA_CYCLE_FETCHERS,
+    NBS_70_CITY_FORMULA_VERSIONS,
+    PBOC_YTD_DIFF_CODES,
     PBOC_YTD_DIFF_FORMULA_VERSION,
     _load_fiscal,
     _load_gacc_exports,
     _load_industrial_enterprises,
     _load_nbs_industry_history,
     _load_nbs_hard_activity_evidence,
+    _load_nbs_house_price_diffusion,
     _load_nbs_property_history,
     _load_pboc_credit,
     _load_pmi,
@@ -100,6 +103,33 @@ def _is_official_release_url(value: object) -> bool:
     )
 
 
+def _is_https_release_domain(value: object, domain: str) -> bool:
+    try:
+        parsed = urlparse(str(value))
+    except (TypeError, ValueError):
+        return False
+    hostname = (parsed.hostname or "").lower().rstrip(".")
+    return parsed.scheme.lower() == "https" and (
+        hostname == domain or hostname.endswith(f".{domain}")
+    )
+
+
+def _is_trusted_derived_release(
+    code: str, formula_version: object, source_url: object
+) -> bool:
+    """Bind each approved source-level formula to its official publisher."""
+
+    if (
+        code in PBOC_YTD_DIFF_CODES
+        and formula_version == PBOC_YTD_DIFF_FORMULA_VERSION
+    ):
+        return _is_https_release_domain(source_url, "pbc.gov.cn")
+    nbs_formula = NBS_70_CITY_FORMULA_VERSIONS.get(code)
+    return nbs_formula == formula_version and _is_https_release_domain(
+        source_url, "stats.gov.cn"
+    )
+
+
 def _has_precise_available_at(value: object) -> bool:
     """Reject date-only placeholders masquerading as publication timestamps."""
 
@@ -133,10 +163,11 @@ def _verified_release_evidence(
     Historical publication pages may preserve an original value that was later
     revised. The existing upsert path represents the latest value, so D7 only
     enriches a stored observation when the official release value matches it.
-    The sole derived exception is the versioned month-on-month difference of two
-    official PBOC cumulative AFRE releases. Mismatches are reported and left
-    untouched until a dedicated ordered-vintage importer can represent both
-    versions without corrupting the current snapshot.
+    The derived exceptions are an explicit publisher-bound whitelist: the
+    month-on-month difference of two official PBOC cumulative AFRE releases and
+    the two fixed formulas calculated from NBS 70-city table 1. Mismatches are
+    reported and left untouched until a dedicated ordered-vintage importer can
+    represent both versions without corrupting the current snapshot.
 
     ``require_existing`` is enabled by archive backfills, making the operation
     metadata-only: an archive page cannot create a new current observation.  The
@@ -157,14 +188,21 @@ def _verified_release_evidence(
         raise ValueError(f"{code} release evidence is missing columns: {missing}")
     precise_timestamp = frame["available_at"].map(_has_precise_available_at)
     official_source = frame["source_url"].map(_is_official_release_url)
-    formula_version = (
-        frame["formula_version"]
-        if "formula_version" in frame.columns
-        else pd.Series(None, index=frame.index, dtype=object)
+    formula_version = frame.get(
+        "formula_version", pd.Series(None, index=frame.index, dtype=object)
+    )
+    trusted_derived = pd.Series(
+        (
+            _is_trusted_derived_release(code, version, source_url)
+            for version, source_url in zip(
+                formula_version, frame["source_url"], strict=True
+            )
+        ),
+        index=frame.index,
+        dtype=bool,
     )
     trusted_status = frame["status"].eq("published") | (
-        frame["status"].eq("derived")
-        & formula_version.eq(PBOC_YTD_DIFF_FORMULA_VERSION)
+        frame["status"].eq("derived") & trusted_derived
     )
     evidence = frame.loc[
         frame["release_date"].notna()
@@ -299,6 +337,11 @@ def main() -> None:
                 _merge_bundles(
                     _load_nbs_property_history(),
                     _load_real_estate_activity(
+                        page_count=args.archive_pages,
+                        start_page=args.archive_start_page,
+                        archive_shard=args.archive_shard,
+                    ),
+                    _load_nbs_house_price_diffusion(
                         page_count=args.archive_pages,
                         start_page=args.archive_start_page,
                         archive_shard=args.archive_shard,

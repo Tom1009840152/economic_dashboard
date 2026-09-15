@@ -48,6 +48,18 @@ _GACC_RELEASE_BASE = "https://english.customs.gov.cn/Statistics/Statistics"
 _PBOC_RELEASE_BASE = "https://www.pbc.gov.cn/diaochatongjisi/116219/116225/"
 _PBOC_NEWS_BASE = "https://www.pbc.gov.cn/goutongjiaoliu/113456/113469/"
 PBOC_YTD_DIFF_FORMULA_VERSION = "pboc_ytd_diff_v1"
+PBOC_YTD_DIFF_CODES = frozenset(
+    {
+        "CN_TSF",
+        "CN_TSF_RMB_LOANS_FLOW",
+        "CN_CORP_BOND_FINANCING",
+        "CN_GOV_BOND_FINANCING",
+    }
+)
+NBS_70_CITY_FORMULA_VERSIONS = {
+    "CN_RE_PRICE_RISING_SHARE": "nbs_70city_rising_share_v1",
+    "CN_RE_PRICE_MOM_MEDIAN": "nbs_70city_mom_median_v1",
+}
 _MOF_FISCAL_BASE = "https://gks.mof.gov.cn/tongjishuju/"
 _MOF_BOND_BASE = "https://yss.mof.gov.cn/zhuantilanmu/dfzgl/sjtj/"
 _PBOC_TSF_STOCK_PDFS = (
@@ -128,6 +140,19 @@ def _is_pboc_https_url(value: object) -> bool:
     hostname = (parsed.hostname or "").lower().rstrip(".")
     return parsed.scheme.lower() == "https" and (
         hostname == "pbc.gov.cn" or hostname.endswith(".pbc.gov.cn")
+    )
+
+
+def _is_nbs_https_url(value: object) -> bool:
+    """Accept only HTTPS resources hosted by NBS or its subdomains."""
+
+    try:
+        parsed = urlparse(str(value))
+    except (TypeError, ValueError):
+        return False
+    hostname = (parsed.hostname or "").lower().rstrip(".")
+    return parsed.scheme.lower() == "https" and (
+        hostname == "stats.gov.cn" or hostname.endswith(".stats.gov.cn")
     )
 
 
@@ -237,6 +262,8 @@ def _get_nbs_archive_text(url: str, *, cache: bool = True) -> str:
     decoded official HTML is cached; a challenge page is never evidence.
     """
 
+    if not _is_nbs_https_url(url):
+        raise ValueError(f"refusing non-official NBS archive URL: {url}")
     digest = hashlib.sha256(url.encode("utf-8")).hexdigest()
     cache_path = _NBS_ARCHIVE_CACHE / f"{digest}.html"
     if cache and cache_path.exists():
@@ -1831,6 +1858,217 @@ def _load_real_estate_activity(
             output[code].extend(rows)
         if archive:
             time.sleep(0.15)
+    return _series_frames(output)
+
+
+_NBS_70_CITY_RELEASE_TITLE = re.compile(
+    r"^(20\d{2})年(\d{1,2})月份?70个大中城市商品住宅销售价格变动情况$"
+)
+_NBS_70_CITY_TABLE_ONE_TITLE = re.compile(
+    r"^表1[：:]?.*70个大中城市新建商品住宅销售价格指数$"
+)
+
+
+def _compact_table_text(value: object) -> str:
+    return re.sub(r"\s+", "", str(value)).replace("＝", "=")
+
+
+def _nbs_70_city_release_period(title: str) -> dt.date | None:
+    match = _NBS_70_CITY_RELEASE_TITLE.fullmatch(_compact_table_text(title))
+    if match is None:
+        return None
+    try:
+        return dt.date(int(match.group(1)), int(match.group(2)), 1)
+    except ValueError:
+        return None
+
+
+def _nbs_table_caption(table) -> str | None:
+    """Return the nearest numbered caption belonging to an NBS HTML table."""
+
+    preceding = table.xpath(
+        "preceding::*[self::p or self::h2 or self::h3 or self::h4]"
+    )
+    for node in reversed(preceding):
+        text = _compact_table_text(node.text_content())
+        if re.match(r"^表\d+[：:]", text):
+            return text
+
+    # Some older releases put the caption in the first row of the table.
+    rows = table.xpath(".//tr")
+    if rows:
+        first = _compact_table_text(rows[0].text_content())
+        if re.match(r"^表\d+[：:]", first):
+            return first
+    return None
+
+
+def _nbs_new_home_mom_values_from_table(table) -> dict[str, float] | None:
+    """Parse only the ``城市 / 环比 / 上月=100`` columns of table 1."""
+
+    rows = table.xpath(".//tr")
+    header_index: int | None = None
+    pairs: list[tuple[int, int]] = []
+    for index, row in enumerate(rows):
+        cells = [
+            _compact_table_text(cell.text_content())
+            for cell in row.xpath("./th|./td")
+        ]
+        candidate_pairs = [
+            (position, position + 1)
+            for position in range(len(cells) - 1)
+            if cells[position] == "城市" and cells[position + 1] == "环比"
+        ]
+        if candidate_pairs:
+            header_index = index
+            pairs = candidate_pairs
+            break
+    if header_index is None or len(pairs) not in {1, 2}:
+        return None
+    if header_index + 1 >= len(rows):
+        return None
+
+    unit_cells = [
+        _compact_table_text(cell.text_content())
+        for cell in rows[header_index + 1].xpath("./th|./td")
+    ]
+    if sum(cell == "上月=100" for cell in unit_cells) != len(pairs):
+        return None
+
+    values: dict[str, float] = {}
+    for row in rows[header_index + 2 :]:
+        cells = [
+            _compact_table_text(cell.text_content())
+            for cell in row.xpath("./th|./td")
+        ]
+        for city_column, mom_column in pairs:
+            if mom_column >= len(cells):
+                continue
+            city = cells[city_column]
+            raw_value = cells[mom_column].replace(",", "")
+            if not re.fullmatch(r"[\u3400-\u9fff]{2,8}", city):
+                continue
+            if not re.fullmatch(r"\d{1,3}(?:\.\d+)?", raw_value):
+                continue
+            value = float(raw_value)
+            # These are indices whose previous month equals 100, not percentage
+            # changes. This bound rejects a percentage table even if its labels
+            # were accidentally malformed to look like the index table.
+            if not 80.0 <= value <= 120.0:
+                continue
+            if city in values:
+                return None
+            values[city] = value
+
+    # The official release is a fixed 70-city panel. Partial parses, repeated
+    # cities and concatenated tables are not valid evidence.
+    return values if len(values) == 70 else None
+
+
+def _nbs_new_home_mom_values(
+    source: str, observed: dt.date
+) -> dict[str, float] | None:
+    """Validate one release page and extract its current-month table-1 panel."""
+
+    try:
+        document = lxml_html.fromstring(source)
+    except (TypeError, ValueError):
+        return None
+
+    page_titles = [
+        _compact_table_text(node.text_content())
+        for node in document.xpath("//h1|//title")
+    ]
+    if not any(
+        (_nbs_70_city_release_period(title) == observed)
+        or title.startswith(
+            f"{observed.year}年{observed.month}月份70个大中城市商品住宅销售价格变动情况-"
+        )
+        for title in page_titles
+    ):
+        return None
+
+    matched_table = False
+    parsed_panels: list[dict[str, float]] = []
+    for table in document.xpath("//table"):
+        caption = _nbs_table_caption(table)
+        if caption is None or not _NBS_70_CITY_TABLE_ONE_TITLE.fullmatch(caption):
+            continue
+        matched_table = True
+        if _period_date(caption) != observed:
+            return None
+        panel = _nbs_new_home_mom_values_from_table(table)
+        if panel is None:
+            return None
+        parsed_panels.append(panel)
+
+    if not matched_table or not parsed_panels:
+        return None
+    first = parsed_panels[0]
+    if any(panel != first for panel in parsed_panels[1:]):
+        return None
+    return first
+
+
+def _load_nbs_house_price_diffusion(
+    page_count: int = 14, *, start_page: int = 0, archive_shard: int = 0
+) -> dict[str, pd.DataFrame]:
+    """Recover versioned 70-city new-home diffusion from official releases.
+
+    Each release contributes exactly one observation: the month named in its
+    title. Only table 1's new-home month-on-month index enters the calculation;
+    later rolling columns, the second-hand table and dwelling-size tables are
+    never read.
+    """
+
+    output: dict[str, list[dict]] = {
+        "CN_RE_PRICE_RISING_SHARE": [],
+        "CN_RE_PRICE_MOM_MEDIAN": [],
+    }
+    links = _nbs_links(
+        r"70个大中城市商品住宅销售价格变动情况",
+        page_count,
+        archive=True,
+        start_page=start_page,
+        archive_shard=archive_shard,
+    )
+    for source_url, title in links:
+        observed = _nbs_70_city_release_period(title)
+        if observed is None or not _is_nbs_https_url(source_url):
+            continue
+        try:
+            source = _get_nbs_archive_text(source_url)
+            city_values = _nbs_new_home_mom_values(source, observed)
+            if city_values is None:
+                continue
+            metadata = _publication_metadata(source, source_url)
+        except Exception:
+            logger.warning(
+                "NBS 70-city house-price release failed: %s",
+                source_url,
+                exc_info=True,
+            )
+            continue
+
+        index_values = pd.Series(city_values, dtype="float64")
+        derived_values = {
+            "CN_RE_PRICE_RISING_SHARE": round(
+                float(index_values.gt(100.0).mean() * 100.0), 6
+            ),
+            "CN_RE_PRICE_MOM_MEDIAN": round(
+                float(index_values.median() - 100.0), 6
+            ),
+        }
+        for code, value in derived_values.items():
+            output[code].append(
+                {
+                    "date": observed,
+                    "value": value,
+                    **metadata,
+                    "status": "derived",
+                    "formula_version": NBS_70_CITY_FORMULA_VERSIONS[code],
+                }
+            )
     return _series_frames(output)
 
 
