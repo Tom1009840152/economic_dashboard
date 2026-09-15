@@ -42,10 +42,11 @@ from app.services.china_cycle_regime import (
     METHODOLOGY_VERSION as A2_METHODOLOGY_VERSION,
     PHASES,
     _build_regime_from_matrix,
+    _phase_basis,
 )
 
 
-METHODOLOGY_VERSION = "1.3.2"
+METHODOLOGY_VERSION = "1.3.3"
 DEFAULT_BACKTEST_MONTHS = 120
 MAX_BACKTEST_MONTHS = 120
 MIN_RATE_SAMPLE = 24
@@ -730,13 +731,27 @@ def _fixed_survey_regime_from_matrix(
 def _phase_snapshot(month: dict | None, regime: dict) -> dict | None:
     if month is None:
         return None
+    phase_status = month.get("phase_status", "insufficient")
+    phase_basis = month.get("phase_basis", _phase_basis(phase_status))
     return {
         "phase": month.get("phase"),
         "phase_label": month.get("phase_label", "待判定"),
-        "phase_status": month.get("phase_status", "insufficient"),
+        "phase_status": phase_status,
+        "phase_basis": phase_basis,
         "confirmed_phase": month.get("confirmed_phase"),
         "confirmed_since": month.get("confirmed_since"),
-        "last_decision_period": regime.get("last_decision_period"),
+        "last_decision_period": month.get(
+            "last_decision_period",
+            regime.get("last_decision_period"),
+        ),
+        "carry_forward_months": int(
+            month.get(
+                "carry_forward_months",
+                month.get("undecidable_streak", 0)
+                if phase_basis == "carried_forward"
+                else 0,
+            )
+        ),
         "decision_eligible": bool(month.get("decision_eligible")),
         "level_axis": month.get("level_axis", "unavailable"),
         "momentum_axis": month.get("momentum_axis", "unavailable"),
@@ -818,6 +833,38 @@ def _formula_ineligible(strict_rows: list[dict], final_rows: list[dict]) -> bool
 def _stability(rows: list[dict]) -> dict:
     comparable = [row for row in rows if row["comparable"]]
     decision_comparable = [row for row in rows if row["decision_comparable"]]
+
+    def phase_basis(row: dict, side: str) -> str:
+        snapshot = row.get(side) or {}
+        explicit = snapshot.get("phase_basis")
+        if explicit:
+            return explicit
+        status = snapshot.get("phase_status")
+        if status in {"confirmed", "transition"}:
+            return "active_decision"
+        if status in {"held_uncomparable", "stale"}:
+            return "carried_forward"
+        if status == "candidate":
+            return "pending_confirmation"
+        if snapshot.get("decision_eligible") and snapshot.get("confirmed_phase"):
+            return "active_decision"
+        return "unclassified"
+
+    non_decision_comparable = [
+        row for row in comparable if not row["decision_comparable"]
+    ]
+    pending_confirmation: list[dict] = []
+    carried_forward: list[dict] = []
+    mixed_basis: list[dict] = []
+    for row in non_decision_comparable:
+        realtime_basis = phase_basis(row, "realtime")
+        final_basis = phase_basis(row, "final")
+        if "pending_confirmation" in {realtime_basis, final_basis}:
+            pending_confirmation.append(row)
+        elif realtime_basis == final_basis == "carried_forward":
+            carried_forward.append(row)
+        elif realtime_basis != final_basis:
+            mixed_basis.append(row)
     level_rows = [
         row
         for row in comparable
@@ -841,6 +888,12 @@ def _stability(rows: list[dict]) -> dict:
     decision_agreement_count = sum(
         bool(row["decision_phase_agreement"]) for row in decision_comparable
     )
+    carried_forward_agreement_count = sum(
+        bool(row["phase_agreement"]) for row in carried_forward
+    )
+    carried_forward_flip_count = (
+        len(carried_forward) - carried_forward_agreement_count
+    )
     return {
         "comparable_months": len(comparable),
         "agreement_count": agreement_count if comparable else None,
@@ -854,6 +907,23 @@ def _stability(rows: list[dict]) -> dict:
         "decision_agreement_rate": safe_rate(
             decision_agreement_count, len(decision_comparable)
         ),
+        "carried_forward_comparable_months": len(carried_forward),
+        "carried_forward_agreement_count": (
+            carried_forward_agreement_count if carried_forward else None
+        ),
+        "carried_forward_agreement_rate": safe_rate(
+            carried_forward_agreement_count,
+            len(carried_forward),
+        ),
+        "carried_forward_flip_count": (
+            carried_forward_flip_count if carried_forward else None
+        ),
+        "carried_forward_flip_rate": safe_rate(
+            carried_forward_flip_count,
+            len(carried_forward),
+        ),
+        "mixed_basis_comparable_months": len(mixed_basis),
+        "pending_confirmation_comparable_months": len(pending_confirmation),
         "level_axis_comparable_months": len(level_rows),
         "level_axis_agreement_rate": safe_rate(
             sum(row["realtime"]["level_axis"] == row["final"]["level_axis"] for row in level_rows),

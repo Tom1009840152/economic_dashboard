@@ -42,9 +42,13 @@ class ChinaCycleRegimeTests(unittest.TestCase):
         )
 
         self.assertEqual(first["phase_status"], "candidate")
+        self.assertEqual(first["phase_basis"], "pending_confirmation")
+        self.assertEqual(first["carry_forward_months"], 0)
         self.assertFalse(first["confirmed"])
         self.assertEqual(first["candidate_since"], "2025-01")
         self.assertEqual(second["phase_status"], "confirmed")
+        self.assertEqual(second["phase_basis"], "active_decision")
+        self.assertEqual(second["carry_forward_months"], 0)
         self.assertEqual(second["confirmed_phase"], "expansion")
         self.assertEqual(second["confirmed_since"], "2025-02")
 
@@ -140,14 +144,20 @@ class ChinaCycleRegimeTests(unittest.TestCase):
         )
 
         self.assertEqual(first["phase_status"], "held_uncomparable")
+        self.assertEqual(first["phase_basis"], "carried_forward")
+        self.assertEqual(first["carry_forward_months"], 1)
         self.assertIsNone(first["candidate_phase"])
         self.assertIsNone(first["candidate_since"])
         self.assertEqual(first["candidate_streak"], 0)
         self.assertEqual(second["phase_status"], "stale")
+        self.assertEqual(second["phase_basis"], "carried_forward")
+        self.assertEqual(second["carry_forward_months"], 2)
         self.assertEqual(second["confirmed_phase"], "recovery")
         self.assertIsNone(second["candidate_phase"])
         self.assertEqual(second["candidate_streak"], 0)
         self.assertEqual(resumed["phase_status"], "transition")
+        self.assertEqual(resumed["phase_basis"], "active_decision")
+        self.assertEqual(resumed["carry_forward_months"], 0)
         self.assertEqual(resumed["candidate_phase"], "expansion")
         self.assertEqual(resumed["candidate_since"], "2025-04")
         self.assertEqual(resumed["candidate_streak"], 1)
@@ -216,6 +226,8 @@ class ChinaCycleRegimeTests(unittest.TestCase):
         )
 
         self.assertEqual(state["phase_status"], "insufficient")
+        self.assertEqual(state["phase_basis"], "unclassified")
+        self.assertEqual(state["carry_forward_months"], 0)
         self.assertIsNone(state["phase"])
         self.assertEqual(state["confirmed_phase"], None)
         self.assertEqual(second["phase_status"], "insufficient")
@@ -308,8 +320,14 @@ class ChinaCycleRegimeTests(unittest.TestCase):
         rows = {item["period"]: item for item in payload["months"]}
         self.assertFalse(rows["2025-01"]["decision_eligible"])
         self.assertTrue(rows["2025-01"]["coincident_basis_changed"])
+        self.assertEqual(rows["2025-01"]["phase_basis"], "carried_forward")
+        self.assertEqual(rows["2025-01"]["carry_forward_months"], 1)
+        self.assertEqual(rows["2025-01"]["last_decision_period"], "2024-12")
         for period in ("2025-02", "2025-03", "2025-04", "2025-05"):
             self.assertTrue(rows[period]["decision_eligible"])
+            self.assertEqual(rows[period]["phase_basis"], "active_decision")
+            self.assertEqual(rows[period]["carry_forward_months"], 0)
+            self.assertEqual(rows[period]["last_decision_period"], period)
 
     def test_low_weight_two_signal_block_is_not_basis_eligible(self) -> None:
         periods = pd.period_range("2025-01", periods=6, freq="M")
@@ -543,7 +561,12 @@ class ChinaCycleRegimeTests(unittest.TestCase):
         self.assertEqual(len(validated.months), 12)
         self.assertEqual(validated.as_of, "2024-12")
         self.assertEqual(validated.data_basis, "final")
+        self.assertEqual(validated.methodology_version, "1.0.1")
         self.assertEqual(validated.a1_warnings, ["A1 warning"])
+        self.assertEqual(
+            validated.latest.last_decision_period,
+            validated.last_decision_period,
+        )
         self.assertLessEqual(len(validated.trajectory), 12)
         self.assertIn("immediately resets", validated.methodology.basis_change_policy)
         self.assertTrue(any("清空未确认候选" in item for item in validated.change_conditions))

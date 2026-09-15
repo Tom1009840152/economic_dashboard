@@ -432,6 +432,12 @@ export type BusinessCyclePhaseStatus =
   | "stale"
   | "insufficient";
 
+export type BusinessCyclePhaseBasis =
+  | "active_decision"
+  | "carried_forward"
+  | "pending_confirmation"
+  | "unclassified";
+
 export interface BusinessCycleDriver {
   code: string;
   name: string;
@@ -483,6 +489,7 @@ export interface BusinessCycleRegimePoint {
   phase_label: string;
   raw_phase: BusinessCyclePhase | null;
   phase_status: BusinessCyclePhaseStatus;
+  phase_basis: BusinessCyclePhaseBasis;
   confirmed: boolean;
   confirmed_phase: BusinessCyclePhase | null;
   candidate_phase: BusinessCyclePhase | null;
@@ -492,6 +499,8 @@ export interface BusinessCycleRegimePoint {
   required_confirmation_months: number | null;
   duration_months: number | null;
   undecidable_streak: number;
+  carry_forward_months: number;
+  last_decision_period: string | null;
   decision_eligible: boolean;
   decision_reasons: string[];
   coincident_comparable: boolean;
@@ -654,6 +663,13 @@ export interface BusinessCycleBacktestStability {
   decision_comparable_months: number;
   decision_agreement_count: number | null;
   decision_agreement_rate: number | null;
+  carried_forward_comparable_months: number;
+  carried_forward_agreement_count: number | null;
+  carried_forward_agreement_rate: number | null;
+  carried_forward_flip_count: number | null;
+  carried_forward_flip_rate: number | null;
+  mixed_basis_comparable_months: number;
+  pending_confirmation_comparable_months: number;
   level_axis_comparable_months: number;
   level_axis_agreement_rate: number | null;
   momentum_axis_comparable_months: number;
@@ -725,9 +741,11 @@ export interface BusinessCycleBacktestRegimeSnapshot {
   phase: BusinessCyclePhase | null;
   phase_label: string;
   phase_status: BusinessCyclePhaseStatus;
+  phase_basis: BusinessCyclePhaseBasis;
   confirmed_phase: BusinessCyclePhase | null;
   confirmed_since: string | null;
   last_decision_period: string | null;
+  carry_forward_months: number;
   decision_eligible: boolean;
   level_axis: "above" | "below" | "neutral" | "unavailable";
   momentum_axis: "rising" | "falling" | "neutral" | "unavailable";

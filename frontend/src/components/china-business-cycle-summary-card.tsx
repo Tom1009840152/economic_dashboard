@@ -13,6 +13,7 @@ import {
   absoluteAnchorQualifier,
   phaseAxisSummary,
   phasePlainHeadline,
+  regimeHeadline,
 } from "@/lib/china-business-cycle-presentation";
 import type {
   BusinessCyclePhase,
@@ -28,12 +29,12 @@ const PHASE_LABELS: Record<BusinessCyclePhase, string> = {
 };
 
 const STATUS_LABELS: Record<BusinessCyclePhaseStatus, string> = {
-  confirmed: "已确认",
+  confirmed: "本月可判 · 已确认",
   candidate: "候选 · 待连续确认",
-  transition: "切换观察",
-  held_uncomparable: "口径变动 · 沿用上期判断",
-  stale: "连续不可比 · 暂不更新",
-  insufficient: "证据不足",
+  transition: "本月可判 · 切换观察",
+  held_uncomparable: "本月不可判 · 沿用历史",
+  stale: "连续不可判 · 沿用历史",
+  insufficient: "本月不可判",
 };
 
 const CONFIDENCE_LABELS = {
@@ -78,6 +79,7 @@ export function ChinaBusinessCycleSummaryCard({
   data: BusinessCycleRegimeDashboard;
 }) {
   const latest = data.latest;
+  const headline = latest ? regimeHeadline(latest, data.last_decision_period) : null;
 
   return (
     <Link
@@ -102,19 +104,19 @@ export function ChinaBusinessCycleSummaryCard({
         </CardHeader>
 
         <CardContent>
-          {latest ? (
+          {latest && headline ? (
             <>
               <div className="grid gap-5 lg:grid-cols-[1.15fr_1fr]">
                 <div>
-                  <div className="flex flex-wrap items-end gap-x-4 gap-y-2">
-                    <div className="text-4xl font-semibold tracking-tight sm:text-5xl">
-                      {latest.phase_label || phaseName(latest.phase)}
-                      {(latest.phase_status === "held_uncomparable" || latest.phase_status === "stale") && (
-                        <span className="ml-2 text-base font-medium text-muted-foreground sm:text-lg">（沿用）</span>
-                      )}
+                  <div>
+                    <div className="text-3xl font-semibold tracking-tight sm:text-5xl">
+                      {headline.title}
                     </div>
-                    <div className="pb-1 text-xs text-muted-foreground">
-                      {latest.duration_months == null ? "持续时间待确认" : `自模型确认起已沿用 ${latest.duration_months} 个月`}
+                    <div className="mt-2 text-base font-semibold text-muted-foreground sm:text-lg">
+                      {headline.secondary}
+                    </div>
+                    <div className="mt-2 flex flex-col gap-1 text-xs text-muted-foreground sm:flex-row sm:flex-wrap sm:gap-x-3">
+                      {headline.timing.map((item) => <span key={item}>{item}</span>)}
                     </div>
                   </div>
                   <div className="mt-4 rounded-xl border bg-background/75 px-4 py-3">
@@ -129,13 +131,12 @@ export function ChinaBusinessCycleSummaryCard({
                   </p>
                   {!latest.decision_eligible && latest.decision_reasons.length > 0 && (
                     <div className="mt-3 rounded-lg border border-dashed px-3 py-2 text-xs leading-5 text-muted-foreground">
-                      最近可判定月：{data.last_decision_period ?? "暂无"}；已连续 {latest.undecidable_streak} 个月未更新判断。
-                      <span className="mt-1 block">原因：{latest.decision_reasons[0]}</span>
+                      本月未更新原因：{latest.decision_reasons[0]}
                     </div>
                   )}
                   {latest.candidate_phase && (
                     <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50/70 px-3 py-2 text-xs leading-5 text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
-                      {latest.phase_status === "transition" ? "当前确认阶段仍沿用；候选方向：" : "阶段候选："}
+                      {latest.phase_status === "transition" ? "当前有效阶段尚未切换；候选方向：" : "阶段候选："}
                       {phaseName(latest.candidate_phase)}，已连续 {latest.candidate_streak}
                       {latest.required_confirmation_months == null ? "" : `/${latest.required_confirmation_months}`} 个月；尚未确认切换。
                     </div>
@@ -181,7 +182,7 @@ export function ChinaBusinessCycleSummaryCard({
               </div>
 
               <div className="mt-4 flex flex-col gap-2 border-t pt-4 text-xs text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
-                <span>数据截至 {latest.period} · 最近可判定 {data.last_decision_period ?? "暂无"} · 不等同于GDP衰退定义</span>
+                <span>数据截至 {latest.period} · 最近可判定 {latest.last_decision_period ?? data.last_decision_period ?? "暂无"} · 不等同于GDP衰退定义</span>
                 <span className="inline-flex items-center gap-1 font-medium text-foreground">
                   查看罗盘与判断依据
                   <ArrowRight className="size-3.5 transition-transform group-hover:translate-x-0.5" aria-hidden="true" />

@@ -21,7 +21,7 @@ from app.services.china_business_cycle import (
 )
 
 
-METHODOLOGY_VERSION = "1.0.0"
+METHODOLOGY_VERSION = "1.0.1"
 LEVEL_NEUTRAL = 100.0
 LEVEL_BUFFER = 1.5
 MOMENTUM_BUFFER = 1.5
@@ -407,6 +407,18 @@ def _leading_confirmation(phase: Phase | None, direction: str) -> str:
     return "confirmed" if direction == expected else "divergent"
 
 
+def _phase_basis(status: str) -> str:
+    """Describe whether the displayed phase was actively assessed this month."""
+
+    if status in {"confirmed", "transition"}:
+        return "active_decision"
+    if status in {"held_uncomparable", "stale"}:
+        return "carried_forward"
+    if status == "candidate":
+        return "pending_confirmation"
+    return "unclassified"
+
+
 def _advance_tracker(
     tracker: RegimeTracker,
     *,
@@ -493,6 +505,7 @@ def _advance_tracker(
     return {
         "phase": phase,
         "phase_status": status,
+        "phase_basis": _phase_basis(status),
         "confirmed": tracker.confirmed_phase is not None,
         "confirmed_phase": tracker.confirmed_phase,
         "candidate_phase": tracker.candidate_phase,
@@ -502,6 +515,11 @@ def _advance_tracker(
         "required_confirmation_months": required,
         "duration_months": duration,
         "undecidable_streak": tracker.undecidable_streak,
+        "carry_forward_months": (
+            tracker.undecidable_streak
+            if status in {"held_uncomparable", "stale"}
+            else 0
+        ),
         "leading_confirmation": leading_confirmation,
     }
 
@@ -912,6 +930,7 @@ def _build_regime_from_matrix(
     inflation = _inflation_by_month(inflation_rows, calendar)
     tracker = RegimeTracker()
     computed = []
+    last_decision_period: str | None = None
 
     for index, (period, a1_month) in enumerate(zip(calendar, source_months)):
         coincident_basis = coincident_panels[index]
@@ -952,6 +971,8 @@ def _build_regime_from_matrix(
             basis_changed=coincident_basis["changed"],
             basis_coverage=coincident_basis["coverage"],
         )
+        if decision_eligible:
+            last_decision_period = str(period)
         state = _advance_tracker(
             tracker,
             period=str(period),
@@ -1002,6 +1023,7 @@ def _build_regime_from_matrix(
                 "raw_phase": raw,
                 **{key: value for key, value in state.items() if key != "phase"},
                 "decision_eligible": decision_eligible,
+                "last_decision_period": last_decision_period,
                 "decision_reasons": decision_reasons,
                 "coincident_comparable": bool(
                     coincident_basis["valid"] and not coincident_basis["changed"]

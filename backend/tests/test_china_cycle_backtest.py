@@ -14,6 +14,7 @@ from app.services.china_cycle_backtest import (
     _decision_as_of,
     _input_readiness,
     _latest_completed_period,
+    _phase_snapshot,
     _regime_for_rows,
     _select_strict_vintages,
     _stability,
@@ -490,6 +491,29 @@ class ChinaCycleBacktestTests(unittest.TestCase):
         self.assertEqual(validated.months[0].status, "unavailable")
         self.assertIn("no_known_available_at", validated.months[0].exclusion_reasons)
 
+    def test_phase_snapshot_preserves_carry_forward_explanation(self) -> None:
+        snapshot = _phase_snapshot(
+            {
+                "phase": "contraction",
+                "phase_label": "收缩",
+                "phase_status": "stale",
+                "phase_basis": "carried_forward",
+                "confirmed_phase": "contraction",
+                "confirmed_since": "2021-11",
+                "last_decision_period": "2024-05",
+                "carry_forward_months": 3,
+                "decision_eligible": False,
+            },
+            {"last_decision_period": "2099-12"},
+        )
+
+        self.assertEqual(snapshot["phase_basis"], "carried_forward")
+        self.assertEqual(snapshot["carry_forward_months"], 3)
+        self.assertEqual(snapshot["last_decision_period"], "2024-05")
+        self.assertEqual(snapshot["confirmed_phase"], "contraction")
+        self.assertEqual(snapshot["confirmed_since"], "2021-11")
+        self.assertFalse(snapshot["decision_eligible"])
+
     def test_latest_completed_period_waits_for_fixed_cutoff(self) -> None:
         before = datetime(2026, 9, 14, 12, tzinfo=UTC)
         at_cutoff = datetime(2026, 9, 20, 10, tzinfo=UTC)
@@ -612,6 +636,122 @@ class ChinaCycleBacktestTests(unittest.TestCase):
         self.assertIsNone(short["agreement_rate"])
         self.assertEqual(sufficient["agreement_rate"], 1.0)
         self.assertEqual(sufficient["flip_rate"], 0.0)
+
+    def test_stability_separates_active_carry_pending_and_mixed_basis(self) -> None:
+        def snapshot(
+            phase: str,
+            basis: str,
+            *,
+            decision_eligible: bool,
+        ) -> dict:
+            status = {
+                "active_decision": "confirmed",
+                "carried_forward": "stale",
+                "pending_confirmation": "candidate",
+            }[basis]
+            return {
+                "phase": phase,
+                "confirmed_phase": (
+                    None if basis == "pending_confirmation" else phase
+                ),
+                "phase_status": status,
+                "phase_basis": basis,
+                "decision_eligible": decision_eligible,
+                "level_axis": "below",
+                "momentum_axis": "rising",
+            }
+
+        def row(
+            index: int,
+            realtime_basis: str,
+            final_basis: str,
+            *,
+            agrees: bool,
+            decision_comparable: bool,
+        ) -> dict:
+            realtime_phase = "recovery"
+            final_phase = realtime_phase if agrees else "contraction"
+            realtime = snapshot(
+                realtime_phase,
+                realtime_basis,
+                decision_eligible=realtime_basis == "active_decision",
+            )
+            final = snapshot(
+                final_phase,
+                final_basis,
+                decision_eligible=final_basis == "active_decision",
+            )
+            return {
+                "observation_period": str(pd.Period("2020-01", freq="M") + index),
+                "realtime": realtime,
+                "final": final,
+                "comparable": True,
+                "phase_agreement": agrees,
+                "decision_comparable": decision_comparable,
+                "decision_phase_agreement": agrees if decision_comparable else None,
+            }
+
+        rows = [
+            row(
+                index,
+                "active_decision",
+                "active_decision",
+                agrees=True,
+                decision_comparable=True,
+            )
+            for index in range(24)
+        ]
+        rows.extend(
+            row(
+                24 + index,
+                "carried_forward",
+                "carried_forward",
+                agrees=index < 20,
+                decision_comparable=False,
+            )
+            for index in range(24)
+        )
+        rows.append(
+            row(
+                48,
+                "pending_confirmation",
+                "active_decision",
+                agrees=True,
+                decision_comparable=False,
+            )
+        )
+        rows.append(
+            row(
+                49,
+                "carried_forward",
+                "active_decision",
+                agrees=False,
+                decision_comparable=False,
+            )
+        )
+
+        stability = _stability(rows)
+
+        self.assertEqual(stability["decision_comparable_months"], 24)
+        self.assertEqual(stability["decision_agreement_rate"], 1.0)
+        self.assertEqual(stability["carried_forward_comparable_months"], 24)
+        self.assertEqual(stability["carried_forward_agreement_count"], 20)
+        self.assertEqual(stability["carried_forward_agreement_rate"], 0.8333)
+        self.assertEqual(stability["carried_forward_flip_count"], 4)
+        self.assertEqual(stability["carried_forward_flip_rate"], 0.1667)
+        self.assertEqual(stability["pending_confirmation_comparable_months"], 1)
+        self.assertEqual(stability["mixed_basis_comparable_months"], 1)
+        self.assertEqual(
+            stability["comparable_months"],
+            stability["decision_comparable_months"]
+            + stability["carried_forward_comparable_months"]
+            + stability["pending_confirmation_comparable_months"]
+            + stability["mixed_basis_comparable_months"],
+        )
+        short_carry = _stability(rows[24:47])
+        self.assertEqual(short_carry["carried_forward_comparable_months"], 23)
+        self.assertIsNone(short_carry["carried_forward_agreement_rate"])
+        self.assertIsNone(short_carry["carried_forward_flip_rate"])
 
     def test_transitions_ignore_final_only_months(self) -> None:
         rows = [

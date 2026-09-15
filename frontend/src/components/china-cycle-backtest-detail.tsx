@@ -135,17 +135,56 @@ function phaseClass(phase: BusinessCyclePhase | null | undefined): string {
   return "border-border bg-muted/60 text-muted-foreground";
 }
 
-function PhaseBadge({ snapshot }: { snapshot: BusinessCycleBacktestRegimeSnapshot | null }) {
+function SnapshotCell({ snapshot }: { snapshot: BusinessCycleBacktestRegimeSnapshot | null }) {
+  if (!snapshot) {
+    return <span className="text-xs text-muted-foreground">无可用结果</span>;
+  }
+
+  const displayPhase = snapshot.confirmed_phase ?? snapshot.phase;
+  const basisLabel = snapshot.phase_basis === "active_decision"
+    ? snapshot.phase_status === "transition" ? "本月可判 · 切换观察" : "本月可判"
+    : snapshot.phase_basis === "carried_forward"
+      ? "沿用旧判断"
+      : snapshot.phase_basis === "pending_confirmation"
+        ? "形成候选 · 尚未确认"
+        : "本月不可判";
+
   return (
-    <Badge variant="outline" className={phaseClass(snapshot?.phase)}>
-      {phaseName(snapshot?.phase)}
-    </Badge>
+    <div className="min-w-0">
+      <div className="flex flex-wrap items-center gap-1.5">
+        <Badge variant="outline" className={phaseClass(displayPhase)}>
+          {phaseName(displayPhase)}
+        </Badge>
+        <span className="text-[11px] font-medium text-foreground">{basisLabel}</span>
+      </div>
+      {snapshot.phase_basis === "carried_forward" && (
+        <div className="mt-1 text-[10px] leading-4 text-muted-foreground">
+          <span className="block">上次确认：{phaseName(snapshot.confirmed_phase)}{snapshot.confirmed_since ? ` · ${snapshot.confirmed_since}` : ""}</span>
+          <span className="block">最近可判 {snapshot.last_decision_period ?? "暂无"} · 连续 {snapshot.carry_forward_months} 个月未更新</span>
+        </div>
+      )}
+    </div>
   );
 }
 
 function comparisonLabel(month: BusinessCycleBacktestMonth): string {
-  if (month.comparison_type === "same") return "阶段一致";
-  if (month.comparison_type === "phase_changed") return "阶段翻转";
+  const realtimeBasis = month.realtime?.phase_basis;
+  const finalBasis = month.final?.phase_basis;
+  const bothActive = realtimeBasis === "active_decision" && finalBasis === "active_decision";
+  const bothCarried = realtimeBasis === "carried_forward" && finalBasis === "carried_forward";
+  const bothPending = realtimeBasis === "pending_confirmation" && finalBasis === "pending_confirmation";
+  if (month.comparison_type === "same") {
+    if (bothActive) return "主动判断一致";
+    if (bothCarried) return "沿用标签一致";
+    if (bothPending) return "候选方向一致 · 均待确认";
+    return "标签一致 · 判断口径不同";
+  }
+  if (month.comparison_type === "phase_changed") {
+    if (bothActive) return "主动判断翻转";
+    if (bothCarried) return "沿用标签翻转";
+    if (bothPending) return "候选方向不同 · 均待确认";
+    return "标签翻转 · 判断口径不同";
+  }
   if (month.comparison_type === "realtime_unclassified") return "当时未形成标签";
   if (month.comparison_type === "final_unclassified") return "事后参考未形成标签";
   if (month.comparison_type === "both_unclassified") return "两边均未形成标签";
@@ -153,6 +192,10 @@ function comparisonLabel(month: BusinessCycleBacktestMonth): string {
 }
 
 function comparisonClass(month: BusinessCycleBacktestMonth): string {
+  const realtimeBasis = month.realtime?.phase_basis;
+  const finalBasis = month.final?.phase_basis;
+  if (realtimeBasis !== finalBasis && month.comparable) return "text-amber-700 dark:text-amber-300";
+  if (realtimeBasis === "carried_forward" && finalBasis === "carried_forward") return "text-muted-foreground";
   if (month.comparison_type === "same") return "text-emerald-700 dark:text-emerald-300";
   if (month.comparison_type === "phase_changed") return "text-amber-700 dark:text-amber-300";
   return "text-muted-foreground";
@@ -182,10 +225,17 @@ function DefinitionCard({
 }
 
 export function ChinaCycleBacktestDetail({ data }: { data: BusinessCycleBacktestDashboard }) {
-  const copy = STATUS_COPY[data.status];
   const coverage = data.coverage;
   const stability = data.stability;
+  const activeStatus = stability.decision_comparable_months >= stability.minimum_rate_sample
+    ? "ok"
+    : stability.decision_comparable_months > 0
+      ? "limited"
+      : "unavailable";
+  const copy = STATUS_COPY[activeStatus];
   const enoughPhaseSample = stability.comparable_months >= stability.minimum_rate_sample;
+  const enoughActiveSample = stability.decision_comparable_months >= stability.minimum_rate_sample;
+  const enoughCarriedSample = stability.carried_forward_comparable_months >= stability.minimum_rate_sample;
   const enoughTransitions = data.transitions.matched_count >= data.transitions.minimum_lag_sample;
   const recentMonths = data.months.slice(-18).reverse();
   const reasons = Object.entries(coverage.reason_counts).sort((left, right) => right[1] - left[1]);
@@ -223,47 +273,80 @@ export function ChinaCycleBacktestDetail({ data }: { data: BusinessCycleBacktest
               <div className="mt-1 text-xs text-muted-foreground">{data.start_period ?? "--"} 至 {data.end_period ?? "--"}</div>
             </div>
             <div className="rounded-xl border bg-background/75 p-4">
-              <div className="text-xs text-muted-foreground">可比较月份</div>
-              <div className="mt-2 text-2xl font-semibold tabular-nums">{coverage.display_evaluable_months}/{coverage.scheduled_months}</div>
-              <div className="mt-1 text-xs text-muted-foreground">严格样本覆盖 {percent(coverage.display_evaluable_rate)}</div>
+              <div className="text-xs text-muted-foreground">主动判断可比月</div>
+              <div className="mt-2 text-2xl font-semibold tabular-nums">{stability.decision_comparable_months}/{coverage.scheduled_months}</div>
+              <div className="mt-1 text-xs text-muted-foreground">两边当月都可判且已有确认阶段</div>
             </div>
             <div className="rounded-xl border bg-background/75 p-4">
-              <div className="text-xs text-muted-foreground">页面阶段一致</div>
+              <div className="text-xs text-muted-foreground">主动判断一致率</div>
+              <div className="mt-2 text-2xl font-semibold tabular-nums">
+                {stability.decision_comparable_months === 0
+                  ? "暂不可评估"
+                  : enoughActiveSample
+                    ? percent(stability.decision_agreement_rate)
+                    : `${stability.decision_agreement_count ?? 0} 个月一致`}
+              </div>
+              <div className="mt-1 text-xs text-muted-foreground">
+                {stability.decision_comparable_months === 0
+                  ? "暂无主动判断可比月"
+                  : enoughActiveSample
+                    ? `基于 ${stability.decision_comparable_months} 个主动判断月`
+                    : `少于${stability.minimum_rate_sample}个可比月，不展示比例`}
+              </div>
+            </div>
+            <div className="rounded-xl border bg-background/75 p-4">
+              <div className="text-xs text-muted-foreground">含沿用标签一致率</div>
               <div className="mt-2 text-2xl font-semibold tabular-nums">
                 {stability.comparable_months === 0
                   ? "暂不可评估"
                   : enoughPhaseSample
                     ? percent(stability.agreement_rate)
-                    : `${stability.agreement_count ?? 0} 个月`}
+                    : `${stability.agreement_count ?? 0} 个月一致`}
               </div>
-              <div className="mt-1 text-xs text-muted-foreground">
-                {stability.comparable_months === 0
-                  ? "暂无可比月份"
-                  : enoughPhaseSample
-                    ? `基于 ${stability.comparable_months} 个可比月`
-                    : `少于${stability.minimum_rate_sample}个可比月，不展示比例`}
-              </div>
-            </div>
-            <div className="rounded-xl border bg-background/75 p-4">
-              <div className="text-xs text-muted-foreground">页面阶段翻转</div>
-              <div className="mt-2 text-2xl font-semibold tabular-nums">
-                {stability.comparable_months === 0
-                  ? "暂不可评估"
-                  : enoughPhaseSample
-                    ? percent(stability.flip_rate)
-                    : `${stability.flip_count ?? 0} 个月`}
-              </div>
-              <div className="mt-1 text-xs text-muted-foreground">衡量数据修订稳定性，不是预测准确率</div>
+              <div className="mt-1 text-xs text-muted-foreground">包含历史状态沿用，仅作辅助口径</div>
             </div>
           </div>
 
-          {data.status !== "ok" && (
+          <div className="mt-3 grid gap-3 sm:grid-cols-3">
+            <div className="rounded-lg border border-dashed px-3 py-2.5">
+              <div className="text-[11px] text-muted-foreground">双方均沿用旧判断</div>
+              <div className="mt-1 text-sm font-semibold tabular-nums">
+                {stability.carried_forward_comparable_months} 个月
+                {enoughCarriedSample && stability.carried_forward_agreement_rate != null
+                  ? ` · 一致率 ${percent(stability.carried_forward_agreement_rate)}`
+                  : ""}
+              </div>
+              {!enoughCarriedSample && stability.carried_forward_comparable_months > 0 && (
+                <div className="mt-1 text-[10px] text-muted-foreground">
+                  {stability.carried_forward_agreement_count ?? 0} 个月标签一致；样本不足，不展示比例
+                </div>
+              )}
+            </div>
+            <div className="rounded-lg border border-dashed px-3 py-2.5">
+              <div className="text-[11px] text-muted-foreground">一边主动、一边沿用</div>
+              <div className="mt-1 text-sm font-semibold tabular-nums">{stability.mixed_basis_comparable_months} 个月</div>
+              <div className="mt-1 text-[10px] text-muted-foreground">判断基础不同，不并入主动判断稳定率</div>
+            </div>
+            <div className="rounded-lg border border-dashed px-3 py-2.5">
+              <div className="text-[11px] text-muted-foreground">等待连续确认</div>
+              <div className="mt-1 text-sm font-semibold tabular-nums">{stability.pending_confirmation_comparable_months} 个月</div>
+              <div className="mt-1 text-[10px] text-muted-foreground">候选不冒充已确认阶段</div>
+            </div>
+          </div>
+
+          {activeStatus !== "ok" && (
             <div className={`mt-4 flex items-start gap-2 rounded-xl border px-4 py-3 text-sm leading-6 ${copy.className}`}>
               <TriangleAlert className="mt-1 size-4 shrink-0" aria-hidden="true" />
               <div>
-                <div className="font-medium">不能把“没有可评分样本”解读为模型失效</div>
+                <div className="font-medium">
+                  {enoughPhaseSample
+                    ? "主动判断样本有限，不能只看含沿用标签的总样本"
+                    : "不能把历史现场不足直接解读为模型失效"}
+                </div>
                 <p className="mt-0.5 text-xs leading-5 opacity-90">
-                  它表示数据库目前无法严格还原足够多的历史决策现场。继续回填发布时间和历史版本后，统计结论才会逐步开放。
+                  {enoughPhaseSample
+                    ? "含沿用标签的月份虽已足够，但双方当月都能主动判断的月份仍偏少；口径不可比、旧阶段沿用和等待确认都不会冒充主动样本。"
+                    : "它表示数据库目前无法严格还原足够多的历史决策现场。继续回填发布时间和历史版本后，统计结论才会逐步开放。"}
                 </p>
               </div>
             </div>
@@ -295,7 +378,7 @@ export function ChinaCycleBacktestDetail({ data }: { data: BusinessCycleBacktest
           <CardContent>
             <div className="rounded-xl bg-muted/55 p-4">
               <div className="flex items-center justify-between gap-3 text-xs">
-                <span className="font-medium">严格信息集覆盖</span>
+                <span className="font-medium">含沿用标签可比月</span>
                 <span className="tabular-nums text-muted-foreground">{coverage.display_evaluable_months}/{coverage.scheduled_months}</span>
               </div>
               <div className="mt-3 h-2 overflow-hidden rounded-full bg-background ring-1 ring-foreground/10">
@@ -305,18 +388,18 @@ export function ChinaCycleBacktestDetail({ data }: { data: BusinessCycleBacktest
                 />
               </div>
               <div className="mt-2 text-xs text-muted-foreground">
-                其中可形成正式阶段决策 {coverage.decision_evaluable_months} 个月；其余 {coverage.unavailable_months} 个月不可比较。
+                其中两边都能主动判断 {coverage.decision_evaluable_months} 个月；另有 {coverage.unavailable_months} 个月没有可比较的页面标签。
               </div>
             </div>
 
             <div className="mt-3 rounded-lg border border-dashed px-3 py-2 text-xs leading-5 text-muted-foreground">
               <span className="font-medium text-foreground">两层口径：</span>
-              “页面阶段”包含当月沿用的最近确认标签；“正式决策”要求当月两边都满足可决策条件。
+              “含沿用标签”会保留最近一次确认结果；“主动判断”要求当月两边都满足判定条件，且已有确认阶段。
               {stability.decision_comparable_months === 0
-                ? " 当前没有正式决策可比样本，因此正式决策一致性暂不可评估。"
+                ? " 当前没有主动判断可比样本，因此主动判断一致性暂不可评估。"
                 : stability.decision_comparable_months >= stability.minimum_rate_sample && stability.decision_agreement_rate != null
-                  ? ` 当前有 ${stability.decision_comparable_months} 个正式决策可比月，一致率为 ${percent(stability.decision_agreement_rate)}。`
-                  : ` 当前有 ${stability.decision_comparable_months} 个正式决策可比月，样本未达比例展示门槛。`}
+                  ? ` 当前有 ${stability.decision_comparable_months} 个主动判断可比月，一致率为 ${percent(stability.decision_agreement_rate)}。`
+                  : ` 当前有 ${stability.decision_comparable_months} 个主动判断可比月，样本未达比例展示门槛。`}
             </div>
 
             <div className="mt-4 space-y-3">
@@ -386,7 +469,7 @@ export function ChinaCycleBacktestDetail({ data }: { data: BusinessCycleBacktest
             </div>
             <Badge variant="outline">最近 {recentMonths.length} 期</Badge>
           </div>
-          <CardDescription>横向比较同一观察月的“当时判断”和“事后参考”；不可评估月份不会进入一致率分母。</CardDescription>
+          <CardDescription>横向比较同一观察月的“当时判断”和“事后参考”，并明确区分本月主动判断与历史状态沿用。</CardDescription>
         </CardHeader>
         <CardContent>
           {recentMonths.length > 0 ? (
@@ -401,14 +484,14 @@ export function ChinaCycleBacktestDetail({ data }: { data: BusinessCycleBacktest
                       <div className="text-xs font-medium tabular-nums">{month.observation_period}</div>
                       <div className="mt-0.5 text-[10px] text-muted-foreground">决策时点 {decisionTime(month.decision_as_of)}</div>
                     </div>
-                    <div className="flex items-center justify-between gap-2 sm:block">
+                    <div className="grid min-w-0 grid-cols-[3rem_minmax(0,1fr)] items-start gap-2 sm:block">
                       <span className="text-[11px] text-muted-foreground sm:hidden">当时</span>
-                      <PhaseBadge snapshot={month.realtime} />
+                      <SnapshotCell snapshot={month.realtime} />
                     </div>
                     <ArrowRight className="hidden size-3.5 text-muted-foreground sm:block" aria-hidden="true" />
-                    <div className="flex items-center justify-between gap-2 sm:block">
+                    <div className="grid min-w-0 grid-cols-[3rem_minmax(0,1fr)] items-start gap-2 sm:block">
                       <span className="text-[11px] text-muted-foreground sm:hidden">事后</span>
-                      <PhaseBadge snapshot={month.final} />
+                      <SnapshotCell snapshot={month.final} />
                     </div>
                     <div className={`text-xs font-medium ${comparisonClass(month)}`}>{comparisonLabel(month)}</div>
                   </div>
@@ -477,12 +560,12 @@ export function ChinaCycleBacktestDetail({ data }: { data: BusinessCycleBacktest
               <GitCompareArrows className="size-5" aria-hidden="true" />
               <CardTitle>疫情年份敏感性</CardTitle>
             </div>
-            <CardDescription>对比全样本与剔除2020年；样本不足时不输出看似精确的差异。</CardDescription>
+            <CardDescription>对比全样本与剔除2020年；这里沿用原全标签口径，包含历史状态沿用。</CardDescription>
           </CardHeader>
           <CardContent>
             {robustnessReady ? (
               <div className="space-y-3">
-                <div className="grid grid-cols-[1fr_auto_auto] gap-3 rounded-lg bg-muted/55 px-3 py-2 text-xs"><span>样本</span><span>可比月</span><span>阶段一致</span></div>
+                <div className="grid grid-cols-[1fr_auto_auto] gap-3 rounded-lg bg-muted/55 px-3 py-2 text-xs"><span>样本</span><span>可比月</span><span>含沿用标签一致</span></div>
                 <div className="grid grid-cols-[1fr_auto_auto] gap-3 px-3 text-sm"><span>完整样本</span><span className="tabular-nums">{fullRobustness.comparable_months}</span><strong className="tabular-nums">{percent(fullRobustness.agreement_rate)}</strong></div>
                 <div className="grid grid-cols-[1fr_auto_auto] gap-3 border-t px-3 pt-3 text-sm"><span>剔除2020年</span><span className="tabular-nums">{exCovidRobustness.comparable_months}</span><strong className="tabular-nums">{percent(exCovidRobustness.agreement_rate)}</strong></div>
               </div>
@@ -514,10 +597,10 @@ export function ChinaCycleBacktestDetail({ data }: { data: BusinessCycleBacktest
 
       <div className="space-y-3 rounded-xl border border-dashed p-5 text-xs leading-6 text-muted-foreground">
         <div className="flex items-center gap-2 font-medium text-foreground">
-          {data.status === "ok" ? <CheckCircle2 className="size-4" aria-hidden="true" /> : <TriangleAlert className="size-4" aria-hidden="true" />}
+          {activeStatus === "ok" ? <CheckCircle2 className="size-4" aria-hidden="true" /> : <TriangleAlert className="size-4" aria-hidden="true" />}
           必须带走的边界
         </div>
-        <p>阶段一致率是在两边都能判断的月份中，标签相同的比例；阶段翻转率衡量标签对新增与修订数据是否稳定。二者都不是预测准确率。</p>
+        <p>主动判断一致率只统计两边当月都可判且已有确认阶段的月份；含沿用标签一致率还会纳入历史状态沿用。两者都是数据修订稳定性，不是预测准确率。</p>
         <p>事后参考不是GDP真值或官方周期真值；本页也不评估模型预测未来的能力。</p>
         <p>{data.methodology_note}</p>
         <p>回测方法 v{data.backtest_definition.a3_methodology_version} · 最终快照生成于 {decisionTime(data.backtest_definition.final_cutoff_at)}（北京时间）</p>

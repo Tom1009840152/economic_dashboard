@@ -30,6 +30,7 @@ import {
   phaseAxisSummary,
   phasePlainHeadline,
   previousComparableMonth,
+  regimeHeadline,
 } from "@/lib/china-business-cycle-presentation";
 import type {
   BusinessCycleDriver,
@@ -55,12 +56,12 @@ const PHASE_COLORS: Record<BusinessCyclePhase, string> = {
 };
 
 const STATUS_LABELS: Record<BusinessCyclePhaseStatus, string> = {
-  confirmed: "已确认",
+  confirmed: "本月可判 · 已确认",
   candidate: "候选 · 待连续确认",
-  transition: "切换观察",
-  held_uncomparable: "口径变动 · 沿用上期判断",
-  stale: "连续不可比 · 暂不更新",
-  insufficient: "证据不足",
+  transition: "本月可判 · 切换观察",
+  held_uncomparable: "本月不可判 · 沿用历史",
+  stale: "连续不可判 · 沿用历史",
+  insufficient: "本月不可判",
 };
 
 const CONFIDENCE_LABELS = {
@@ -372,6 +373,7 @@ export function ChinaBusinessCycleDetail({ data }: { data: BusinessCycleRegimeDa
     (latest.phase === "recovery" || latest.phase === "expansion") &&
     latest.absolute_anchor.state === "contractionary";
   const previousComparable = previousComparableMonth(data.months, latest);
+  const headline = regimeHeadline(latest, data.last_decision_period);
 
   return (
     <div className="space-y-8">
@@ -384,12 +386,12 @@ export function ChinaBusinessCycleDetail({ data }: { data: BusinessCycleRegimeDa
             </div>
             <div className="flex flex-wrap items-center gap-3">
               <CardTitle className="text-3xl sm:text-4xl">
-                {latest.phase_label || phaseName(latest.phase)}
-                {(latest.phase_status === "held_uncomparable" || latest.phase_status === "stale") && (
-                  <span className="ml-2 text-base font-medium text-muted-foreground sm:text-lg">（沿用）</span>
-                )}
+                {headline.title}
               </CardTitle>
               <Badge variant="outline" className={statusClass(latest.phase_status)}>{STATUS_LABELS[latest.phase_status]}</Badge>
+            </div>
+            <div className="mt-2 text-base font-semibold text-muted-foreground sm:text-lg">
+              {headline.secondary}
             </div>
             <div className="mt-4 max-w-3xl rounded-xl border bg-background/75 px-4 py-3">
               <div className="text-[11px] font-medium tracking-wide text-muted-foreground">一句话解读</div>
@@ -402,8 +404,7 @@ export function ChinaBusinessCycleDetail({ data }: { data: BusinessCycleRegimeDa
           </div>
           <div className="shrink-0 text-left text-xs text-muted-foreground sm:text-right">
             <div>数据截至 {latest.period}</div>
-            <div className="mt-1">最近可判定月 {data.last_decision_period ?? "--"}</div>
-            <div className="mt-1">{latest.duration_months == null ? "持续时间待确认" : `自模型确认起已沿用 ${latest.duration_months} 个月`}</div>
+            {headline.timing.map((item) => <div key={item} className="mt-1">{item}</div>)}
           </div>
         </CardHeader>
         <CardContent>
@@ -472,7 +473,11 @@ export function ChinaBusinessCycleDetail({ data }: { data: BusinessCycleRegimeDa
                     ? "阶段已确认"
                     : latest.phase_status === "transition"
                       ? "原阶段有效，切换观察中"
-                      : "阶段尚未切换"}
+                      : latest.phase_basis === "carried_forward"
+                        ? "本月不形成新判断"
+                        : latest.phase_basis === "pending_confirmation"
+                          ? "候选阶段尚未确认"
+                          : "尚无已确认阶段"}
                 </div>
                 <p className="mt-0.5 text-xs leading-5">{phaseExplanation(latest)}</p>
               </div>
@@ -490,7 +495,8 @@ export function ChinaBusinessCycleDetail({ data }: { data: BusinessCycleRegimeDa
             )}
             {!latest.decision_eligible && latest.decision_reasons.length > 0 && (
               <div className="mt-3 rounded-lg border border-current/15 px-3 py-2 text-xs leading-5">
-                已连续 {latest.undecidable_streak} 个月未更新判断。{latest.decision_reasons[0]}
+                {latest.phase_basis === "carried_forward" && `已连续 ${latest.carry_forward_months} 个月未更新判断。`}
+                {latest.decision_reasons[0]}
               </div>
             )}
           </div>

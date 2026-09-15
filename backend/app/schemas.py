@@ -444,6 +444,12 @@ RegimeStatus = Literal[
     "stale",
     "insufficient",
 ]
+PhaseBasis = Literal[
+    "active_decision",
+    "carried_forward",
+    "pending_confirmation",
+    "unclassified",
+]
 
 
 class RegimeMethodologyOut(BaseModel):
@@ -521,6 +527,7 @@ class RegimeMonthOut(BaseModel):
     phase_label: str
     raw_phase: RelativeCyclePhase | None = None
     phase_status: RegimeStatus
+    phase_basis: PhaseBasis
     confirmed: bool
     confirmed_phase: RelativeCyclePhase | None = None
     candidate_phase: RelativeCyclePhase | None = None
@@ -530,6 +537,8 @@ class RegimeMonthOut(BaseModel):
     required_confirmation_months: int | None = None
     duration_months: int | None = None
     undecidable_streak: int
+    carry_forward_months: int
+    last_decision_period: str | None = None
     decision_eligible: bool
     decision_reasons: list[str]
     coincident_comparable: bool
@@ -654,6 +663,13 @@ class CycleBacktestStabilityOut(BaseModel):
     decision_comparable_months: int
     decision_agreement_count: int | None = None
     decision_agreement_rate: float | None = None
+    carried_forward_comparable_months: int
+    carried_forward_agreement_count: int | None = None
+    carried_forward_agreement_rate: float | None = None
+    carried_forward_flip_count: int | None = None
+    carried_forward_flip_rate: float | None = None
+    mixed_basis_comparable_months: int
+    pending_confirmation_comparable_months: int
     level_axis_comparable_months: int
     level_axis_agreement_rate: float | None = None
     momentum_axis_comparable_months: int
@@ -822,9 +838,11 @@ class CycleBacktestPhaseSnapshotOut(BaseModel):
     phase: RelativeCyclePhase | None = None
     phase_label: str
     phase_status: RegimeStatus
+    phase_basis: PhaseBasis
     confirmed_phase: RelativeCyclePhase | None = None
     confirmed_since: str | None = None
     last_decision_period: str | None = None
+    carry_forward_months: int
     decision_eligible: bool
     level_axis: Literal["above", "below", "neutral", "unavailable"]
     momentum_axis: Literal["rising", "falling", "neutral", "unavailable"]

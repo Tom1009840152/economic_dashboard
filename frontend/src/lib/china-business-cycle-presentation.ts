@@ -35,18 +35,97 @@ export function phasePlainLabel(phase: BusinessCyclePhase | null): string {
   return phase ? PHASE_PLAIN_LABELS[phase] : "强弱和方向暂时无法判断";
 }
 
+export interface BusinessCycleHeadline {
+  title: string;
+  secondary: string;
+  timing: string[];
+}
+
+export function regimeHeadline(
+  point: BusinessCycleRegimePoint,
+  fallbackLastDecisionPeriod: string | null = null,
+): BusinessCycleHeadline {
+  const confirmedPhase = point.confirmed_phase ?? point.phase;
+  const confirmedLabel = confirmedPhase ? PHASE_NAMES[confirmedPhase] : null;
+  const lastDecisionPeriod = point.last_decision_period ?? fallbackLastDecisionPeriod;
+
+  if (point.phase_basis === "carried_forward") {
+    return {
+      title: "本月暂不可判",
+      secondary: confirmedLabel ? `上次确认：${confirmedLabel}` : "尚无已确认阶段",
+      timing: [
+        point.confirmed_since ? `确认于 ${point.confirmed_since}` : null,
+        lastDecisionPeriod ? `最近可判 ${lastDecisionPeriod}` : "暂无可判定月",
+        `已连续 ${point.carry_forward_months} 个月未更新`,
+      ].filter((item): item is string => item !== null),
+    };
+  }
+
+  if (point.phase_basis === "active_decision") {
+    return {
+      title: point.phase_status === "transition"
+        ? `当前有效阶段：${confirmedLabel ?? "待确认"}`
+        : `当前判断：${confirmedLabel ?? "待确认"}`,
+      secondary: point.phase_status === "transition"
+        ? "本月可判，阶段切换仍在观察"
+        : "本月满足判定条件",
+      timing: [
+        point.confirmed_since ? `确认于 ${point.confirmed_since}` : null,
+        lastDecisionPeriod ? `最近可判 ${lastDecisionPeriod}` : null,
+      ].filter((item): item is string => item !== null),
+    };
+  }
+
+  if (point.phase_basis === "pending_confirmation") {
+    const candidateLabel = point.candidate_phase
+      ? PHASE_NAMES[point.candidate_phase]
+      : point.phase
+        ? PHASE_NAMES[point.phase]
+        : null;
+    const progress = point.required_confirmation_months == null
+      ? `${point.candidate_streak} 个月`
+      : `${point.candidate_streak}/${point.required_confirmation_months} 个月`;
+    return {
+      title: "本月暂不可判",
+      secondary: candidateLabel
+        ? `候选方向：${candidateLabel}（尚待连续确认）`
+        : "尚无已确认阶段",
+      timing: [
+        "尚无已确认阶段",
+        candidateLabel ? `候选已连续 ${progress}` : null,
+        lastDecisionPeriod ? `最近形成判断条件 ${lastDecisionPeriod}` : null,
+      ].filter((item): item is string => item !== null),
+    };
+  }
+
+  return {
+    title: "本月暂不可判",
+    secondary: point.confirmed_phase
+      ? `上次确认：${PHASE_NAMES[point.confirmed_phase]}`
+      : "尚无已确认阶段",
+    timing: [
+      point.confirmed_since ? `确认于 ${point.confirmed_since}` : null,
+      lastDecisionPeriod ? `最近可判 ${lastDecisionPeriod}` : "暂无可判定月",
+    ].filter((item): item is string => item !== null),
+  };
+}
+
 export function phasePlainHeadline(point: BusinessCycleRegimePoint): string {
-  const prefix = point.phase_status === "held_uncomparable" || point.phase_status === "stale"
-    ? "上次有效判断："
-    : point.phase_status === "candidate" || point.phase_status === "transition"
-      ? "当前沿用判断："
-      : "";
+  const prefix = point.phase_basis === "carried_forward"
+    ? "上次确认阶段的含义："
+    : point.phase_basis === "pending_confirmation"
+      ? "当前候选方向："
+      : point.phase_status === "transition"
+        ? "当前有效阶段："
+        : "";
   return `${prefix}${phasePlainLabel(point.phase)}`;
 }
 
 export function phaseAxisSummary(point: BusinessCycleRegimePoint): string {
   if (!point.decision_eligible) {
-    return "本月未满足口径可比条件，以上是最近一次有效阶段；当前坐标只作诊断，不用于阶段切换。";
+    return point.confirmed_phase
+      ? "本月未满足口径可比条件，以上是最近一次确认阶段；当前坐标只作诊断，不用于阶段切换。"
+      : "本月未满足口径可比条件，模型尚无已确认阶段；当前坐标只作诊断，不用于阶段切换。";
   }
   const axes = `${LEVEL_AXIS_LABELS[point.level_axis]}，${MOMENTUM_AXIS_LABELS[point.momentum_axis]}`;
   if (point.candidate_phase) {
