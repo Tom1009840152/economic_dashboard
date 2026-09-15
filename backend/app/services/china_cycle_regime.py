@@ -36,6 +36,15 @@ BALANCED_PANEL_MONTHS = 6
 MIN_SIGNALS_PER_BLOCK = 2
 ROLE_REQUIRED_BLOCKS = {"coincident": 2, "leading": 2}
 BLOCK_SPECS = {block.key: block for block in CHINA_CYCLE_BLOCKS}
+FIXED_SURVEY_CORE_CODES = (
+    "CN_PMI_PRODUCTION",
+    "CN_NMI",
+    "CN_PMI_EMPLOYMENT",
+    "CN_NMI_EMPLOYMENT",
+)
+FIXED_SURVEY_CORE_SIGNATURE = "fixed_survey_core_v1[" + ",".join(
+    f"{code}@0.25" for code in FIXED_SURVEY_CORE_CODES
+) + "]"
 
 Phase = Literal["recovery", "expansion", "slowdown", "contraction"]
 PHASES: tuple[Phase, ...] = ("contraction", "recovery", "expansion", "slowdown")
@@ -278,6 +287,74 @@ def _balanced_role_panels(months: list[dict], role: str) -> list[dict]:
             seen_valid = True
         panels.append(panel)
     return panels
+
+
+def _fixed_survey_core_panel(months: list[dict], index: int) -> dict:
+    """Build one strict six-month panel from four equally weighted surveys.
+
+    This is a sensitivity diagnostic, not an alternative way to satisfy A1's
+    production 65% coincident-role coverage gate.  Every one of the four
+    configured survey signals must have a standardised score in every month of
+    the six-month comparison window; no missing signal is reweighted.
+    """
+
+    empty = {
+        "codes": [],
+        "signature": None,
+        "coverage": 0.0,
+        "valid": False,
+        "level": None,
+        "momentum": None,
+        "changed": False,
+    }
+    if index < BALANCED_PANEL_MONTHS - 1:
+        return empty
+
+    window = months[index - (BALANCED_PANEL_MONTHS - 1) : index + 1]
+    signal_maps = [_signal_map(month) for month in window]
+    common_codes = [
+        code
+        for code in FIXED_SURVEY_CORE_CODES
+        if all(
+            signal_maps[offset].get(code, {}).get("standardized_score") is not None
+            for offset in range(BALANCED_PANEL_MONTHS)
+        )
+    ]
+    coverage = len(common_codes) / len(FIXED_SURVEY_CORE_CODES)
+    if len(common_codes) != len(FIXED_SURVEY_CORE_CODES):
+        return {
+            **empty,
+            "codes": common_codes,
+            "coverage": round(coverage, 4),
+        }
+
+    panel_values = [
+        LEVEL_NEUTRAL
+        + INDEX_SCALE
+        * sum(
+            float(signal_maps[offset][code]["standardized_score"])
+            for code in FIXED_SURVEY_CORE_CODES
+        )
+        / len(FIXED_SURVEY_CORE_CODES)
+        for offset in range(BALANCED_PANEL_MONTHS)
+    ]
+    recent = sum(panel_values[3:]) / 3
+    previous = sum(panel_values[:3]) / 3
+    return {
+        "codes": list(FIXED_SURVEY_CORE_CODES),
+        "signature": FIXED_SURVEY_CORE_SIGNATURE,
+        "coverage": 1.0,
+        "valid": True,
+        "level": recent,
+        "momentum": recent - previous,
+        "changed": False,
+    }
+
+
+def _fixed_survey_core_panels(months: list[dict]) -> list[dict]:
+    """Return the fixed-survey diagnostic panel for every matrix month."""
+
+    return [_fixed_survey_core_panel(months, index) for index in range(len(months))]
 
 
 def _axis(value: float | None, *, kind: str, fallback_phase: Phase | None) -> str:
@@ -802,6 +879,7 @@ def _build_regime_from_matrix(
     *,
     output_start: pd.Period | None = None,
     output_months: int = DEFAULT_OUTPUT_MONTHS,
+    coincident_panel_mode: Literal["production", "fixed_survey_core_v1"] = "production",
 ) -> dict:
     source_months = matrix.get("months", [])
     if not source_months:
@@ -825,7 +903,11 @@ def _build_regime_from_matrix(
     leading_diagnostic = leading_diagnostic_level - leading_diagnostic_level.shift(
         MOMENTUM_COMPARISON_MONTHS
     )
-    coincident_panels = _balanced_role_panels(source_months, "coincident")
+    coincident_panels = (
+        _fixed_survey_core_panels(source_months)
+        if coincident_panel_mode == "fixed_survey_core_v1"
+        else _balanced_role_panels(source_months, "coincident")
+    )
     leading_panels = _balanced_role_panels(source_months, "leading")
     inflation = _inflation_by_month(inflation_rows, calendar)
     tracker = RegimeTracker()

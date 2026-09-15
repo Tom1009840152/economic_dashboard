@@ -57,6 +57,100 @@ class D9ArchiveSafetyTests(unittest.TestCase):
         self.assertTrue(session.closed)
         self.assertIn("skipped; no official archive evidence", output.getvalue())
 
+    def test_trade_archive_check_uses_gacc_evidence_not_regular_fetcher(self) -> None:
+        observed = dt.date(2024, 11, 1)
+        fallback = Mock()
+        archive_loader = Mock(
+            return_value={
+                "CN_EXPORTS": pd.DataFrame(
+                    [
+                        self._row(
+                            observed,
+                            6.7,
+                            "https://english.customs.gov.cn/Statics/release.html",
+                        )
+                    ]
+                )
+            }
+        )
+        session = _FakeSession(
+            [SimpleNamespace(date=observed, value=6.7)]
+        )
+        output = io.StringIO()
+
+        with (
+            patch.dict(
+                backfill.BACKFILL_FETCHERS,
+                {"CN_EXPORTS": fallback},
+                clear=True,
+            ),
+            patch.dict(backfill.GROUPS, {"trade": {"CN_EXPORTS"}}, clear=True),
+            patch.object(backfill, "_load_gacc_exports", archive_loader),
+            patch.object(backfill, "SessionLocal", return_value=session),
+            patch.object(
+                sys,
+                "argv",
+                [
+                    "backfill_china_cycle.py",
+                    "--group",
+                    "trade",
+                    "--archive",
+                    "--gacc-archive-start-page",
+                    "3",
+                    "--gacc-archive-pages",
+                    "2",
+                    "--check-only",
+                ],
+            ),
+            redirect_stdout(output),
+        ):
+            backfill.main()
+
+        archive_loader.assert_called_once_with(page_count=2, start_page=3)
+        fallback.assert_not_called()
+        self.assertTrue(session.closed)
+        self.assertIn("CN_EXPORTS: 1 verified releases", output.getvalue())
+
+    def test_trade_archive_reports_catalog_failure_instead_of_zero_success(self) -> None:
+        fallback = Mock()
+        session = _FakeSession()
+        output = io.StringIO()
+
+        with (
+            patch.dict(
+                backfill.BACKFILL_FETCHERS,
+                {"CN_EXPORTS": fallback},
+                clear=True,
+            ),
+            patch.dict(backfill.GROUPS, {"trade": {"CN_EXPORTS"}}, clear=True),
+            patch.object(
+                backfill,
+                "_load_gacc_exports",
+                side_effect=RuntimeError("all requested pages failed"),
+            ),
+            patch.object(backfill, "SessionLocal", return_value=session),
+            patch.object(
+                sys,
+                "argv",
+                [
+                    "backfill_china_cycle.py",
+                    "--group",
+                    "trade",
+                    "--archive",
+                    "--check-only",
+                ],
+            ),
+            redirect_stdout(output),
+        ):
+            backfill.main()
+
+        fallback.assert_not_called()
+        self.assertTrue(session.closed)
+        self.assertIn(
+            "CN_EXPORTS: FAILED: all requested pages failed",
+            output.getvalue(),
+        )
+
     def test_all_approved_official_domains_are_accepted(self) -> None:
         urls = (
             "https://www.stats.gov.cn/sj/zxfb/release.html",
@@ -64,6 +158,7 @@ class D9ArchiveSafetyTests(unittest.TestCase):
             "https://www.pbc.gov.cn/goutongjiaoliu/release.html",
             "https://xining.pbc.gov.cn/release.html",
             "https://gks.mof.gov.cn/tongjishuju/release.html",
+            "https://english.customs.gov.cn/Statics/release.html",
         )
         observed = dt.date(2024, 1, 1)
         for source_url in urls:
@@ -140,7 +235,9 @@ class D9ArchiveSafetyTests(unittest.TestCase):
             "https://www.stats.gov.cn.evil.example/release.html",
             "https://pbc.gov.cn@example.test/release.html",
             "https://mof.gov.cn.example.test/release.html",
+            "https://customs.gov.cn.example.test/release.html",
             "http://www.stats.gov.cn/release.html",
+            "http://english.customs.gov.cn/Statics/release.html",
         )
         observed = dt.date(2024, 1, 1)
         for source_url in urls:

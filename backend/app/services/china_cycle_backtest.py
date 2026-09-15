@@ -9,14 +9,19 @@ and the same A1/A2 code, changing only the data vintage.
 
 from __future__ import annotations
 
-from collections import Counter, defaultdict
+from collections import Counter, OrderedDict, defaultdict
+from concurrent.futures import Future
+from copy import deepcopy
+from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from statistics import median
+from threading import RLock
+from time import monotonic
 from typing import Iterable
 from zoneinfo import ZoneInfo
 
 import pandas as pd
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.indicator_defs import INDICATOR_DEFS
@@ -32,12 +37,14 @@ from app.services.china_business_cycle import (
     cycle_indicator_codes,
 )
 from app.services.china_cycle_regime import (
+    FIXED_SURVEY_CORE_CODES,
     METHODOLOGY_VERSION as A2_METHODOLOGY_VERSION,
+    PHASES,
     _build_regime_from_matrix,
 )
 
 
-METHODOLOGY_VERSION = "1.0.0"
+METHODOLOGY_VERSION = "1.1.0"
 DEFAULT_BACKTEST_MONTHS = 120
 MAX_BACKTEST_MONTHS = 120
 MIN_RATE_SAMPLE = 24
@@ -50,6 +57,136 @@ CYCLE_CODES = cycle_indicator_codes()
 MODEL_CODES = tuple(dict.fromkeys((*CYCLE_CODES, *VALIDATION_CODES, *INFLATION_CODES)))
 REQUIRED_CODES = tuple(dict.fromkeys((*CYCLE_CODES, *INFLATION_CODES)))
 _DEFINITIONS = {row["code"]: row for row in INDICATOR_DEFS}
+_BACKTEST_CACHE_MAX_SIZE = 8
+_BACKTEST_CACHE_TTL_SECONDS = 15 * 60
+
+
+@dataclass(frozen=True)
+class _InputWatermark:
+    """Cheap, content-version watermark for one backtest input table.
+
+    The supported ingestion path increments ``DataPoint.version`` and appends a
+    new ``DataPointVintage`` row for every meaningful change.  Count/max-id
+    catch vintage appends and deletes, while the version sum and retrieval
+    timestamp catch current-value updates that do not change the row count.
+    """
+
+    row_count: int
+    max_id: int
+    version_sum: int
+    max_retrieved_at: datetime | None
+
+
+@dataclass(frozen=True)
+class _BacktestCacheKey:
+    start_period: str
+    end_period: str
+    a1_methodology_version: str
+    a2_methodology_version: str
+    a3_methodology_version: str
+    model_codes: tuple[str, ...]
+    current_values: _InputWatermark
+    vintages: _InputWatermark
+
+
+@dataclass(frozen=True)
+class _BacktestCacheEntry:
+    result: dict
+    expires_at: float
+
+
+# This LRU is intentionally process-local.  Normal versioned writes change the
+# watermark key immediately; the finite TTL also bounds staleness when an
+# exceptional maintenance operation edits rows in place without bumping their
+# version/retrieval metadata.
+_backtest_cache: OrderedDict[_BacktestCacheKey, _BacktestCacheEntry] = OrderedDict()
+_backtest_inflight: dict[_BacktestCacheKey, Future[dict]] = {}
+_backtest_cache_lock = RLock()
+
+
+def _clear_backtest_cache() -> None:
+    """Clear process-local cached results (primarily for tests and operations)."""
+
+    with _backtest_cache_lock:
+        _backtest_cache.clear()
+
+
+def _table_watermark(db: Session, model, *, observation_end: date) -> _InputWatermark:
+    row = db.execute(
+        select(
+            func.count(model.id),
+            func.max(model.id),
+            func.coalesce(func.sum(model.version), 0),
+            func.max(model.retrieved_at),
+        )
+        .where(model.indicator_code.in_(MODEL_CODES))
+        .where(model.date <= observation_end)
+    ).one()
+    return _InputWatermark(
+        row_count=int(row[0] or 0),
+        max_id=int(row[1] or 0),
+        version_sum=int(row[2] or 0),
+        max_retrieved_at=row[3],
+    )
+
+
+def _backtest_data_watermark(
+    db: Session,
+    *,
+    observation_end: date,
+) -> tuple[_InputWatermark, _InputWatermark]:
+    """Return watermarks in a short session that cannot be held by a waiter."""
+
+    with Session(bind=db.get_bind()) as watermark_db:
+        return (
+            _table_watermark(watermark_db, DataPoint, observation_end=observation_end),
+            _table_watermark(
+                watermark_db,
+                DataPointVintage,
+                observation_end=observation_end,
+            ),
+        )
+
+
+def _cached_backtest_result(key: _BacktestCacheKey, builder) -> dict:
+    """Return one immutable-by-copy result with per-key single-flight locking."""
+
+    with _backtest_cache_lock:
+        cached = _backtest_cache.get(key)
+        if cached is not None and cached.expires_at > monotonic():
+            _backtest_cache.move_to_end(key)
+            return deepcopy(cached.result)
+        if cached is not None:
+            _backtest_cache.pop(key, None)
+        future = _backtest_inflight.get(key)
+        owns_build = future is None
+        if owns_build:
+            future = Future()
+            _backtest_inflight[key] = future
+
+    if not owns_build:
+        return deepcopy(future.result())
+
+    assert future is not None
+    try:
+        result = builder()
+    except BaseException as exc:
+        with _backtest_cache_lock:
+            _backtest_inflight.pop(key, None)
+        future.set_exception(exc)
+        raise
+
+    with _backtest_cache_lock:
+        _backtest_cache[key] = _BacktestCacheEntry(
+            result=result,
+            expires_at=monotonic() + _BACKTEST_CACHE_TTL_SECONDS,
+        )
+        _backtest_cache.move_to_end(key)
+        while len(_backtest_cache) > _BACKTEST_CACHE_MAX_SIZE:
+            _backtest_cache.popitem(last=False)
+        _backtest_inflight.pop(key, None)
+    future.set_result(result)
+    return deepcopy(result)
 
 
 def _period_distance(left: str | pd.Period, right: str | pd.Period) -> int:
@@ -344,7 +481,12 @@ def _input_readiness(vintage_rows: list[dict], final_rows: list[dict]) -> list[d
     return result
 
 
-def _regime_for_rows(rows: list[dict], period: pd.Period) -> tuple[dict, dict | None]:
+def _regime_for_rows(
+    rows: list[dict],
+    period: pd.Period,
+    *,
+    matrix_out: dict | None = None,
+) -> tuple[dict, dict | None]:
     """Run the production A1 core and production A2 state machine unchanged."""
 
     matrix = _matrix_from_rows(
@@ -352,11 +494,78 @@ def _regime_for_rows(rows: list[dict], period: pd.Period) -> tuple[dict, dict | 
         end=period.end_time.date(),
         months=MAX_OUTPUT_MONTHS,
     )
+    if matrix_out is not None:
+        matrix_out["matrix"] = matrix
     inflation_rows = [row for row in rows if row["indicator_code"] in INFLATION_CODES]
     regime = _build_regime_from_matrix(
         matrix,
         inflation_rows,
         output_months=MAX_OUTPUT_MONTHS,
+    )
+    month = next(
+        (item for item in reversed(regime.get("months", [])) if item["period"] == str(period)),
+        None,
+    )
+    return regime, month
+
+
+def _fixed_survey_matrix(matrix: dict) -> dict:
+    """Replace only the displayed coincident index with the strict survey core.
+
+    The nested A1 signal rows are reused without mutation.  A month gets a
+    diagnostic index only when all four standardised survey scores exist; the
+    four fixed 25% weights are never renormalised around a missing signal.
+    """
+
+    fixed_months = []
+    for month in matrix.get("months", []):
+        signal_map = {
+            signal["code"]: signal
+            for block in month.get("blocks", [])
+            for signal in block.get("signals", [])
+        }
+        scores = [
+            signal_map.get(code, {}).get("standardized_score")
+            for code in FIXED_SURVEY_CORE_CODES
+        ]
+        complete = all(score is not None for score in scores)
+        coincident_index = (
+            100.0 + 10.0 * sum(float(score) for score in scores) / len(scores)
+            if complete
+            else None
+        )
+        fixed_months.append(
+            {
+                **month,
+                "coincident_index": (
+                    round(coincident_index, 2) if coincident_index is not None else None
+                ),
+                "coincident_coverage": round(
+                    sum(score is not None for score in scores) / len(scores), 4
+                ),
+            }
+        )
+    return {
+        **matrix,
+        "months": fixed_months,
+        "method": "diagnostic_fixed_survey_core_v1",
+    }
+
+
+def _fixed_survey_regime_from_matrix(
+    matrix: dict,
+    rows: list[dict],
+    period: pd.Period,
+) -> tuple[dict, dict | None]:
+    """Run A2 on the diagnostic core while preserving leading/confirmation rules."""
+
+    fixed_matrix = _fixed_survey_matrix(matrix)
+    inflation_rows = [row for row in rows if row["indicator_code"] in INFLATION_CODES]
+    regime = _build_regime_from_matrix(
+        fixed_matrix,
+        inflation_rows,
+        output_months=MAX_OUTPUT_MONTHS,
+        coincident_panel_mode="fixed_survey_core_v1",
     )
     month = next(
         (item for item in reversed(regime.get("months", [])) if item["period"] == str(period)),
@@ -594,6 +803,321 @@ def _transition_summary(rows: list[dict]) -> dict:
     }
 
 
+def _phase_distribution(rows: list[dict]) -> dict:
+    """Describe phase coverage on exactly the months used by each comparison."""
+
+    display_rows = [row for row in rows if row["comparable"]]
+    decision_rows = [row for row in rows if row["decision_comparable"]]
+
+    def distribution(sample: list[dict], field: str) -> dict:
+        realtime = Counter(row["realtime"].get(field) for row in sample)
+        final = Counter(row["final"].get(field) for row in sample)
+        realtime.pop(None, None)
+        final.pop(None, None)
+        return {
+            "sample_months": len(sample),
+            "realtime": {phase: int(realtime.get(phase, 0)) for phase in PHASES},
+            "final": {phase: int(final.get(phase, 0)) for phase in PHASES},
+        }
+
+    return {
+        "display": distribution(display_rows, "phase"),
+        "decision": distribution(decision_rows, "confirmed_phase"),
+    }
+
+
+def _sensitivity_gates(
+    stability: dict,
+    transitions: dict,
+    distribution: dict,
+) -> dict:
+    """Apply the pre-declared sample gates without turning them into a score."""
+
+    decision_count = int(stability["decision_comparable_months"])
+    decision_distribution = distribution["decision"]
+    realtime_phases = [
+        phase for phase in PHASES if decision_distribution["realtime"].get(phase, 0)
+    ]
+    final_phases = [
+        phase for phase in PHASES if decision_distribution["final"].get(phase, 0)
+    ]
+    decision_gate = decision_count >= MIN_RATE_SAMPLE
+    phase_gate = set(realtime_phases) == set(PHASES) and set(final_phases) == set(PHASES)
+    transition_gate = transitions["matched_count"] >= MIN_TRANSITION_SAMPLE
+    all_passed = decision_gate and phase_gate and transition_gate
+    failed = []
+    if not decision_gate:
+        failed.append("formal_decision_sample")
+    if not phase_gate:
+        failed.append("four_phase_coverage")
+    if not transition_gate:
+        failed.append("matched_transitions")
+    return {
+        "formal_decision_sample": {
+            "observed": decision_count,
+            "minimum": MIN_RATE_SAMPLE,
+            "passed": decision_gate,
+        },
+        "four_phase_coverage": {
+            "required": list(PHASES),
+            "realtime_observed": realtime_phases,
+            "final_observed": final_phases,
+            "passed": phase_gate,
+        },
+        "matched_transitions": {
+            "observed": int(transitions["matched_count"]),
+            "minimum": MIN_TRANSITION_SAMPLE,
+            "passed": transition_gate,
+        },
+        "all_passed": all_passed,
+        "failed_gates": failed,
+        "conclusion": (
+            "三个预设门槛均通过；这只说明该切片具备进一步评估条件，不等同于可预测。"
+            if all_passed
+            else "至少一个预设门槛未通过；不得把该敏感性结果用于转换概率训练。"
+        ),
+    }
+
+
+def _paired_slice(
+    baseline_rows: list[dict],
+    diagnostic_rows: list[dict],
+    *,
+    decision: bool,
+) -> dict:
+    """Compare baseline and diagnostic accuracy on their shared calendar only."""
+
+    diagnostic_by_period = {
+        row["observation_period"]: row for row in diagnostic_rows
+    }
+    eligibility_key = "decision_comparable" if decision else "comparable"
+    phase_key = "confirmed_phase" if decision else "phase"
+    common: list[tuple[dict, dict]] = []
+    for baseline in baseline_rows:
+        diagnostic = diagnostic_by_period.get(baseline["observation_period"])
+        if (
+            diagnostic is not None
+            and baseline[eligibility_key]
+            and diagnostic[eligibility_key]
+        ):
+            common.append((baseline, diagnostic))
+
+    baseline_agreement = sum(
+        baseline["realtime"][phase_key] == baseline["final"][phase_key]
+        for baseline, _ in common
+    )
+    diagnostic_agreement = sum(
+        diagnostic["realtime"][phase_key] == diagnostic["final"][phase_key]
+        for _, diagnostic in common
+    )
+    enough = len(common) >= MIN_RATE_SAMPLE
+    baseline_rate = baseline_agreement / len(common) if enough else None
+    diagnostic_rate = diagnostic_agreement / len(common) if enough else None
+    changed = []
+    agreement_outcome_changed = []
+    for baseline, diagnostic in common:
+        baseline_realtime = baseline["realtime"][phase_key]
+        baseline_final = baseline["final"][phase_key]
+        diagnostic_realtime = diagnostic["realtime"][phase_key]
+        diagnostic_final = diagnostic["final"][phase_key]
+        baseline_matches = baseline_realtime == baseline_final
+        diagnostic_matches = diagnostic_realtime == diagnostic_final
+        if (
+            baseline_realtime != diagnostic_realtime
+            or baseline_final != diagnostic_final
+        ):
+            changed.append(
+                {
+                    "observation_period": baseline["observation_period"],
+                    "baseline_realtime_phase": baseline_realtime,
+                    "diagnostic_realtime_phase": diagnostic_realtime,
+                    "baseline_final_phase": baseline_final,
+                    "diagnostic_final_phase": diagnostic_final,
+                    "baseline_agreement": baseline_matches,
+                    "diagnostic_agreement": diagnostic_matches,
+                }
+            )
+        if baseline_matches != diagnostic_matches:
+            agreement_outcome_changed.append(baseline["observation_period"])
+    return {
+        "label_basis": "confirmed_phase" if decision else "display_phase",
+        "common_months": len(common),
+        "minimum_rate_sample": MIN_RATE_SAMPLE,
+        "baseline_agreement_count": baseline_agreement if common else None,
+        "baseline_agreement_rate": (
+            round(baseline_rate, 4) if baseline_rate is not None else None
+        ),
+        "diagnostic_agreement_count": diagnostic_agreement if common else None,
+        "diagnostic_agreement_rate": (
+            round(diagnostic_rate, 4) if diagnostic_rate is not None else None
+        ),
+        "agreement_rate_delta_percentage_points": (
+            round((diagnostic_rate - baseline_rate) * 100, 2)
+            if diagnostic_rate is not None and baseline_rate is not None
+            else None
+        ),
+        "changed_judgement_months": changed,
+        "agreement_outcome_changed_months": agreement_outcome_changed,
+        "sample_note": (
+            None
+            if enough
+            else f"共同可比月份少于{MIN_RATE_SAMPLE}，只报告计数，不报告率差。"
+        ),
+    }
+
+
+def _percentage_point_delta(left: float | None, right: float | None) -> float | None:
+    if left is None or right is None:
+        return None
+    return round((left - right) * 100, 2)
+
+
+def _comparison_row(
+    period: pd.Period,
+    realtime: dict | None,
+    final: dict | None,
+) -> dict:
+    """Return the common comparison fields consumed by stability summaries."""
+
+    comparable = bool(realtime and final and realtime["phase"] and final["phase"])
+    decision_comparable = bool(
+        realtime
+        and final
+        and realtime["decision_eligible"]
+        and final["decision_eligible"]
+        and realtime["confirmed_phase"]
+        and final["confirmed_phase"]
+    )
+    phase_agreement = (
+        realtime["phase"] == final["phase"] if comparable else None
+    )
+    decision_phase_agreement = (
+        realtime["confirmed_phase"] == final["confirmed_phase"]
+        if decision_comparable
+        else None
+    )
+    return {
+        "observation_period": str(period),
+        "realtime": realtime,
+        "final": final,
+        "comparable": comparable,
+        "phase_agreement": phase_agreement,
+        "decision_comparable": decision_comparable,
+        "decision_phase_agreement": decision_phase_agreement,
+    }
+
+
+def _regime_view_at_period(regime: dict, period: pd.Period) -> dict:
+    """Keep a full one-sided path while making last-decision metadata point-in-time."""
+
+    return {
+        **regime,
+        "last_decision_period": next(
+            (
+                row["period"]
+                for row in reversed(regime.get("months", []))
+                if row["period"] <= str(period) and row.get("decision_eligible")
+            ),
+            None,
+        ),
+    }
+
+
+def _build_robustness(
+    baseline_rows: list[dict],
+    fixed_survey_rows: list[dict],
+) -> dict:
+    """Build the fixed-basket and evaluation-window sensitivity diagnostics."""
+
+    full_stability = _stability(baseline_rows)
+    non_covid_rows = [
+        row
+        for row in baseline_rows
+        if not row["observation_period"].startswith("2020-")
+    ]
+
+    fixed_stability = _stability(fixed_survey_rows)
+    fixed_transitions = _transition_summary(fixed_survey_rows)
+    fixed_distribution = _phase_distribution(fixed_survey_rows)
+
+    non_january_rows = [
+        row for row in baseline_rows if not row["observation_period"].endswith("-01")
+    ]
+    january_stability = _stability(non_january_rows)
+    january_transitions = _transition_summary(non_january_rows)
+    january_distribution = _phase_distribution(non_january_rows)
+    excluded_january = [
+        row["observation_period"]
+        for row in baseline_rows
+        if row["observation_period"].endswith("-01")
+    ]
+
+    return {
+        "full_sample": full_stability,
+        "exclude_covid_2020": _stability(non_covid_rows),
+        "fixed_survey_core": {
+            "name": "fixed_survey_core_v1",
+            "diagnostic_only": True,
+            "signal_weights": {
+                code: round(1 / len(FIXED_SURVEY_CORE_CODES), 4)
+                for code in FIXED_SURVEY_CORE_CODES
+            },
+            "missing_policy": (
+                "all_four_required_in_each_six_month_panel; no_dynamic_renormalization"
+            ),
+            "production_gate_policy": (
+                "does_not_satisfy_or_replace_the_production_A1_65pct_role_gate"
+            ),
+            "leading_and_confirmation_policy": "unchanged_from_production_A2",
+            "stability": fixed_stability,
+            "phase_distribution": fixed_distribution,
+            "transitions": fixed_transitions,
+            "gates": _sensitivity_gates(
+                fixed_stability,
+                fixed_transitions,
+                fixed_distribution,
+            ),
+            "paired_comparison": {
+                "display": _paired_slice(
+                    baseline_rows,
+                    fixed_survey_rows,
+                    decision=False,
+                ),
+                "decision": _paired_slice(
+                    baseline_rows,
+                    fixed_survey_rows,
+                    decision=True,
+                ),
+            },
+        },
+        "exclude_january_observation": {
+            "evaluation_window_only": True,
+            "filter": "observation_period_month_is_not_january",
+            "note": (
+                "只从评价分母移除观察月为1月的结果；不补造1月数据、不重算路径，"
+                "也不宣称消除了1月缺口对随后六个月共同篮子的结构影响。"
+            ),
+            "excluded_months": excluded_january,
+            "stability": january_stability,
+            "phase_distribution": january_distribution,
+            "transitions": january_transitions,
+            "gates": _sensitivity_gates(
+                january_stability,
+                january_transitions,
+                january_distribution,
+            ),
+            "agreement_rate_delta_percentage_points": _percentage_point_delta(
+                january_stability["agreement_rate"],
+                full_stability["agreement_rate"],
+            ),
+            "decision_agreement_rate_delta_percentage_points": _percentage_point_delta(
+                january_stability["decision_agreement_rate"],
+                full_stability["decision_agreement_rate"],
+            ),
+        },
+    }
+
+
 def _build_backtest_from_rows(
     vintage_rows: list[dict],
     final_rows: list[dict],
@@ -606,6 +1130,7 @@ def _build_backtest_from_rows(
     plain_vintages = [_plain_row(row) for row in vintage_rows]
     plain_finals = [_plain_row(row) for row in final_rows]
     months = []
+    fixed_survey_months = []
     reason_counts: Counter[str] = Counter()
 
     # A1 scores and A2 panels are one-sided, so future observation months do
@@ -615,6 +1140,8 @@ def _build_backtest_from_rows(
     # production 240-month warm-start semantics for reported accuracy.
     full_final_regime: dict = {}
     final_months_by_period: dict[str, dict] = {}
+    full_fixed_final_regime: dict = {}
+    fixed_final_months_by_period: dict[str, dict] = {}
     if plain_finals and len(periods):
         final_model_rows = [
             row
@@ -622,10 +1149,25 @@ def _build_backtest_from_rows(
             if row["indicator_code"] in MODEL_CODES
             and row["date"] <= periods[-1].end_time.date()
         ]
-        full_final_regime, _ = _regime_for_rows(final_model_rows, periods[-1])
+        final_matrix_capture: dict = {}
+        full_final_regime, _ = _regime_for_rows(
+            final_model_rows,
+            periods[-1],
+            matrix_out=final_matrix_capture,
+        )
         final_months_by_period = {
             row["period"]: row for row in full_final_regime.get("months", [])
         }
+        if final_matrix_capture.get("matrix"):
+            full_fixed_final_regime, _ = _fixed_survey_regime_from_matrix(
+                final_matrix_capture["matrix"],
+                final_model_rows,
+                periods[-1],
+            )
+            fixed_final_months_by_period = {
+                row["period"]: row
+                for row in full_fixed_final_regime.get("months", [])
+            }
 
     for period in periods:
         cutoff_utc, cutoff_display = _decision_as_of(period)
@@ -643,31 +1185,84 @@ def _build_backtest_from_rows(
             if row["indicator_code"] in MODEL_CODES and row["date"] <= observation_end
         ]
 
+        realtime_matrix_capture: dict = {}
         if strict_rows and _has_minimum_coincident_inputs(strict_rows):
-            realtime_regime, realtime_month = _regime_for_rows(strict_rows, period)
+            realtime_regime, realtime_month = _regime_for_rows(
+                strict_rows,
+                period,
+                matrix_out=realtime_matrix_capture,
+            )
         else:
             realtime_regime, realtime_month = {}, None
         realtime = _phase_snapshot(realtime_month, realtime_regime)
 
+        fixed_realtime_regime: dict = {}
+        fixed_realtime_month: dict | None = None
+        if realtime_matrix_capture.get("matrix"):
+            fixed_realtime_regime, fixed_realtime_month = (
+                _fixed_survey_regime_from_matrix(
+                    realtime_matrix_capture["matrix"],
+                    strict_rows,
+                    period,
+                )
+            )
+        fixed_realtime = _phase_snapshot(
+            fixed_realtime_month,
+            fixed_realtime_regime,
+        )
+
         final_regime = full_final_regime
         final_month = final_months_by_period.get(str(period))
-        if realtime and realtime["phase"] and target_final_rows:
+        fixed_final_regime = full_fixed_final_regime
+        fixed_final_month = fixed_final_months_by_period.get(str(period))
+        baseline_needs_exact_peer = bool(realtime and realtime["phase"])
+        fixed_needs_exact_peer = bool(fixed_realtime and fixed_realtime["phase"])
+        if (
+            (baseline_needs_exact_peer or fixed_needs_exact_peer)
+            and target_final_rows
+        ):
             # Exact peer evaluation: same observation endpoint, model window,
             # and state-machine warmup; only the vintage basis differs.
-            final_regime, final_month = _regime_for_rows(target_final_rows, period)
+            target_final_matrix_capture: dict = {}
+            exact_final_regime, exact_final_month = _regime_for_rows(
+                target_final_rows,
+                period,
+                matrix_out=target_final_matrix_capture,
+            )
+            if baseline_needs_exact_peer:
+                final_regime, final_month = exact_final_regime, exact_final_month
+            elif final_month is not None:
+                final_regime = _regime_view_at_period(full_final_regime, period)
+            if target_final_matrix_capture.get("matrix"):
+                exact_fixed_regime, exact_fixed_month = (
+                    _fixed_survey_regime_from_matrix(
+                        target_final_matrix_capture["matrix"],
+                        target_final_rows,
+                        period,
+                    )
+                )
+                if fixed_needs_exact_peer:
+                    fixed_final_regime, fixed_final_month = (
+                        exact_fixed_regime,
+                        exact_fixed_month,
+                    )
+                elif fixed_final_month is not None:
+                    fixed_final_regime = _regime_view_at_period(
+                        full_fixed_final_regime,
+                        period,
+                    )
         elif final_month is not None:
-            final_regime = {
-                **full_final_regime,
-                "last_decision_period": next(
-                    (
-                        row["period"]
-                        for row in reversed(full_final_regime.get("months", []))
-                        if row["period"] <= str(period) and row.get("decision_eligible")
-                    ),
-                    None,
-                ),
-            }
+            final_regime = _regime_view_at_period(full_final_regime, period)
+            if fixed_final_month is not None:
+                fixed_final_regime = _regime_view_at_period(
+                    full_fixed_final_regime,
+                    period,
+                )
         final = _phase_snapshot(final_month, final_regime)
+        fixed_final = _phase_snapshot(fixed_final_month, fixed_final_regime)
+        fixed_survey_months.append(
+            _comparison_row(period, fixed_realtime, fixed_final)
+        )
         comparable = bool(realtime and final and realtime["phase"] and final["phase"])
         decision_comparable = bool(
             realtime
@@ -778,9 +1373,6 @@ def _build_backtest_from_rows(
     display_evaluable = sum(row["comparable"] for row in months)
     decision_evaluable = sum(row["decision_comparable"] for row in months)
     stability = _stability(months)
-    non_covid_rows = [
-        row for row in months if not row["observation_period"].startswith("2020-")
-    ]
     status = (
         "ok"
         if display_evaluable >= MIN_RATE_SAMPLE
@@ -839,10 +1431,7 @@ def _build_backtest_from_rows(
         },
         "stability": stability,
         "transitions": _transition_summary(months),
-        "robustness": {
-            "full_sample": stability,
-            "exclude_covid_2020": _stability(non_covid_rows),
-        },
+        "robustness": _build_robustness(months, fixed_survey_months),
         "input_readiness": _input_readiness(plain_vintages, plain_finals),
         "latest": months[-1] if months else None,
         "months": months,
@@ -853,6 +1442,8 @@ def _build_backtest_from_rows(
             "中国来源的存量发布时间是无时区的本地钟面时间，本页按北京时间解释；跨来源的小时级时区尚未完成独立认证。",
             f"可比月份少于{MIN_RATE_SAMPLE}时不展示一致率和翻转率；匹配转换少于{MIN_TRANSITION_SAMPLE}次时不展示确认滞后统计。",
             "当前固定使用现行A1/A2方法版本回放数据vintage，不模拟历史模型参数或旧公式。",
+            "固定同步调查篮子只用于稳健性诊断，不替代A1生产篮子，也不绕过65%同步角色覆盖门槛。",
+            "排除1月只改变评价窗口，不补造1月数据，也不消除缺口对随后共同篮子的影响。",
         ],
     }
 
@@ -894,28 +1485,50 @@ def build_china_cycle_backtest(
     if span > MAX_BACKTEST_MONTHS:
         raise ValueError(f"requested range must not exceed {MAX_BACKTEST_MONTHS} months")
     periods = pd.period_range(requested_start, requested_end, freq="M")
+    observation_end = requested_end.end_time.date()
+    current_watermark, vintage_watermark = _backtest_data_watermark(
+        db,
+        observation_end=observation_end,
+    )
+    cache_key = _BacktestCacheKey(
+        start_period=str(requested_start),
+        end_period=str(requested_end),
+        a1_methodology_version=A1_METHODOLOGY_VERSION,
+        a2_methodology_version=A2_METHODOLOGY_VERSION,
+        a3_methodology_version=METHODOLOGY_VERSION,
+        model_codes=MODEL_CODES,
+        current_values=current_watermark,
+        vintages=vintage_watermark,
+    )
 
-    vintage_query = (
-        select(DataPointVintage)
-        .where(DataPointVintage.indicator_code.in_(MODEL_CODES))
-        .where(DataPointVintage.date <= requested_end.end_time.date())
-        .order_by(
-            DataPointVintage.indicator_code,
-            DataPointVintage.date,
-            DataPointVintage.version,
+    def build() -> dict:
+        vintage_query = (
+            select(DataPointVintage)
+            .where(DataPointVintage.indicator_code.in_(MODEL_CODES))
+            .where(DataPointVintage.date <= observation_end)
+            .order_by(
+                DataPointVintage.indicator_code,
+                DataPointVintage.date,
+                DataPointVintage.version,
+            )
         )
-    )
-    final_query = (
-        select(DataPoint)
-        .where(DataPoint.indicator_code.in_(MODEL_CODES))
-        .where(DataPoint.date <= requested_end.end_time.date())
-        .order_by(DataPoint.indicator_code, DataPoint.date)
-    )
-    vintage_rows = list(db.scalars(vintage_query))
-    final_rows = list(db.scalars(final_query))
-    return _build_backtest_from_rows(
-        vintage_rows,
-        final_rows,
-        periods=periods,
-        final_cutoff_at=now,
-    )
+        final_query = (
+            select(DataPoint)
+            .where(DataPoint.indicator_code.in_(MODEL_CODES))
+            .where(DataPoint.date <= observation_end)
+            .order_by(DataPoint.indicator_code, DataPoint.date)
+        )
+        vintage_rows = list(db.scalars(vintage_query))
+        final_rows = list(db.scalars(final_query))
+        return _build_backtest_from_rows(
+            vintage_rows,
+            final_rows,
+            periods=periods,
+            final_cutoff_at=now,
+        )
+
+    result = _cached_backtest_result(cache_key, build)
+    # ``final_cutoff_at`` describes this response's request time, not the cache
+    # generation time.  The copied result can be safely refreshed on every hit.
+    result["backtest_definition"]["final_cutoff_at"] = now.astimezone(UTC).isoformat()
+    return result

@@ -14,6 +14,7 @@ from app.fetchers.china_cycle_data import (
     CHINA_CYCLE_FETCHERS,
     PBOC_YTD_DIFF_FORMULA_VERSION,
     _load_fiscal,
+    _load_gacc_exports,
     _load_industrial_enterprises,
     _load_nbs_industry_history,
     _load_nbs_hard_activity_evidence,
@@ -32,6 +33,7 @@ from app.services.indicator_service import ensure_indicators_seeded, upsert_poin
 BACKFILL_FETCHERS = {
     **CHINA_CYCLE_FETCHERS,
     "CN_RETAIL": ALL_FETCHERS["CN_RETAIL"],
+    "CN_EXPORTS": ALL_FETCHERS["CN_EXPORTS"],
 }
 
 
@@ -64,6 +66,7 @@ GROUPS = {
         for code in CHINA_CYCLE_FETCHERS
         if code.startswith(("CN_CONSUMER_", "CN_ENTERPRISE_"))
     },
+    "trade": {"CN_EXPORTS"},
 }
 GROUPS["activity"] = {
     *GROUPS["pmi"],
@@ -72,7 +75,12 @@ GROUPS["activity"] = {
 }
 
 
-_OFFICIAL_RELEASE_DOMAINS = ("stats.gov.cn", "pbc.gov.cn", "mof.gov.cn")
+_OFFICIAL_RELEASE_DOMAINS = (
+    "stats.gov.cn",
+    "pbc.gov.cn",
+    "mof.gov.cn",
+    "customs.gov.cn",
+)
 _STORED_VALUE_QUANTUM = Decimal("0.000001")
 
 
@@ -226,6 +234,18 @@ def main() -> None:
         help="number of PBOC news archive pages to inspect",
     )
     parser.add_argument(
+        "--gacc-archive-pages",
+        type=int,
+        default=2,
+        help="number of one-based China Customs preliminary-release pages to inspect",
+    )
+    parser.add_argument(
+        "--gacc-archive-start-page",
+        type=int,
+        default=1,
+        help="first one-based China Customs preliminary-release page to inspect",
+    )
+    parser.add_argument(
         "--pboc-archive-start-page",
         type=int,
         default=1,
@@ -240,6 +260,7 @@ def main() -> None:
     selected = set(BACKFILL_FETCHERS) if args.group == "all" else GROUPS[args.group]
 
     archive_frames = {}
+    archive_failures: dict[str, Exception] = {}
     if args.archive:
         if args.group in {"all", "pmi", "activity"}:
             archive_frames.update(
@@ -292,6 +313,16 @@ def main() -> None:
                     start_page=args.pboc_archive_start_page,
                 )
             )
+        if args.group in {"all", "trade"}:
+            try:
+                archive_frames.update(
+                    _load_gacc_exports(
+                        page_count=args.gacc_archive_pages,
+                        start_page=args.gacc_archive_start_page,
+                    )
+                )
+            except Exception as exc:
+                archive_failures["CN_EXPORTS"] = exc
         if args.group in {"all", "fiscal"}:
             fiscal = _load_fiscal(page_count=10)
             archive_frames.update(fiscal)
@@ -306,6 +337,9 @@ def main() -> None:
             if code not in selected:
                 continue
             try:
+                if code in archive_failures:
+                    print(f"{code}: FAILED: {archive_failures[code]}")
+                    continue
                 if args.archive:
                     frame = archive_frames.get(code)
                     if frame is None:

@@ -1,7 +1,7 @@
 """China cycle-model inputs with source and release metadata.
 
 The collectors intentionally keep raw series separate from derived dashboard
-signals. Official NBS/PBOC/MOF release pages are preferred. Eastmoney is used
+signals. Official NBS/PBOC/MOF/GACC release pages are preferred. Eastmoney is used
 only as a historical transport mirror where the official archive is not
 machine-readable; those observations are explicitly marked ``mirror_backfill``.
 """
@@ -44,6 +44,7 @@ _EASTMONEY_HOUSE_URL = "https://data.eastmoney.com/cjsj/newhouse.html"
 _EASTMONEY_INDUSTRIAL_URL = "https://data.eastmoney.com/cjsj/gyzjz.html"
 _MOFCOM_TSF_URL = "https://data.mofcom.gov.cn/gnmy/shrzgm.shtml"
 _NBS_RELEASE_BASE = "https://www.stats.gov.cn/sj/zxfb/"
+_GACC_RELEASE_BASE = "https://english.customs.gov.cn/Statistics/Statistics"
 _PBOC_RELEASE_BASE = "https://www.pbc.gov.cn/diaochatongjisi/116219/116225/"
 _PBOC_NEWS_BASE = "https://www.pbc.gov.cn/goutongjiaoliu/113456/113469/"
 PBOC_YTD_DIFF_FORMULA_VERSION = "pboc_ytd_diff_v1"
@@ -82,10 +83,13 @@ _cache: dict[str, tuple[float, object]] = {}
 logger = logging.getLogger(__name__)
 _nbs_session = curl_requests.Session(impersonate="chrome")
 _NBS_ARCHIVE_CACHE = Path(__file__).resolve().parents[2] / ".cache" / "nbs-release"
+_GACC_ARCHIVE_CACHE = Path(__file__).resolve().parents[2] / ".cache" / "gacc-release"
 _PBOC_ARCHIVE_CACHE = Path(__file__).resolve().parents[2] / ".cache" / "pboc-release"
 _NBS_ARCHIVE_REQUEST_INTERVAL = 0.45
+_GACC_ARCHIVE_REQUEST_INTERVAL = 0.75
 _PBOC_BOUNDARY_SCAN_PAGES = 12
 _last_nbs_archive_request = 0.0
+_last_gacc_archive_request = 0.0
 
 
 def _cached(key: str, loader):
@@ -125,6 +129,71 @@ def _is_pboc_https_url(value: object) -> bool:
     return parsed.scheme.lower() == "https" and (
         hostname == "pbc.gov.cn" or hostname.endswith(".pbc.gov.cn")
     )
+
+
+def _is_gacc_https_url(value: object) -> bool:
+    """Accept only HTTPS resources hosted by China Customs."""
+
+    try:
+        parsed = urlparse(str(value))
+    except (TypeError, ValueError):
+        return False
+    hostname = (parsed.hostname or "").lower().rstrip(".")
+    return parsed.scheme.lower() == "https" and (
+        hostname == "customs.gov.cn" or hostname.endswith(".customs.gov.cn")
+    )
+
+
+def _valid_gacc_release_source(source: str) -> bool:
+    """Reject gateways, challenges, and unrelated pages before caching them."""
+
+    lowered = source.lower()
+    if len(source) < 300 or any(
+        marker in lowered
+        for marker in (
+            "please enable javascript",
+            "err_cert_authority_invalid",
+            "gateway time-out",
+            "bad gateway",
+            "access denied",
+            "captcha",
+        )
+    ):
+        return False
+    try:
+        text = _text_from_html(source).lower()
+    except (TypeError, ValueError):
+        return False
+    return (
+        "total export" in text
+        and "import values" in text
+        and ("usd" in text or "us$" in text)
+    )
+
+
+def _valid_gacc_index_source(source: str) -> bool:
+    """Recognize a real Customs index without treating a soft error as success."""
+
+    if len(source) < 300:
+        return False
+    lowered = source.lower()
+    if any(
+        marker in lowered
+        for marker in (
+            "please enable javascript",
+            "err_cert_authority_invalid",
+            "gateway time-out",
+            "bad gateway",
+            "access denied",
+            "captcha",
+        )
+    ):
+        return False
+    try:
+        text = _text_from_html(source).lower()
+    except (TypeError, ValueError):
+        return False
+    return "china customs statistics" in text and "preliminary release" in text
 
 
 def _valid_pboc_release_source(source: str) -> bool:
@@ -199,6 +268,44 @@ def _get_nbs_archive_text(url: str, *, cache: bool = True) -> str:
                 time.sleep(2 ** attempt)
     assert last_error is not None
     raise last_error
+
+
+def _get_gacc_archive_text(url: str, *, cache: bool = True) -> str:
+    """Read one official Customs page slowly and cache only valid details.
+
+    The Customs site intermittently returns a gateway or browser-verification
+    document with a successful transport.  Those responses must never become
+    release evidence.  Index pages are mutable and callers therefore disable
+    the persistent cache for them.
+    """
+
+    if not _is_gacc_https_url(url):
+        raise ValueError(f"refusing non-official Customs archive URL: {url}")
+    digest = hashlib.sha256(url.encode("utf-8")).hexdigest()
+    cache_path = _GACC_ARCHIVE_CACHE / f"{digest}.html"
+    if cache and cache_path.exists():
+        cached = cache_path.read_text(encoding="utf-8")
+        if _valid_gacc_release_source(cached):
+            return cached
+
+    global _last_gacc_archive_request
+    wait_for = _GACC_ARCHIVE_REQUEST_INTERVAL - (
+        time.monotonic() - _last_gacc_archive_request
+    )
+    if wait_for > 0:
+        time.sleep(wait_for)
+    try:
+        source = _request_text(url)
+    finally:
+        _last_gacc_archive_request = time.monotonic()
+    if cache:
+        if not _valid_gacc_release_source(source):
+            raise RuntimeError("Customs website returned an invalid archive detail page")
+        _GACC_ARCHIVE_CACHE.mkdir(parents=True, exist_ok=True)
+        temporary = cache_path.with_suffix(".tmp")
+        temporary.write_text(source, encoding="utf-8")
+        temporary.replace(cache_path)
+    return source
 
 
 def _get_pboc_archive_text(url: str) -> str:
@@ -693,6 +800,459 @@ def _load_nbs_property_history() -> dict[str, pd.DataFrame]:
     return _series_frames(
         {code: _nbs_history_rows(table, name) for code, (table, name) in sources.items()}
     )
+
+
+_GACC_MONTHS = {
+    "jan": 1,
+    "january": 1,
+    "feb": 2,
+    "february": 2,
+    "mar": 3,
+    "march": 3,
+    "apr": 4,
+    "april": 4,
+    "may": 5,
+    "jun": 6,
+    "june": 6,
+    "jul": 7,
+    "july": 7,
+    "aug": 8,
+    "august": 8,
+    "sep": 9,
+    "sept": 9,
+    "september": 9,
+    "oct": 10,
+    "october": 10,
+    "nov": 11,
+    "november": 11,
+    "dec": 12,
+    "december": 12,
+}
+
+
+def _is_gacc_total_usd_title(title: str) -> bool:
+    """Identify the nationwide USD total table, excluding similarly named tables."""
+
+    compact = " ".join(str(title).replace("’", "'").split()).lower()
+    if "全国进出口总值表" in compact:
+        return "美元" in compact
+    return (
+        "total export" in compact
+        and "import values" in compact
+        and ("in usd" in compact or "in us$" in compact)
+        and " by " not in compact
+    )
+
+
+def _gacc_catalog_entries(
+    source: str, index_url: str
+) -> tuple[tuple[str, str], ...]:
+    """Extract only official HTTPS nationwide-USD detail links from one index."""
+
+    try:
+        document = lxml_html.fromstring(source)
+    except (TypeError, ValueError):
+        return ()
+    found: dict[str, str] = {}
+    for anchor in document.xpath("//a[@href]"):
+        title = (anchor.get("title") or " ".join(anchor.text_content().split())).strip()
+        href = anchor.get("href")
+        if not title or not href or not _is_gacc_total_usd_title(title):
+            continue
+        detail_url = urljoin(index_url, href)
+        if _is_gacc_https_url(detail_url):
+            found[detail_url] = title
+    return tuple(found.items())
+
+
+def _gacc_release_catalog(
+    page_count: int = 2,
+    *,
+    start_page: int = 1,
+) -> tuple[tuple[str, str], ...]:
+    """List GACC preliminary USD releases from the official paginated archive."""
+
+    if page_count < 1:
+        raise ValueError("page_count must be at least 1")
+    if start_page < 1:
+        raise ValueError("start_page must be at least 1")
+    found: dict[str, str] = {}
+    successful_pages = 0
+    for page in range(start_page, start_page + page_count):
+        url = f"{_GACC_RELEASE_BASE}?ColumnId=1&page={page}"
+        try:
+            source = _get_gacc_archive_text(url, cache=False)
+        except Exception:
+            logger.warning("Customs archive index failed: %s", url, exc_info=True)
+            continue
+        if not _valid_gacc_index_source(source):
+            logger.warning("Customs archive index returned an invalid page: %s", url)
+            continue
+        successful_pages += 1
+        found.update(_gacc_catalog_entries(source, url))
+    if successful_pages == 0:
+        raise RuntimeError("all requested Customs archive index pages failed")
+    return tuple(found.items())
+
+
+def _gacc_combined_period(value: str) -> bool:
+    """Return whether text identifies a January-February aggregate."""
+
+    normalized = (
+        " ".join(str(value).split())
+        .lower()
+        .replace("—", "-")
+        .replace("–", "-")
+        .replace("−", "-")
+    )
+    return bool(
+        re.search(
+            r"\bjan(?:uary)?\.?\s*(?:-|to|through)\s*"
+            r"feb(?:ruary)?\.?\b",
+            normalized,
+        )
+        or re.search(r"1\s*(?:-|\u81f3|\u5230)\s*2\s*\u6708", normalized)
+    )
+
+
+def _gacc_period_date(title: str, source: str = "") -> dt.date | None:
+    """Map one official release to its observation month.
+
+    ``CN_EXPORTS`` is a single-month YoY series. A January-February aggregate
+    is therefore not a February observation and must not be assigned to either
+    month.
+    """
+
+    heading = " ".join(str(title).replace("—", "-").replace("–", "-").split())
+    document_title = ""
+    if str(source).strip():
+        try:
+            document_title = " ".join(
+                lxml_html.fromstring(source).xpath("string(//title)").split()
+            )
+        except (TypeError, ValueError):
+            document_title = ""
+    if _gacc_combined_period(f"{heading} {document_title}"):
+        return None
+    year_match = re.search(r"(20\d{2})", heading)
+    if year_match is None:
+        heading = f"{heading} {document_title}".strip()
+        year_match = re.search(r"(20\d{2})", heading)
+    if year_match is None:
+        return None
+    year = int(year_match.group(1))
+
+    chinese_month = re.search(r"(?:20\d{2})\s*年\s*(\d{1,2})\s*月", heading)
+    if chinese_month:
+        return dt.date(year, int(chinese_month.group(1)), 1)
+
+    tokens = re.findall(
+        r"(?<![a-z])(?:january|february|september|november|december|"
+        r"october|august|march|april|june|july|sept|jan|feb|mar|apr|may|"
+        r"jun|jul|aug|sep|oct|nov|dec)(?![a-z])",
+        heading.lower(),
+    )
+    if not tokens:
+        return None
+    return dt.date(year, _GACC_MONTHS[tokens[-1]], 1)
+
+
+def _gacc_publication_metadata(source: str, source_url: str) -> dict:
+    """Read an exact publication minute without inventing an end-of-day time."""
+
+    # Preserve the visibly published calendar date as an independent guard.
+    # A CMS ``createDate`` may describe a draft or migration rather than the
+    # public release, so an exact clock value is trusted only when its date
+    # agrees with the page's PubDate/byline date.
+    visible_date_match = re.search(
+        r"PubDate[^>]*content=[\"']"
+        r"(20\d{2})[/-](\d{1,2})[/-](\d{1,2})",
+        source,
+        re.I,
+    )
+    try:
+        document = lxml_html.fromstring(source)
+        header_dates = " ".join(
+            " ".join(node.text_content().split())
+            for node in document.xpath(
+                "//*[contains(translate(@class, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', "
+                "'abcdefghijklmnopqrstuvwxyz'), 'date') or "
+                "contains(translate(@class, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', "
+                "'abcdefghijklmnopqrstuvwxyz'), 'time')]"
+            )[:8]
+        )
+    except (TypeError, ValueError):
+        header_dates = ""
+    if visible_date_match is None:
+        visible_date_match = re.search(
+            r"(20\d{2})[/-](\d{1,2})[/-](\d{1,2})",
+            header_dates,
+        )
+    visible_date = (
+        dt.date(
+            *(int(visible_date_match.group(index)) for index in range(1, 4))
+        )
+        if visible_date_match is not None
+        else None
+    )
+
+    metadata = _publication_metadata(source, source_url)
+    if metadata["available_at"] is not None:
+        if (
+            visible_date is not None
+            and metadata["available_at"].date() != visible_date
+        ):
+            return {
+                "release_date": visible_date,
+                "available_at": None,
+                "source_url": source_url,
+            }
+        return metadata
+
+    exact = re.search(
+        r"(?:publish(?:ed)?(?:date|time)|article(?:date|time)|pubdate|createdate)"
+        r"[\"']?\s*[:=]\s*[\"']"
+        r"(20\d{2})[/-](\d{1,2})[/-](\d{1,2})[ T]"
+        r"(\d{1,2}):(\d{2})(?::\d{2})?",
+        source,
+        re.I,
+    )
+    if exact is not None:
+        year, month, day, hour, minute = (
+            int(exact.group(index)) for index in range(1, 6)
+        )
+        published = dt.datetime(year, month, day, hour, minute)
+        if visible_date is not None and published.date() != visible_date:
+            return {
+                "release_date": visible_date,
+                "available_at": None,
+                "source_url": source_url,
+            }
+        return {
+            "release_date": published.date(),
+            "available_at": published,
+            "source_url": source_url,
+        }
+
+    # English detail pages visibly render a bare YYYY/MM/DD date.  Retain it
+    # for provenance, but never turn it into a strict as-of timestamp.
+    if visible_date is None:
+        return metadata
+    return {
+        "release_date": visible_date,
+        "available_at": None,
+        "source_url": source_url,
+    }
+
+
+def _gacc_number(value: str) -> float | None:
+    cleaned = (
+        str(value)
+        .replace(",", "")
+        .replace("\xa0", "")
+        .replace("−", "-")
+        .replace("％", "%")
+        .strip()
+        .rstrip("%")
+    )
+    if not re.fullmatch(r"[+-]?\d+(?:\.\d+)?", cleaned):
+        return None
+    return float(cleaned)
+
+
+def _gacc_header_text(column: object) -> str:
+    """Flatten a pandas HTML-table header without losing period semantics."""
+
+    parts = column if isinstance(column, tuple) else (column,)
+    cleaned: list[str] = []
+    for part in parts:
+        text = str(part).strip()
+        if not text or text.lower().startswith("unnamed:"):
+            continue
+        if not cleaned or cleaned[-1] != text:
+            cleaned.append(text)
+    return " ".join(cleaned)
+
+
+def _gacc_normalized_header(column: object) -> str:
+    return (
+        " ".join(_gacc_header_text(column).split())
+        .lower()
+        .replace("—", "-")
+        .replace("–", "-")
+        .replace("−", "-")
+    )
+
+
+def _gacc_is_yoy_header(header: str) -> bool:
+    return (
+        "year-on-year" in header
+        or "year on year" in header
+        or "year-over-year" in header
+        or "同比" in header
+    ) and "month-on-month" not in header
+
+
+def _gacc_is_mom_header(header: str) -> bool:
+    return (
+        "month-on-month" in header
+        or "month on month" in header
+        or "环比" in header
+    )
+
+
+def _gacc_header_is_ytd(header: str, month: int) -> bool:
+    """Identify a January-to-current-month/cumulative header."""
+
+    if "累计" in header:
+        return True
+    range_separator = r"(?:(?:-\s*)?(?:to|through)\s*(?:-\s*)?|[-至到])"
+    if re.search(
+        rf"(?<!\d)1\s*{range_separator}\s*0?{month}(?!\d)",
+        header,
+    ):
+        return True
+    month_names = tuple(
+        name for name, number in _GACC_MONTHS.items() if number == month
+    )
+    return any(
+        re.search(
+            rf"\bjan(?:uary)?\.?\s*{range_separator}\s*"
+            rf"{re.escape(name)}\.?\b",
+            header,
+        )
+        for name in month_names
+    )
+
+
+def _gacc_header_is_current_month(header: str, month: int) -> bool:
+    """Identify a single-month header, excluding a cumulative range."""
+
+    if _gacc_header_is_ytd(header, month):
+        return False
+    if re.search(rf"(?<![\d-])0?{month}(?!\d)", header):
+        return True
+    return any(
+        re.search(rf"\b{re.escape(name)}\.?\b", header)
+        for name, number in _GACC_MONTHS.items()
+        if number == month
+    )
+
+
+def _gacc_monthly_yoy_column(columns: list[object], month: int) -> int | None:
+    """Resolve one unique monthly-YoY column from semantic table headers."""
+
+    headers = [_gacc_normalized_header(column) for column in columns]
+    yoy_columns = [
+        index for index, header in enumerate(headers) if _gacc_is_yoy_header(header)
+    ]
+    if not yoy_columns:
+        return None
+
+    explicit_monthly = [
+        index
+        for index in yoy_columns
+        if _gacc_header_is_current_month(headers[index], month)
+    ]
+    if len(explicit_monthly) == 1:
+        return explicit_monthly[0]
+    if explicit_monthly:
+        return None
+
+    has_month = any(_gacc_header_is_current_month(header, month) for header in headers)
+    has_ytd = any(_gacc_header_is_ytd(header, month) for header in headers)
+
+    # Some official pages flatten the two-tier header into separate period and
+    # metric columns. In that documented layout the first of two identical YoY
+    # headers follows MoM and is the monthly rate; the second is YTD.
+    mom_columns = [
+        index for index, header in enumerate(headers) if _gacc_is_mom_header(header)
+    ]
+    if (
+        len(yoy_columns) == 2
+        and len(mom_columns) == 1
+        and has_month
+        and has_ytd
+        and mom_columns[0] < yoy_columns[0] < yoy_columns[1]
+    ):
+        return yoy_columns[0]
+
+    # A one-rate table is safe only when it is not cumulative-only.
+    if len(yoy_columns) == 1 and (not has_ytd or month == 1):
+        return yoy_columns[0]
+    return None
+
+
+def _gacc_export_yoy(source: str, title: str) -> float | None:
+    """Extract the monthly export YoY rate from the nationwide USD table."""
+
+    observed = _gacc_period_date(title, source)
+    if observed is None:
+        return None
+    try:
+        tables = pd.read_html(StringIO(source))
+    except (TypeError, ValueError, ImportError):
+        return None
+    for table in tables:
+        columns = list(table.columns)
+        yoy_column = _gacc_monthly_yoy_column(columns, observed.month)
+        if yoy_column is None:
+            continue
+        for _, table_row in table.iterrows():
+            labels = [
+                re.sub(r"[^a-z\u4e00-\u9fff]", "", str(value).lower())
+                for value in table_row.tolist()
+            ]
+            if not any(
+                label in {"totalexport", "totalexports", "出口"}
+                for label in labels
+            ):
+                continue
+            return _gacc_number(table_row.iloc[yoy_column])
+    return None
+
+
+def _load_gacc_exports(
+    page_count: int = 2,
+    *,
+    start_page: int = 1,
+) -> dict[str, pd.DataFrame]:
+    """Load first-release export YoY evidence from China Customs.
+
+    Absolute export values are deliberately not emitted: the preliminary page
+    rounds them to USD 100 million while ``CN_EXPORTS_ABS`` stores the later
+    thousand-dollar table.  The YoY rate has matching one-decimal precision and
+    is still subject to the archive command's exact-current-value safety gate.
+    """
+
+    rows: list[dict] = []
+    catalog = _gacc_release_catalog(
+        page_count=page_count,
+        start_page=start_page,
+    )
+    successful_details = 0
+    for url, title in catalog:
+        try:
+            source = _get_gacc_archive_text(url)
+        except Exception:
+            logger.warning("Customs archive detail failed: %s", url, exc_info=True)
+            continue
+        successful_details += 1
+        observed = _gacc_period_date(title, source)
+        value = _gacc_export_yoy(source, title)
+        if observed is None or value is None:
+            continue
+        rows.append(
+            {
+                "date": observed,
+                "value": value,
+                **_gacc_publication_metadata(source, url),
+                "status": "published",
+            }
+        )
+    if catalog and successful_details == 0:
+        raise RuntimeError("all Customs archive detail pages failed")
+    return {"CN_EXPORTS": _frame(rows)}
 
 
 def _nbs_release_catalog(

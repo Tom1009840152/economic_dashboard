@@ -680,9 +680,106 @@ class CycleBacktestTransitionsOut(BaseModel):
     events: list[CycleBacktestTransitionEventOut]
 
 
+class CycleBacktestPhaseDistributionSampleOut(BaseModel):
+    sample_months: int
+    realtime: dict[RelativeCyclePhase, int]
+    final: dict[RelativeCyclePhase, int]
+
+
+class CycleBacktestPhaseDistributionOut(BaseModel):
+    display: CycleBacktestPhaseDistributionSampleOut
+    decision: CycleBacktestPhaseDistributionSampleOut
+
+
+class CycleBacktestCountGateOut(BaseModel):
+    observed: int
+    minimum: int
+    passed: bool
+
+
+class CycleBacktestPhaseGateOut(BaseModel):
+    required: list[RelativeCyclePhase]
+    realtime_observed: list[RelativeCyclePhase]
+    final_observed: list[RelativeCyclePhase]
+    passed: bool
+
+
+class CycleBacktestSensitivityGatesOut(BaseModel):
+    formal_decision_sample: CycleBacktestCountGateOut
+    four_phase_coverage: CycleBacktestPhaseGateOut
+    matched_transitions: CycleBacktestCountGateOut
+    all_passed: bool
+    failed_gates: list[
+        Literal[
+            "formal_decision_sample",
+            "four_phase_coverage",
+            "matched_transitions",
+        ]
+    ]
+    conclusion: str
+
+
+class CycleBacktestChangedJudgementOut(BaseModel):
+    observation_period: str
+    baseline_realtime_phase: RelativeCyclePhase
+    diagnostic_realtime_phase: RelativeCyclePhase
+    baseline_final_phase: RelativeCyclePhase
+    diagnostic_final_phase: RelativeCyclePhase
+    baseline_agreement: bool
+    diagnostic_agreement: bool
+
+
+class CycleBacktestPairedSliceOut(BaseModel):
+    label_basis: Literal["display_phase", "confirmed_phase"]
+    common_months: int
+    minimum_rate_sample: int
+    baseline_agreement_count: int | None = None
+    baseline_agreement_rate: float | None = None
+    diagnostic_agreement_count: int | None = None
+    diagnostic_agreement_rate: float | None = None
+    agreement_rate_delta_percentage_points: float | None = None
+    changed_judgement_months: list[CycleBacktestChangedJudgementOut]
+    agreement_outcome_changed_months: list[str]
+    sample_note: str | None = None
+
+
+class CycleBacktestPairedComparisonOut(BaseModel):
+    display: CycleBacktestPairedSliceOut
+    decision: CycleBacktestPairedSliceOut
+
+
+class CycleBacktestFixedSurveyCoreOut(BaseModel):
+    name: Literal["fixed_survey_core_v1"]
+    diagnostic_only: Literal[True]
+    signal_weights: dict[str, float]
+    missing_policy: str
+    production_gate_policy: str
+    leading_and_confirmation_policy: str
+    stability: CycleBacktestStabilityOut
+    phase_distribution: CycleBacktestPhaseDistributionOut
+    transitions: CycleBacktestTransitionsOut
+    gates: CycleBacktestSensitivityGatesOut
+    paired_comparison: CycleBacktestPairedComparisonOut
+
+
+class CycleBacktestExcludeJanuaryOut(BaseModel):
+    evaluation_window_only: Literal[True]
+    filter: Literal["observation_period_month_is_not_january"]
+    note: str
+    excluded_months: list[str]
+    stability: CycleBacktestStabilityOut
+    phase_distribution: CycleBacktestPhaseDistributionOut
+    transitions: CycleBacktestTransitionsOut
+    gates: CycleBacktestSensitivityGatesOut
+    agreement_rate_delta_percentage_points: float | None = None
+    decision_agreement_rate_delta_percentage_points: float | None = None
+
+
 class CycleBacktestRobustnessOut(BaseModel):
     full_sample: CycleBacktestStabilityOut
     exclude_covid_2020: CycleBacktestStabilityOut
+    fixed_survey_core: CycleBacktestFixedSurveyCoreOut
+    exclude_january_observation: CycleBacktestExcludeJanuaryOut
 
 
 class CycleBacktestInputReadinessOut(BaseModel):

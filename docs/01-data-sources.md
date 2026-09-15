@@ -125,7 +125,7 @@ Statistics 的月度季调序列，并统一为15—64岁口径。除总体和�
 | CN_GDP | GDP累计同比 | `ak.macro_china_gdp` | 季度末定位的年内累计实际GDP同比，不是单季同比；A3主验证需另构造单季同比或季调环比 |
 | CN_RETAIL | 社会消费品零售总额同比 | `ak.macro_china_consumer_goods_retail` | 月度 |
 | CN_FAI | 固定资产投资同比 | `ak.macro_china_gdzctz` | 月度 |
-| CN_EXPORTS | 出口同比 | `ak.macro_china_exports_yoy`；海关总署“全国进出口总值表（美元值）”归档待接入 | 月度美元口径；2020年起1—2月合并，不拆分；中文快讯保留分钟级首次发布时间，但站点 WAF/HTTPS 稳定性尚需浏览器采集方案 |
+| CN_EXPORTS | 出口同比 | `ak.macro_china_hgjck` 的“当月出口额-同比增长”；[海关总署英文初值目录](https://english.customs.gov.cn/Statistics/Statistics?ColumnId=1)与“China's Total Export & Import Values (in USD)”详情页用于历史发布证据 | 月度美元口径。归档解析只接受能唯一定位的“当月同比”列；1—2月合并初值不是2月单月值，整条跳过且不造1月。官方页只有日期而没有时分时保留 `release_date`、不生成 `available_at`；当前主机还受官方站证书链/网关异常影响，因此严格发布时间覆盖仍为0 |
 | CN_EXPORTS_ABS | 出口额（伴生指标，不单独出卡片） | `ak.macro_china_hgjck` | 原始单位"千美元"，除以 1e5 换算成"亿美元" |
 | CN_HOG | 生猪现货价格指数 | `ak.index_hog_spot_price` | 周频，判断"猪周期"最常用的原始价格序列 |
 | CN_REALESTATE | 国房景气指数 | `ak.macro_china_real_estate` | 全国综合房地产市场冷热度 |
