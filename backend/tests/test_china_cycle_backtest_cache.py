@@ -8,7 +8,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from app.db import Base
-from app.models import DataPoint, DataPointVintage, Indicator
+from app.models import DataPoint, DataPointVintage, Indicator, ReleaseEvidence
 from app.services.china_cycle_backtest import (
     _BACKTEST_CACHE_TTL_SECONDS,
     _BacktestCacheKey,
@@ -143,6 +143,55 @@ class ChinaCycleBacktestCacheTests(unittest.TestCase):
         self.assertEqual(first["title"], "build-with-1-vintages")
         self.assertEqual(second["title"], "build-with-2-vintages")
 
+    def test_release_evidence_append_automatically_invalidates_cache(self) -> None:
+        observed_provenance: list[list[str]] = []
+        observed_values: list[tuple[list[float], list[float]]] = []
+
+        def fake_build(vintages, finals, *, periods, final_cutoff_at):
+            observed_provenance.append(
+                [row["vintage_provenance"] for row in vintages]
+            )
+            observed_values.append(
+                (
+                    [float(row["value"]) for row in vintages],
+                    [float(row.value) for row in finals],
+                )
+            )
+            return self._fake_payload(len(vintages), final_cutoff_at)
+
+        request = {
+            "start": date(2025, 1, 1),
+            "end": date(2025, 1, 31),
+            "months": 1,
+            "now": datetime(2026, 1, 1, tzinfo=UTC),
+        }
+        with patch(
+            "app.services.china_cycle_backtest._build_backtest_from_rows",
+            side_effect=fake_build,
+        ) as builder:
+            build_china_cycle_backtest(self.db, **request)
+            self.db.add(
+                ReleaseEvidence(
+                    evidence_key="a" * 64,
+                    indicator_code="CN_NMI",
+                    date=date(2025, 1, 31),
+                    value=49,
+                    release_date=date(2025, 2, 1),
+                    available_at=datetime(2025, 2, 1, 9),
+                    retrieved_at=datetime(2026, 1, 2, 12),
+                    source_url="https://www.stats.gov.cn/official-release.html",
+                    status="published",
+                    version=1,
+                )
+            )
+            self.db.commit()
+            build_china_cycle_backtest(self.db, **request)
+
+        self.assertEqual(builder.call_count, 2)
+        self.assertEqual(observed_provenance[0], ["data_point_vintage"])
+        self.assertEqual(observed_provenance[1], ["release_evidence"])
+        self.assertEqual(observed_values[1], ([49.0], [50.0]))
+
     def test_resolved_range_is_reused_and_method_versions_invalidate(self) -> None:
         watermark = _InputWatermark(1, 1, 1, datetime(2025, 2, 1, 10))
         fake_db = Mock()
@@ -151,7 +200,7 @@ class ChinaCycleBacktestCacheTests(unittest.TestCase):
         with (
             patch(
                 "app.services.china_cycle_backtest._backtest_data_watermark",
-                return_value=(watermark, watermark),
+                return_value=(watermark, watermark, watermark),
             ),
             patch(
                 "app.services.china_cycle_backtest._build_backtest_from_rows",
@@ -186,6 +235,7 @@ class ChinaCycleBacktestCacheTests(unittest.TestCase):
             model_codes=("CN_NMI",),
             current_values=watermark,
             vintages=watermark,
+            release_evidence=watermark,
         )
         builder = Mock(side_effect=[{"build": 1}, {"build": 2}])
 
@@ -210,6 +260,7 @@ class ChinaCycleBacktestCacheTests(unittest.TestCase):
             model_codes=("CN_NMI",),
             current_values=watermark,
             vintages=watermark,
+            release_evidence=watermark,
         )
         started = Event()
         release = Event()

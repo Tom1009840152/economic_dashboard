@@ -27,6 +27,22 @@ class DerivedMetricSpec:
 
 
 DERIVED_METRIC_SPECS: Mapping[str, DerivedMetricSpec] = {
+    "CN_FISCAL_BROAD_EXPENDITURE_YTD": DerivedMetricSpec(
+        code="CN_FISCAL_BROAD_EXPENDITURE_YTD",
+        formula="一般公共预算累计支出 + 政府性基金预算累计支出",
+        input_codes=(
+            "CN_FISCAL_GENERAL_SPEND_YTD",
+            "CN_FISCAL_FUND_EXPENDITURE_YTD",
+        ),
+        frequency="monthly",
+        unit="亿元",
+        version="1.0.0",
+        effective_date=date(2026, 9, 15),
+        notes=(
+            "A transparent two-budget spending proxy; it is not consolidated "
+            "for transfers between the two budgets."
+        ),
+    ),
     "CN_M1M2": DerivedMetricSpec(
         code="CN_M1M2",
         formula="M1同比增速 − M2同比增速",
@@ -94,6 +110,20 @@ def calculate_spread(left: pd.Series, right: pd.Series) -> pd.Series:
         axis=1,
     ).dropna()
     return (aligned["left"] - aligned["right"]).sort_index()
+
+
+def calculate_fiscal_broad_expenditure(
+    general_expenditure_ytd: pd.Series,
+    fund_expenditure_ytd: pd.Series,
+) -> pd.Series:
+    """Add the two published YTD expenditure budgets on an exact calendar join."""
+
+    general = _monthly_series(general_expenditure_ytd)
+    fund = _monthly_series(fund_expenditure_ytd)
+    aligned = pd.concat(
+        [general.rename("general"), fund.rename("fund")], axis=1
+    ).dropna()
+    return (aligned["general"] + aligned["fund"]).sort_index()
 
 
 @dataclass(frozen=True, slots=True)

@@ -85,6 +85,75 @@ def _house_price_release_html(
     """
 
 
+def _nominal_gdp_release_html(
+    title: str,
+    period_title: str,
+    *,
+    published: str,
+    quarter_label: str,
+    quarter_value: float,
+    ytd_label: str | None = None,
+    ytd_value: float | None = None,
+    amount_header: str = "绝对额（亿元）",
+    table_ytd_label: str | None = None,
+    h1: str | None = None,
+    caption: str | None = None,
+) -> str:
+    year = title[:4]
+    table_caption = caption or f"表1 {year}年{period_title}GDP初步核算数据"
+    if ytd_label is None:
+        table = f"""
+          <table>
+            <tr>
+              <td></td><td>{amount_header}</td><td>比上年同期增长（%）</td>
+            </tr>
+            <tr><td>GDP</td><td>{quarter_value}</td><td>4.8</td></tr>
+          </table>
+        """
+    elif ytd_value is None:
+        table = f"""
+          <table>
+            <tr>
+              <td></td><td>{amount_header}</td><td>比上年同期增长（%）</td>
+            </tr>
+            <tr><td>GDP</td><td>{quarter_value}</td><td>4.8</td></tr>
+          </table>
+        """
+    else:
+        rendered_ytd_label = table_ytd_label or ytd_label
+        table = f"""
+          <table>
+            <tr>
+              <td rowspan="2"></td>
+              <td colspan="2">{amount_header}</td>
+              <td colspan="2">比上年同期增长（%）</td>
+            </tr>
+            <tr>
+              <td>{quarter_label}</td><td>{rendered_ytd_label}</td>
+              <td>{quarter_label}</td><td>{rendered_ytd_label}</td>
+            </tr>
+            <tr>
+              <td>GDP</td><td>{quarter_value}</td><td>{ytd_value}</td>
+              <td>4.8</td><td>5.2</td>
+            </tr>
+          </table>
+        """
+    return f"""
+      <html>
+        <body>
+          <div class="detail-title">
+            <h1>{h1 or title}</h1>
+            <div class="detail-title-des"><p>{published}</p></div>
+          </div>
+          <p>{table_caption}</p>
+          {table}
+          <p>表2 GDP同比增长速度</p>
+          <table><tr><td>年份</td><td>1季度</td></tr><tr><td>2025</td><td>5.4</td></tr></table>
+        </body>
+      </html>
+    """
+
+
 class ChinaCycleArchiveTests(unittest.TestCase):
     def tearDown(self) -> None:
         cycle._cache.clear()
@@ -316,6 +385,233 @@ class ChinaCycleArchiveTests(unittest.TestCase):
 
         self.assertEqual(metadata["release_date"], dt.date(2022, 6, 10))
         self.assertEqual(metadata["available_at"], dt.datetime(2022, 6, 10, 16, 0))
+
+    def test_nbs_nominal_gdp_history_selects_ytd_amount_for_all_quarters(self) -> None:
+        releases = [
+            (
+                "https://www.stats.gov.cn/sj/zxfb/202504/q1.html",
+                "2025年一季度国内生产总值初步核算结果",
+            ),
+            (
+                "https://www.stats.gov.cn/sj/zxfb/202507/q2.html",
+                "2025年二季度和上半年国内生产总值初步核算结果",
+            ),
+            (
+                "https://www.stats.gov.cn/sj/zxfb/202510/q3.html",
+                "2025年三季度国内生产总值（GDP）初步核算结果",
+            ),
+            (
+                "https://www.stats.gov.cn/sj/zxfb/202302/q4.html",
+                "2021年四季度和全年国内生产总值（GDP）初步核算结果",
+            ),
+        ]
+        pages = {
+            releases[0][0]: _nominal_gdp_release_html(
+                releases[0][1],
+                "一季度",
+                published="2025/04/17 09:30",
+                quarter_label="一季度",
+                quarter_value=318758,
+            ),
+            releases[1][0]: _nominal_gdp_release_html(
+                releases[1][1],
+                "二季度和上半年",
+                published="2025/07/16 09:30",
+                quarter_label="二季度",
+                quarter_value=341778,
+                ytd_label="上半年",
+                ytd_value=660536,
+            ),
+            releases[2][0]: _nominal_gdp_release_html(
+                releases[2][1],
+                "三季度",
+                published="2025/10/21 09:30",
+                quarter_label="三季度",
+                quarter_value=354500,
+                ytd_label="前三季度",
+                ytd_value=1015036,
+            ),
+            releases[3][0]: _nominal_gdp_release_html(
+                releases[3][1],
+                "四季度和全年",
+                published="2022/01/18 09:30",
+                quarter_label="4季度",
+                quarter_value=324237,
+                ytd_label="全年",
+                ytd_value=1143670,
+                amount_header="现价总量（亿元）",
+            ),
+        }
+
+        with (
+            patch.object(cycle, "_nbs_links", return_value=releases) as links,
+            patch.object(
+                cycle,
+                "_get_nbs_archive_text",
+                side_effect=lambda url: pages[url],
+            ) as request,
+        ):
+            result = cycle._load_nbs_nominal_gdp_history(
+                page_count=70,
+                start_page=5,
+            )
+
+        links.assert_called_once_with(
+            cycle._NBS_NOMINAL_GDP_LINK_PATTERN,
+            70,
+            archive=True,
+            start_page=5,
+            archive_shard=0,
+        )
+        self.assertEqual(request.call_count, 4)
+        by_date = result["CN_GDP_NOMINAL_YTD"].set_index("date")
+        self.assertEqual(by_date.loc[dt.date(2021, 12, 1), "value"], 1143670)
+        self.assertEqual(by_date.loc[dt.date(2025, 3, 1), "value"], 318758)
+        self.assertEqual(by_date.loc[dt.date(2025, 6, 1), "value"], 660536)
+        self.assertEqual(by_date.loc[dt.date(2025, 9, 1), "value"], 1015036)
+        self.assertNotIn(341778, by_date["value"].tolist())
+        self.assertNotIn(5.2, by_date["value"].tolist())
+        self.assertEqual(
+            by_date.loc[dt.date(2025, 6, 1), "available_at"],
+            dt.datetime(2025, 7, 16, 9, 30),
+        )
+        self.assertEqual(
+            by_date.loc[dt.date(2025, 6, 1), "source_url"], releases[1][0]
+        )
+        self.assertTrue((by_date["status"] == "published").all())
+
+    def test_nbs_nominal_gdp_history_rejects_unsafe_page_variants(self) -> None:
+        title = "2025年二季度和上半年国内生产总值初步核算结果"
+        source_url = "https://www.stats.gov.cn/sj/zxfb/202507/q2.html"
+        valid_kwargs = {
+            "published": "2025/07/16 09:30",
+            "quarter_label": "二季度",
+            "quarter_value": 341778,
+            "ytd_label": "上半年",
+            "ytd_value": 660536,
+        }
+        cases = {
+            "single-quarter amount only": {
+                **valid_kwargs,
+                "ytd_value": None,
+            },
+            "growth column masquerades as amount": {
+                **valid_kwargs,
+                "amount_header": "比上年同期增长（%）",
+            },
+            "wrong cumulative period": {
+                **valid_kwargs,
+                "table_ytd_label": "前三季度",
+            },
+            "wrong h1": {
+                **valid_kwargs,
+                "h1": "2025年三季度国内生产总值初步核算结果",
+            },
+            "date only": {
+                **valid_kwargs,
+                "published": "2025/07/16",
+            },
+            "wrong release month": {
+                **valid_kwargs,
+                "published": "2025/08/16 09:30",
+            },
+            "not table one": {
+                **valid_kwargs,
+                "caption": "表2 2025年二季度和上半年GDP初步核算数据",
+            },
+        }
+
+        for label, kwargs in cases.items():
+            source = _nominal_gdp_release_html(
+                title,
+                "二季度和上半年",
+                **kwargs,
+            )
+            with (
+                self.subTest(label=label),
+                patch.object(
+                    cycle,
+                    "_nbs_links",
+                    return_value=[(source_url, title)],
+                ),
+                patch.object(
+                    cycle,
+                    "_get_nbs_archive_text",
+                    return_value=source,
+                ),
+            ):
+                result = cycle._load_nbs_nominal_gdp_history()
+
+            self.assertTrue(result["CN_GDP_NOMINAL_YTD"].empty)
+
+    def test_nbs_nominal_gdp_accepts_exact_article_title_in_scripted_h1_template(self) -> None:
+        title = "2025年四季度和全年国内生产总值初步核算结果"
+        source_url = "https://www.stats.gov.cn/sj/zxfb/202601/q4.html"
+        source = _nominal_gdp_release_html(
+            title,
+            "四季度和全年",
+            published="2026/01/20 09:30",
+            quarter_label="四季度",
+            quarter_value=387911,
+            ytd_label="全年",
+            ytd_value=1401879,
+        )
+        source = source.replace(
+            "<html>",
+            f'<html><head><meta name="ArticleTitle" content="{title}"></head>',
+            1,
+        ).replace(
+            f"<h1>{title}</h1>",
+            f"<h1><script>document.write('{title}')</script></h1>",
+            1,
+        )
+        with (
+            patch.object(cycle, "_nbs_links", return_value=[(source_url, title)]),
+            patch.object(cycle, "_get_nbs_archive_text", return_value=source),
+        ):
+            result = cycle._load_nbs_nominal_gdp_history()
+
+        row = result["CN_GDP_NOMINAL_YTD"].iloc[0]
+        self.assertEqual(row["date"], dt.date(2025, 12, 1))
+        self.assertEqual(row["value"], 1401879)
+
+    def test_nbs_nominal_gdp_history_rejects_bad_title_and_nonofficial_url(self) -> None:
+        releases = [
+            (
+                "https://www.stats.gov.cn/sj/zxfb/202507/invalid.html",
+                "2025年上半年国内生产总值初步核算结果",
+            ),
+            (
+                "https://www.stats.gov.cn.evil.example/q2.html",
+                "2025年二季度和上半年国内生产总值初步核算结果",
+            ),
+        ]
+        with (
+            patch.object(cycle, "_nbs_links", return_value=releases),
+            patch.object(cycle, "_get_nbs_archive_text") as request,
+        ):
+            result = cycle._load_nbs_nominal_gdp_history()
+
+        request.assert_not_called()
+        self.assertTrue(result["CN_GDP_NOMINAL_YTD"].empty)
+
+    def test_nominal_gdp_mirror_uses_its_real_transport_source(self) -> None:
+        raw = pd.DataFrame(
+            [
+                {
+                    "季度": "2025年第2季度",
+                    "国内生产总值-绝对值": 659861.6,
+                }
+            ]
+        )
+        with patch.object(cycle.ak, "macro_china_gdp", return_value=raw):
+            result = cycle._load_nominal_gdp()
+
+        row = result.iloc[0]
+        self.assertEqual(row["date"], dt.date(2025, 6, 1))
+        self.assertEqual(row["source_url"], cycle._EASTMONEY_GDP_URL)
+        self.assertEqual(row["status"], "mirror_backfill")
+        self.assertTrue(pd.isna(row["available_at"]))
 
     def test_pmi_archive_includes_nmi_headline_and_only_dates_current_release(self) -> None:
         source_url = "https://www.stats.gov.cn/sj/zxfb/202607/example.html"
@@ -1197,6 +1493,108 @@ class ChinaCycleArchiveTests(unittest.TestCase):
         )
         self.assertEqual(
             cycle._special_bond_monthly_value(older, dt.date(2019, 12, 1)), 340.0
+        )
+
+    def test_fiscal_parser_accepts_annual_compared_with_previous_year_wording(self) -> None:
+        self.assertEqual(
+            cycle._extract_yoy(
+                "全国一般公共预算支出287395亿元，比上年增长1.0%",
+                r"全国一般公共预算支出",
+            ),
+            (287395.0, 1.0),
+        )
+        self.assertEqual(
+            cycle._extract_yoy(
+                "全国政府性基金预算支出91234亿元，比上年下降8.5%",
+                r"全国政府性基金预算支出",
+            ),
+            (91234.0, -8.5),
+        )
+        self.assertEqual(
+            cycle._extract_yoy(
+                "全国一般公共预算支出128887亿元，比上年同期增长5.9%",
+                r"全国一般公共预算支出",
+            ),
+            (128887.0, 5.9),
+        )
+
+    def test_fiscal_broad_value_is_canonical_derived_output(self) -> None:
+        source_url = "https://gks.mof.gov.cn/tongjishuju/202601/release.htm"
+        source = """
+          <html><body>
+          2025年，全国一般公共预算支出287395亿元，比上年增长1.0%。
+          全国政府性基金预算支出91234亿元，比上年下降8.5%。
+          </body></html>
+        """
+        metadata = {
+            "release_date": dt.date(2026, 1, 30),
+            "available_at": dt.datetime(2026, 1, 30, 9, 30),
+            "source_url": source_url,
+        }
+        with (
+            patch.object(
+                cycle,
+                "_mof_catalog",
+                return_value=((source_url, "2025年财政收支情况"),),
+            ),
+            patch.object(cycle, "_get_mof_archive_text", return_value=source),
+            patch.object(cycle, "_publication_metadata", return_value=metadata),
+            patch.object(
+                cycle,
+                "calculate_fiscal_broad_expenditure",
+                wraps=cycle.calculate_fiscal_broad_expenditure,
+            ) as canonical,
+        ):
+            result = cycle._load_fiscal(page_count=1)
+
+        canonical.assert_called_once()
+        broad = result["CN_FISCAL_BROAD_EXPENDITURE_YTD"].iloc[0]
+        self.assertEqual(broad["date"], dt.date(2025, 12, 1))
+        self.assertEqual(broad["value"], 378629.0)
+        self.assertEqual(broad["status"], "derived")
+        self.assertEqual(broad["formula_version"], "1.0.0")
+
+    def test_mof_catalog_rejects_non_official_detail_links(self) -> None:
+        source = """
+          <html><body>
+            <a href="/tongjishuju/release.htm">官方</a>
+            <a href="https://mof.gov.cn.evil.test/release.htm">仿冒</a>
+          </body></html>
+        """
+        with (
+            patch.object(cycle, "_get_mof_archive_text", return_value=source),
+        ):
+            result = cycle._mof_catalog("https://gks.mof.gov.cn/tongjishuju/", 1)
+
+        self.assertEqual(
+            result,
+            (("https://gks.mof.gov.cn/tongjishuju/release.htm", "官方"),),
+        )
+
+    def test_nbs_archive_catalog_uses_last_good_index_after_live_challenge(self) -> None:
+        cached = """
+          <html><head><meta name="ColumnName" content="数据发布"></head><body>
+            <a href="./202601/release.html" title="2025年四季度和全年国内生产总值初步核算结果">
+              GDP
+            </a>
+          </body></html>
+        """
+        with (
+            patch.object(
+                cycle,
+                "_get_nbs_archive_text",
+                side_effect=RuntimeError("verification challenge"),
+            ),
+            patch.object(cycle, "_cached_nbs_index_source", return_value=cached),
+        ):
+            result = cycle._nbs_release_catalog(page_count=1, archive=True)
+
+        self.assertEqual(
+            result,
+            ((
+                "https://www.stats.gov.cn/sj/zxfb/202601/release.html",
+                "2025年四季度和全年国内生产总值初步核算结果",
+            ),),
         )
 
     def test_credit_loader_delegates_to_canonical_formula(self) -> None:

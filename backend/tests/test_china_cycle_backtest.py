@@ -8,6 +8,7 @@ from app.main import app
 from app.schemas import ChinaCycleBacktestOut
 from app.services.china_cycle_backtest import (
     MAX_BACKTEST_MONTHS,
+    _authoritative_vintage_rows,
     _build_backtest_from_rows,
     _decision_as_of,
     _latest_completed_period,
@@ -79,6 +80,92 @@ class ChinaCycleBacktestTests(unittest.TestCase):
 
         self.assertEqual([(row["value"], row["version"]) for row in february], [(100, 1)])
         self.assertEqual([(row["value"], row["version"]) for row in march], [(101, 2)])
+
+    def test_release_evidence_replaces_generic_vintages_for_the_same_key(self) -> None:
+        observation_date = date(2025, 1, 31)
+        revised_current_vintage = self.vintage(
+            row_id=1,
+            observation_date=observation_date,
+            value=999,
+            available_at=datetime(2025, 2, 1, 9),
+        )
+        initial_release_evidence = {
+            **self.vintage(
+                row_id=7,
+                observation_date=observation_date,
+                value=100,
+                available_at=datetime(2025, 2, 1, 9),
+            ),
+            "vintage_provenance": "release_evidence",
+            "source_url": "https://www.stats.gov.cn/official-release.html",
+            "provenance_json": '{"kind":"official_release"}',
+        }
+
+        authoritative = _authoritative_vintage_rows(
+            [revised_current_vintage],
+            [initial_release_evidence],
+        )
+        selected, _ = _select_strict_vintages(
+            authoritative,
+            as_of=datetime(2025, 2, 20),
+            observation_end=observation_date,
+        )
+
+        self.assertEqual(len(authoritative), 1)
+        self.assertEqual(selected[0]["value"], 100)
+        self.assertEqual(selected[0]["vintage_provenance"], "release_evidence")
+        self.assertEqual(
+            selected[0]["source_url"],
+            "https://www.stats.gov.cn/official-release.html",
+        )
+
+    def test_release_evidence_chronology_uses_availability_not_append_version(self) -> None:
+        observation_date = date(2025, 1, 31)
+        # The older publication was discovered second, so its append version is
+        # higher.  Replay must still follow the official publication timeline.
+        evidence = [
+            {
+                **self.vintage(
+                    row_id=1,
+                    observation_date=observation_date,
+                    value=110,
+                    available_at=datetime(2025, 3, 1, 9),
+                    version=1,
+                ),
+                "vintage_provenance": "release_evidence",
+            },
+            {
+                **self.vintage(
+                    row_id=2,
+                    observation_date=observation_date,
+                    value=100,
+                    available_at=datetime(2025, 2, 1, 9),
+                    version=2,
+                ),
+                "vintage_provenance": "release_evidence",
+            },
+        ]
+        authoritative = _authoritative_vintage_rows([], evidence)
+
+        february, _ = _select_strict_vintages(
+            authoritative,
+            as_of=datetime(2025, 2, 20),
+            observation_end=observation_date,
+        )
+        march, _ = _select_strict_vintages(
+            authoritative,
+            as_of=datetime(2025, 3, 20),
+            observation_end=observation_date,
+        )
+
+        self.assertEqual(
+            [(row["value"], row["version"]) for row in february],
+            [(100, 2)],
+        )
+        self.assertEqual(
+            [(row["value"], row["version"]) for row in march],
+            [(110, 1)],
+        )
 
     def test_unknown_available_at_is_strictly_excluded(self) -> None:
         rows = [

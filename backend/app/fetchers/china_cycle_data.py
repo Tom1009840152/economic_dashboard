@@ -27,6 +27,7 @@ from lxml import html as lxml_html
 from app.services.derived_metrics import (
     DERIVED_METRIC_SPECS,
     calculate_credit_metrics,
+    calculate_fiscal_broad_expenditure,
     calculate_fiscal_metrics,
 )
 
@@ -40,6 +41,7 @@ _HEADERS = {
 }
 _EASTMONEY_API = "https://datacenter-web.eastmoney.com/api/data/v1/get"
 _EASTMONEY_CONSUMER_URL = "https://data.eastmoney.com/cjsj/xfzxx.html"
+_EASTMONEY_GDP_URL = "https://data.eastmoney.com/cjsj/gdp.html"
 _EASTMONEY_HOUSE_URL = "https://data.eastmoney.com/cjsj/newhouse.html"
 _EASTMONEY_INDUSTRIAL_URL = "https://data.eastmoney.com/cjsj/gyzjz.html"
 _MOFCOM_TSF_URL = "https://data.mofcom.gov.cn/gnmy/shrzgm.shtml"
@@ -97,6 +99,7 @@ _nbs_session = curl_requests.Session(impersonate="chrome")
 _NBS_ARCHIVE_CACHE = Path(__file__).resolve().parents[2] / ".cache" / "nbs-release"
 _GACC_ARCHIVE_CACHE = Path(__file__).resolve().parents[2] / ".cache" / "gacc-release"
 _PBOC_ARCHIVE_CACHE = Path(__file__).resolve().parents[2] / ".cache" / "pboc-release"
+_MOF_ARCHIVE_CACHE = Path(__file__).resolve().parents[2] / ".cache" / "mof-release"
 _NBS_ARCHIVE_REQUEST_INTERVAL = 0.45
 _GACC_ARCHIVE_REQUEST_INTERVAL = 0.75
 _PBOC_BOUNDARY_SCAN_PAGES = 12
@@ -169,6 +172,19 @@ def _is_gacc_https_url(value: object) -> bool:
     )
 
 
+def _is_mof_https_url(value: object) -> bool:
+    """Accept only HTTPS resources hosted by the Ministry of Finance."""
+
+    try:
+        parsed = urlparse(str(value))
+    except (TypeError, ValueError):
+        return False
+    hostname = (parsed.hostname or "").lower().rstrip(".")
+    return parsed.scheme.lower() == "https" and (
+        hostname == "mof.gov.cn" or hostname.endswith(".mof.gov.cn")
+    )
+
+
 def _valid_gacc_release_source(source: str) -> bool:
     """Reject gateways, challenges, and unrelated pages before caching them."""
 
@@ -234,6 +250,103 @@ def _valid_pboc_release_source(source: str) -> bool:
         marker in text or marker in source
         for marker in ("文章来源", "发布时间", "发布日期", "PubDate")
     )
+
+
+def _valid_nbs_index_source(source: str) -> bool:
+    """Recognize a real NBS release index before using it as a fallback."""
+
+    if len(source) < 300 or "Please enable JavaScript" in source:
+        return False
+    try:
+        document = lxml_html.fromstring(source)
+    except (TypeError, ValueError):
+        return False
+    column = " ".join(document.xpath("//meta[@name='ColumnName']/@content"))
+    return "数据发布" in column and bool(document.xpath("//a[@href]"))
+
+
+def _nbs_index_cache_path(url: str) -> Path:
+    digest = hashlib.sha256(url.encode("utf-8")).hexdigest()
+    return _NBS_ARCHIVE_CACHE / f"{digest}.html"
+
+
+def _cached_nbs_index_source(url: str) -> str | None:
+    cache_path = _nbs_index_cache_path(url)
+    if not cache_path.exists():
+        return None
+    source = cache_path.read_text(encoding="utf-8")
+    return source if _valid_nbs_index_source(source) else None
+
+
+def _cache_nbs_index_source(url: str, source: str) -> None:
+    if not _valid_nbs_index_source(source):
+        return
+    cache_path = _nbs_index_cache_path(url)
+    _NBS_ARCHIVE_CACHE.mkdir(parents=True, exist_ok=True)
+    temporary = cache_path.with_suffix(".tmp")
+    temporary.write_text(source, encoding="utf-8")
+    temporary.replace(cache_path)
+
+
+def _valid_mof_archive_source(source: str) -> bool:
+    """Reject transport/challenge bodies before they become fiscal evidence."""
+
+    if len(source) < 150:
+        return False
+    lowered = source.lower()
+    if any(
+        marker in lowered
+        for marker in (
+            "gateway time-out",
+            "bad gateway",
+            "access denied",
+            "captcha",
+            "please enable javascript",
+        )
+    ):
+        return False
+    try:
+        document = lxml_html.fromstring(source)
+    except (TypeError, ValueError):
+        return False
+    return bool(document.xpath("//html")) and bool(document.text_content().strip())
+
+
+def _get_mof_archive_text(url: str, *, refresh: bool = False) -> str:
+    """Read official MOF HTML with a live-first, last-good fallback for indexes."""
+
+    if not _is_mof_https_url(url):
+        raise ValueError(f"refusing non-official MOF archive URL: {url}")
+    digest = hashlib.sha256(url.encode("utf-8")).hexdigest()
+    cache_path = _MOF_ARCHIVE_CACHE / f"{digest}.html"
+    if not refresh and cache_path.exists():
+        cached = cache_path.read_text(encoding="utf-8")
+        if _valid_mof_archive_source(cached):
+            return cached
+
+    last_error: Exception | None = None
+    for attempt in range(2):
+        try:
+            source = _request_text(url)
+            if not _valid_mof_archive_source(source):
+                raise RuntimeError("MOF website returned an invalid archive page")
+            _MOF_ARCHIVE_CACHE.mkdir(parents=True, exist_ok=True)
+            temporary = cache_path.with_suffix(".tmp")
+            temporary.write_text(source, encoding="utf-8")
+            temporary.replace(cache_path)
+            return source
+        except Exception as exc:
+            last_error = exc
+            if attempt == 0:
+                time.sleep(0.5)
+
+    if cache_path.exists():
+        cached = cache_path.read_text(encoding="utf-8")
+        if _valid_mof_archive_source(cached):
+            logger.warning("MOF live refresh failed; using last-good cache: %s", url)
+            return cached
+    assert last_error is not None
+    raise last_error
 
 
 def _get_nbs_text(url: str) -> str:
@@ -1303,6 +1416,7 @@ def _nbs_release_catalog(
             return cached[1]
 
     found: dict[str, str] = {}
+    live_archive_indexes = True
     # The NBS archive is paginated by release month. Fourteen pages cover the
     # rolling 13-month PMI tables and recent hard-data releases.
     for page in range(start_page, start_page + page_count):
@@ -1319,20 +1433,35 @@ def _nbs_release_catalog(
                 if page == 0
                 else urljoin(_NBS_RELEASE_BASE, f"index_{page}.html")
             )
-        try:
-            # Archive index pages change as new releases arrive, so they must
-            # never use the persistent detail-page cache.
-            source = (
-                _get_nbs_archive_text(url, cache=False)
-                if archive
-                else _get_nbs_text(url)
-            )
-        except FileNotFoundError:
-            logger.info("NBS archive ends before page %d", page)
-            break
-        except Exception:
-            logger.warning("NBS archive index failed: %s", url, exc_info=True)
-            continue
+        source = (
+            _cached_nbs_index_source(url)
+            if archive and not live_archive_indexes
+            else None
+        )
+        if source is None:
+            try:
+                # Archive index pages change as new releases arrive, so they
+                # try the live manifest first. A last-good snapshot is retained
+                # only as a fallback so an anti-bot challenge cannot turn a
+                # resumable historical backfill into an empty successful run.
+                source = (
+                    _get_nbs_archive_text(url, cache=False)
+                    if archive
+                    else _get_nbs_text(url)
+                )
+                if archive:
+                    _cache_nbs_index_source(url, source)
+            except FileNotFoundError:
+                logger.info("NBS archive ends before page %d", page)
+                break
+            except Exception:
+                fallback = _cached_nbs_index_source(url) if archive else None
+                if fallback is None:
+                    logger.warning("NBS archive index failed: %s", url, exc_info=True)
+                    continue
+                logger.warning("NBS live index failed; using last-good index cache")
+                live_archive_indexes = False
+                source = fallback
         document = lxml_html.fromstring(source)
         for anchor in document.xpath("//a[@href]"):
             title = (anchor.get("title") or " ".join(anchor.text_content().split())).strip()
@@ -2528,25 +2657,30 @@ def _load_credit_data() -> dict[str, pd.DataFrame]:
 
 
 def _mof_catalog(base_url: str, pages: int = 2) -> tuple[tuple[str, str], ...]:
+    if not _is_mof_https_url(base_url):
+        raise ValueError(f"refusing non-official MOF archive URL: {base_url}")
     found: dict[str, str] = {}
     for page in range(pages):
         page_url = base_url if page == 0 else urljoin(base_url, f"index_{page}.htm")
         try:
-            source = _request_text(page_url)
+            source = _get_mof_archive_text(page_url, refresh=True)
         except Exception:
             logger.warning("MOF archive index failed: %s", page_url, exc_info=True)
             continue
         document = lxml_html.fromstring(source)
         for anchor in document.xpath("//a[@href]"):
             title = (anchor.get("title") or " ".join(anchor.text_content().split())).strip()
-            if title:
-                found[urljoin(page_url, anchor.get("href"))] = title
+            detail_url = urljoin(page_url, anchor.get("href"))
+            if title and _is_mof_https_url(detail_url):
+                found[detail_url] = title
     return tuple(found.items())
 
 
 def _extract_yoy(text: str, label: str) -> tuple[float, float] | None:
     match = re.search(
-        rf"{label}\s*([\d.]+)\s*亿元[，,]\s*同比(增长|下降)\s*([\d.]+)%", text
+        rf"{label}\s*([\d.]+)\s*亿元[，,]\s*"
+        rf"(?:同比|比上年(?:同期)?)(增长|下降)\s*([\d.]+)%",
+        text,
     )
     if not match:
         return None
@@ -2566,7 +2700,7 @@ def _load_fiscal(page_count: int = 2) -> dict[str, pd.DataFrame]:
         if "财政收支情况" not in title:
             continue
         try:
-            source = _request_text(source_url)
+            source = _get_mof_archive_text(source_url)
         except Exception:
             logger.warning("MOF fiscal release failed: %s", source_url, exc_info=True)
             continue
@@ -2592,11 +2726,25 @@ def _load_fiscal(page_count: int = 2) -> dict[str, pd.DataFrame]:
                 {"date": observed, "value": fund[1], **metadata}
             )
         if general and fund:
-            broad = general[0] + fund[0]
+            period = pd.Period(observed, freq="M")
+            broad = float(
+                calculate_fiscal_broad_expenditure(
+                    pd.Series([general[0]], index=[period], dtype="float64"),
+                    pd.Series([fund[0]], index=[period], dtype="float64"),
+                ).iloc[0]
+            )
             prior = general[0] / (1 + general[1] / 100) + fund[0] / (1 + fund[1] / 100)
             broad_yoy = (broad / prior - 1) * 100 if prior else None
             output["CN_FISCAL_BROAD_EXPENDITURE_YTD"].append(
-                {"date": observed, "value": broad, **metadata}
+                {
+                    "date": observed,
+                    "value": broad,
+                    **metadata,
+                    "status": "derived",
+                    "formula_version": DERIVED_METRIC_SPECS[
+                        "CN_FISCAL_BROAD_EXPENDITURE_YTD"
+                    ].version,
+                }
             )
             if broad_yoy is not None:
                 output["CN_FISCAL_BROAD_EXPENDITURE_YOY"].append(
@@ -2644,7 +2792,7 @@ def _load_special_bonds(page_count: int = 2) -> pd.DataFrame:
         if "地方政府债券发行和债务余额情况" not in title:
             continue
         try:
-            source = _request_text(source_url)
+            source = _get_mof_archive_text(source_url)
         except Exception:
             logger.warning("MOF local-bond release failed: %s", source_url, exc_info=True)
             continue
@@ -2778,6 +2926,254 @@ def _load_house_price_diffusion() -> dict[str, pd.DataFrame]:
     return _series_frames(output)
 
 
+_NBS_NOMINAL_GDP_LINK_PATTERN = (
+    r"国内生产总值(?:[（(]\s*GDP\s*[）)])?初步核算结果"
+)
+_NBS_NOMINAL_GDP_RELEASE_TITLE = re.compile(
+    r"^(?P<year>20\d{2})年"
+    r"(?P<period>一季度|二季度和上半年|三季度|四季度和全年)"
+    r"国内生产总值(?:[（(]GDP[）)])?初步核算结果$"
+)
+_NBS_NOMINAL_GDP_PERIODS = {
+    "一季度": (1, None),
+    "二季度和上半年": (2, "上半年"),
+    "三季度": (3, "前三季度"),
+    "四季度和全年": (4, "全年"),
+}
+_NBS_NOMINAL_GDP_AMOUNT_HEADERS = frozenset(
+    {
+        "绝对额（亿元）",
+        "绝对额(亿元)",
+        "现价总量（亿元）",
+        "现价总量(亿元)",
+    }
+)
+_NBS_NOMINAL_GDP_GROWTH_HEADER = re.compile(
+    r"^比上年同期增长[（(]%[）)]$"
+)
+
+
+def _nbs_nominal_gdp_release_period(
+    title: str,
+) -> tuple[dt.date, int, str, str | None] | None:
+    """Return the quarter encoded by one exact NBS preliminary-GDP title."""
+
+    match = _NBS_NOMINAL_GDP_RELEASE_TITLE.fullmatch(_compact_table_text(title))
+    if match is None:
+        return None
+    year = int(match.group("year"))
+    period_title = match.group("period")
+    quarter, ytd_label = _NBS_NOMINAL_GDP_PERIODS[period_title]
+    return dt.date(year, quarter * 3, 1), quarter, period_title, ytd_label
+
+
+def _nbs_numbered_table_caption(table) -> str | None:
+    """Return the nearest NBS table caption, including captions without a colon."""
+
+    preceding = table.xpath(
+        "preceding::*[self::p or self::h2 or self::h3 or self::h4]"
+    )
+    for node in reversed(preceding):
+        text = _compact_table_text(node.text_content())
+        if re.match(r"^表\d+", text):
+            return text
+
+    rows = table.xpath(".//tr")
+    if rows:
+        first = _compact_table_text(rows[0].text_content())
+        if re.match(r"^表\d+", first):
+            return first
+    return None
+
+
+def _nbs_nominal_gdp_table_value(
+    table,
+    *,
+    quarter: int,
+    ytd_label: str | None,
+) -> float | None:
+    """Extract only the current-price YTD amount from a validated GDP table 1."""
+
+    table_rows = table.xpath(".//tr")
+    rows = [
+        [
+            _compact_table_text(cell.text_content())
+            for cell in row.xpath("./th|./td")
+        ]
+        for row in table_rows
+    ]
+    metric_rows = [
+        index
+        for index, cells in enumerate(rows)
+        if len(cells) == 3
+        and cells[1] in _NBS_NOMINAL_GDP_AMOUNT_HEADERS
+        and _NBS_NOMINAL_GDP_GROWTH_HEADER.fullmatch(cells[2])
+    ]
+    gdp_rows = [
+        index
+        for index, cells in enumerate(rows)
+        if cells and cells[0] in {"GDP", "国内生产总值"}
+    ]
+    if len(metric_rows) != 1 or len(gdp_rows) != 1:
+        return None
+
+    metric_index = metric_rows[0]
+    gdp_index = gdp_rows[0]
+    if quarter == 1:
+        if ytd_label is not None or gdp_index != metric_index + 1:
+            return None
+        value_column = 1
+        expected_width = 3
+    else:
+        if ytd_label is None or gdp_index != metric_index + 2:
+            return None
+        period_headers = rows[metric_index + 1]
+        quarter_labels = {f"{quarter}季度", "一二三四"[quarter - 1] + "季度"}
+        if (
+            len(period_headers) != 4
+            or period_headers[0] not in quarter_labels
+            or period_headers[1] != ytd_label
+            or period_headers[2] not in quarter_labels
+            or period_headers[3] != ytd_label
+        ):
+            return None
+        value_column = 2
+        expected_width = 5
+
+    cells = rows[gdp_index]
+    if len(cells) != expected_width:
+        return None
+    raw_value = cells[value_column].replace(",", "")
+    if not re.fullmatch(r"\d+(?:\.\d+)?", raw_value):
+        return None
+    value = float(raw_value)
+    return value if value > 0 else None
+
+
+def _nbs_nominal_gdp_page_value(
+    source: str,
+    title: str,
+    *,
+    observed: dt.date,
+    quarter: int,
+    period_title: str,
+    ytd_label: str | None,
+) -> float | None:
+    """Validate one official release page and return its table-1 YTD GDP."""
+
+    try:
+        document = lxml_html.fromstring(source)
+    except (TypeError, ValueError):
+        return None
+
+    expected_title = _compact_table_text(title)
+    article_titles = [
+        _compact_table_text(value)
+        for value in document.xpath(
+            "//meta[translate(@name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', "
+            "'abcdefghijklmnopqrstuvwxyz')='articletitle']/@content"
+        )
+        if _compact_table_text(value)
+    ]
+    page_titles = [
+        _compact_table_text(node.text_content()) for node in document.xpath("//h1")
+    ]
+    # Newer NBS templates render the h1 through JavaScript, leaving the raw
+    # script body in ``text_content()``.  Their official ArticleTitle metadata
+    # remains exact and machine-readable. Prefer that single assertion when
+    # present; older pages must still expose one exact h1.
+    if article_titles:
+        if len(article_titles) != 1 or article_titles[0] != expected_title:
+            return None
+    elif len(page_titles) != 1 or page_titles[0] != expected_title:
+        return None
+
+    expected_caption = (
+        f"表1{observed.year}年{period_title}GDP初步核算数据"
+    )
+    values: list[float] = []
+    for table in document.xpath("//table"):
+        caption = _nbs_numbered_table_caption(table)
+        if caption is None:
+            continue
+        normalized_caption = re.sub(r"^表1[：:]?", "表1", caption)
+        if normalized_caption != expected_caption:
+            continue
+        value = _nbs_nominal_gdp_table_value(
+            table,
+            quarter=quarter,
+            ytd_label=ytd_label,
+        )
+        if value is None:
+            return None
+        values.append(value)
+
+    if not values or any(value != values[0] for value in values[1:]):
+        return None
+    return values[0]
+
+
+def _load_nbs_nominal_gdp_history(
+    page_count: int = 70,
+    *,
+    start_page: int = 0,
+    archive_shard: int = 0,
+) -> dict[str, pd.DataFrame]:
+    """Load first-release nominal GDP YTD values from official NBS pages."""
+
+    rows: list[dict] = []
+    links = _nbs_links(
+        _NBS_NOMINAL_GDP_LINK_PATTERN,
+        page_count,
+        archive=True,
+        start_page=start_page,
+        archive_shard=archive_shard,
+    )
+    for source_url, title in links:
+        parsed = _nbs_nominal_gdp_release_period(title)
+        if parsed is None or not _is_nbs_https_url(source_url):
+            continue
+        observed, quarter, period_title, ytd_label = parsed
+        try:
+            source = _get_nbs_archive_text(source_url)
+            value = _nbs_nominal_gdp_page_value(
+                source,
+                title,
+                observed=observed,
+                quarter=quarter,
+                period_title=period_title,
+                ytd_label=ytd_label,
+            )
+            metadata = _publication_metadata(source, source_url)
+        except Exception:
+            logger.warning("NBS nominal-GDP release failed: %s", source_url, exc_info=True)
+            continue
+
+        available_at = metadata["available_at"]
+        release_date = metadata["release_date"]
+        expected_release_month = (
+            dt.date(observed.year + 1, 1, 1)
+            if quarter == 4
+            else dt.date(observed.year, observed.month + 1, 1)
+        )
+        if (
+            value is None
+            or not isinstance(available_at, dt.datetime)
+            or release_date != available_at.date()
+            or release_date.replace(day=1) != expected_release_month
+        ):
+            continue
+        rows.append(
+            {
+                "date": observed,
+                "value": value,
+                **metadata,
+                "status": "published",
+            }
+        )
+    return {"CN_GDP_NOMINAL_YTD": _frame(rows)}
+
+
 def _load_nominal_gdp() -> pd.DataFrame:
     raw = ak.macro_china_gdp()
     rows: list[dict] = []
@@ -2790,8 +3186,8 @@ def _load_nominal_gdp() -> pd.DataFrame:
             {
                 "date": dt.date(int(match.group(1)), int(match.group(2)) * 3, 1),
                 "value": float(value),
-                "source_url": "https://data.stats.gov.cn/",
-                "status": "historical_backfill",
+                "source_url": _EASTMONEY_GDP_URL,
+                "status": "mirror_backfill",
             }
         )
     return _frame(rows)

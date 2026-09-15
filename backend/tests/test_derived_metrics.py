@@ -13,6 +13,7 @@ from app.services.derived_metrics import (
     DERIVED_METRIC_SPECS,
     PBOC_7D_REVERSE_REPO,
     calculate_credit_metrics,
+    calculate_fiscal_broad_expenditure,
     calculate_fiscal_metrics,
     calculate_spread,
     policy_rate_for_periods,
@@ -33,6 +34,7 @@ class DerivedMetricTests(unittest.TestCase):
         self.assertEqual(
             set(DERIVED_METRIC_SPECS),
             {
+                "CN_FISCAL_BROAD_EXPENDITURE_YTD",
                 "CN_M1M2",
                 "CN_CREDIT_INTENSITY",
                 "CN_CREDIT_IMPULSE",
@@ -41,6 +43,22 @@ class DerivedMetricTests(unittest.TestCase):
             },
         )
         self.assertTrue(all(spec.version for spec in DERIVED_METRIC_SPECS.values()))
+
+    def test_broad_fiscal_spending_requires_both_same_month_inputs(self) -> None:
+        general = pd.Series(
+            [100.0, 120.0],
+            index=pd.PeriodIndex(["2025-03", "2025-06"], freq="M"),
+        )
+        fund = pd.Series(
+            [30.0, 40.0],
+            index=pd.PeriodIndex(["2025-03", "2025-09"], freq="M"),
+        )
+
+        broad = calculate_fiscal_broad_expenditure(general, fund)
+
+        self.assertEqual(
+            broad.to_dict(), {pd.Period("2025-03", freq="M"): 130.0}
+        )
 
     def test_m1_m2_spread_uses_explicit_index_alignment(self) -> None:
         left = pd.Series([7.0, 8.0], index=["2026-01", "2026-02"])

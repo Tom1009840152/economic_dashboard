@@ -25,7 +25,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.indicator_defs import INDICATOR_DEFS
-from app.models import DataPoint, DataPointVintage
+from app.models import DataPoint, DataPointVintage, ReleaseEvidence
 from app.services.china_business_cycle import (
     BLOCK_MIN_COVERAGE,
     CHINA_CYCLE_BLOCKS,
@@ -44,7 +44,7 @@ from app.services.china_cycle_regime import (
 )
 
 
-METHODOLOGY_VERSION = "1.1.0"
+METHODOLOGY_VERSION = "1.2.0"
 DEFAULT_BACKTEST_MONTHS = 120
 MAX_BACKTEST_MONTHS = 120
 MIN_RATE_SAMPLE = 24
@@ -87,6 +87,7 @@ class _BacktestCacheKey:
     model_codes: tuple[str, ...]
     current_values: _InputWatermark
     vintages: _InputWatermark
+    release_evidence: _InputWatermark
 
 
 @dataclass(frozen=True)
@@ -134,7 +135,7 @@ def _backtest_data_watermark(
     db: Session,
     *,
     observation_end: date,
-) -> tuple[_InputWatermark, _InputWatermark]:
+) -> tuple[_InputWatermark, _InputWatermark, _InputWatermark]:
     """Return watermarks in a short session that cannot be held by a waiter."""
 
     with Session(bind=db.get_bind()) as watermark_db:
@@ -143,6 +144,11 @@ def _backtest_data_watermark(
             _table_watermark(
                 watermark_db,
                 DataPointVintage,
+                observation_end=observation_end,
+            ),
+            _table_watermark(
+                watermark_db,
+                ReleaseEvidence,
                 observation_end=observation_end,
             ),
         )
@@ -222,8 +228,24 @@ def _row_value(row, key: str, default=None):
 
 
 def _plain_row(row) -> dict:
+    provenance = _row_value(row, "vintage_provenance")
+    if provenance is None:
+        if isinstance(row, ReleaseEvidence):
+            provenance = "release_evidence"
+        elif isinstance(row, DataPoint):
+            provenance = "current_data_point"
+        else:
+            provenance = "data_point_vintage"
+    row_id = _row_value(row, "id", None) or id(row)
+    # Both history tables use independent integer primary-key sequences.  A
+    # namespace keeps audit identifiers collision-free after their rows are
+    # combined for replay.
+    if provenance == "release_evidence" and not str(row_id).startswith(
+        "release_evidence:"
+    ):
+        row_id = f"release_evidence:{row_id}"
     return {
-        "id": _row_value(row, "id", None) or id(row),
+        "id": row_id,
         "indicator_code": _row_value(row, "indicator_code"),
         "date": _row_value(row, "date"),
         "value": float(_row_value(row, "value")),
@@ -233,15 +255,55 @@ def _plain_row(row) -> dict:
         "status": _row_value(row, "status", "published"),
         "formula_version": _row_value(row, "formula_version"),
         "version": int(_row_value(row, "version", 1)),
+        "source_url": _row_value(row, "source_url"),
+        "provenance_json": _row_value(row, "provenance_json"),
+        "vintage_provenance": provenance,
     }
+
+
+def _authoritative_vintage_rows(
+    vintage_rows: Iterable,
+    evidence_rows: Iterable,
+) -> list[dict]:
+    """Combine replay inputs with official release evidence taking precedence.
+
+    Evidence is an independently verified publication chain.  Once at least
+    one evidence row exists for an indicator/observation pair, every generic
+    ``DataPointVintage`` row for that pair is excluded; mixing the two chains
+    could otherwise leak the revised current value into the first vintage.
+    """
+
+    evidence = [_plain_row(row) for row in evidence_rows]
+    evidence_keys = {(row["indicator_code"], row["date"]) for row in evidence}
+    vintages = [
+        _plain_row(row)
+        for row in vintage_rows
+        if (
+            _row_value(row, "indicator_code"),
+            _row_value(row, "date"),
+        )
+        not in evidence_keys
+    ]
+    combined = [*vintages, *evidence]
+    combined.sort(
+        key=lambda row: (
+            row["indicator_code"],
+            row["date"],
+            row["available_at"] or datetime.max,
+            row["version"],
+            row["retrieved_at"] or datetime.min,
+            str(row["id"]),
+        )
+    )
+    return combined
 
 
 def _safe_vintage_groups(
     vintage_rows: Iterable[dict],
 ) -> tuple[
     dict[tuple[str, date], list[dict]],
-    set[int],
-    set[int],
+    set[object],
+    set[object],
     set[tuple[str, date]],
 ]:
     """Return rows grouped by observation and revisions safe for strict replay.
@@ -258,11 +320,29 @@ def _safe_vintage_groups(
         row = _plain_row(raw)
         grouped[(row["indicator_code"], row["date"])].append(row)
 
-    ambiguous_ids: set[int] = set()
-    unknown_revision_ids: set[int] = set()
+    ambiguous_ids: set[object] = set()
+    unknown_revision_ids: set[object] = set()
     non_reconstructable: set[tuple[str, date]] = set()
     for key, rows in grouped.items():
-        rows.sort(key=lambda item: (item["version"], item["retrieved_at"] or datetime.min, item["id"]))
+        if all(row["vintage_provenance"] == "release_evidence" for row in rows):
+            # Evidence versions are append order because older releases may be
+            # discovered later.  Publication time, not version, is chronology.
+            rows.sort(
+                key=lambda item: (
+                    item["available_at"],
+                    item["version"],
+                    item["retrieved_at"] or datetime.min,
+                    str(item["id"]),
+                )
+            )
+        else:
+            rows.sort(
+                key=lambda item: (
+                    item["version"],
+                    item["retrieved_at"] or datetime.min,
+                    str(item["id"]),
+                )
+            )
         greatest_prior_availability: datetime | None = None
         prior_semantics: tuple[float, str | None] | None = None
         for row in rows:
@@ -1397,7 +1477,8 @@ def _build_backtest_from_rows(
         "end_period": str(periods[-1]) if len(periods) else None,
         "methodology_note": (
             "每个观察月固定在次月20日18:00（北京时间）截取信息，只使用发布时间明确且当时已经发布的安全历史版本，"
-            "并把观察期锁在当月；当时判断与事后参考都复用同一套活动矩阵和阶段判断方法。"
+            "独立核验的官方发布证据优先于通用历史版本，并把观察期锁在当月；"
+            "当时判断与事后参考都复用同一套活动矩阵和阶段判断方法。"
         ),
         "summary": summary,
         "backtest_definition": {
@@ -1408,7 +1489,8 @@ def _build_backtest_from_rows(
             "observation_alignment": "decision_as_of=m+1月20日18:00 Asia/Shanghai; observation_end=m月末",
             "availability_policy": "available_at_required_and_not_after_decision_as_of",
             "vintage_selection": (
-                "latest safe vintage by available_at; a value/formula revision without a strictly later timestamp quarantines the whole observation"
+                "official release-evidence chain is authoritative per indicator/date and excludes generic vintages for that key; "
+                "latest safe release by available_at is selected; a value/formula revision without a strictly later timestamp quarantines the whole observation"
             ),
             "final_reference": "latest stored values with the same observation_end and identical model code; ex-post reference, not ground truth",
             "final_cutoff_at": final_cutoff_at.astimezone(UTC).isoformat(),
@@ -1486,10 +1568,11 @@ def build_china_cycle_backtest(
         raise ValueError(f"requested range must not exceed {MAX_BACKTEST_MONTHS} months")
     periods = pd.period_range(requested_start, requested_end, freq="M")
     observation_end = requested_end.end_time.date()
-    current_watermark, vintage_watermark = _backtest_data_watermark(
-        db,
-        observation_end=observation_end,
-    )
+    (
+        current_watermark,
+        vintage_watermark,
+        evidence_watermark,
+    ) = _backtest_data_watermark(db, observation_end=observation_end)
     cache_key = _BacktestCacheKey(
         start_period=str(requested_start),
         end_period=str(requested_end),
@@ -1499,6 +1582,7 @@ def build_china_cycle_backtest(
         model_codes=MODEL_CODES,
         current_values=current_watermark,
         vintages=vintage_watermark,
+        release_evidence=evidence_watermark,
     )
 
     def build() -> dict:
@@ -1518,10 +1602,24 @@ def build_china_cycle_backtest(
             .where(DataPoint.date <= observation_end)
             .order_by(DataPoint.indicator_code, DataPoint.date)
         )
+        evidence_query = (
+            select(ReleaseEvidence)
+            .where(ReleaseEvidence.indicator_code.in_(MODEL_CODES))
+            .where(ReleaseEvidence.date <= observation_end)
+            .order_by(
+                ReleaseEvidence.indicator_code,
+                ReleaseEvidence.date,
+                ReleaseEvidence.available_at,
+                ReleaseEvidence.version,
+                ReleaseEvidence.retrieved_at,
+                ReleaseEvidence.id,
+            )
+        )
         vintage_rows = list(db.scalars(vintage_query))
         final_rows = list(db.scalars(final_query))
+        evidence_rows = list(db.scalars(evidence_query))
         return _build_backtest_from_rows(
-            vintage_rows,
+            _authoritative_vintage_rows(vintage_rows, evidence_rows),
             final_rows,
             periods=periods,
             final_cutoff_at=now,

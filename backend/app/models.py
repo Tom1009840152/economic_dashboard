@@ -100,6 +100,51 @@ class DataPointVintage(Base):
     indicator: Mapped["Indicator"] = relationship(back_populates="data_point_vintages")
 
 
+class ReleaseEvidence(Base):
+    """Immutable official-release evidence, independent of the current snapshot.
+
+    Unlike ``DataPointVintage``, rows in this table may be discovered and stored
+    in any historical order.  ``version`` is therefore an append sequence for
+    one indicator/observation pair; chronology is carried by ``available_at``.
+    """
+
+    __tablename__ = "release_evidence"
+    __table_args__ = (
+        UniqueConstraint("evidence_key", name="uq_release_evidence_key"),
+        UniqueConstraint(
+            "indicator_code",
+            "date",
+            "version",
+            name="uq_release_evidence_observation_version",
+        ),
+        Index(
+            "ix_release_evidence_as_of_lookup",
+            "indicator_code",
+            "available_at",
+            "date",
+            "version",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    evidence_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    indicator_code: Mapped[str] = mapped_column(
+        ForeignKey("indicators.code"), nullable=False
+    )
+    date: Mapped[date] = mapped_column(Date, nullable=False)
+    value: Mapped[float] = mapped_column(Numeric(18, 6), nullable=False)
+    release_date: Mapped[date] = mapped_column(Date, nullable=False)
+    available_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    retrieved_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), nullable=False
+    )
+    source_url: Mapped[str] = mapped_column(String(512), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="published", nullable=False)
+    formula_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    provenance_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
 class RefreshRun(Base):
     """One manual, scheduled, or startup refresh attempt."""
 

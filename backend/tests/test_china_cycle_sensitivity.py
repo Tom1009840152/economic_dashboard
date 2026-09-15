@@ -221,8 +221,8 @@ class ChinaCycleSensitivityTests(unittest.TestCase):
         self.assertEqual(january["transitions"]["matched_count"], 0)
         self.assertEqual(january["transitions"]["events"], [])
 
-    def test_methodology_version_invalidates_cached_pre_sensitivity_results(self) -> None:
-        self.assertEqual(METHODOLOGY_VERSION, "1.1.0")
+    def test_methodology_version_includes_official_release_evidence(self) -> None:
+        self.assertEqual(METHODOLOGY_VERSION, "1.2.0")
 
 
 if __name__ == "__main__":
