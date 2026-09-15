@@ -221,8 +221,8 @@ class ChinaCycleSensitivityTests(unittest.TestCase):
         self.assertEqual(january["transitions"]["matched_count"], 0)
         self.assertEqual(january["transitions"]["events"], [])
 
-    def test_methodology_version_includes_official_release_evidence(self) -> None:
-        self.assertEqual(METHODOLOGY_VERSION, "1.2.0")
+    def test_methodology_version_includes_qualified_evidence_and_lag_readiness(self) -> None:
+        self.assertEqual(METHODOLOGY_VERSION, "1.3.1")
 
 
 if __name__ == "__main__":

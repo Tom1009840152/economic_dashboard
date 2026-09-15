@@ -24,7 +24,7 @@ from app.models import DataPoint
 from app.services.derived_metrics import DERIVED_METRIC_SPECS
 
 
-METHODOLOGY_VERSION = "1.0.0"
+METHODOLOGY_VERSION = "1.1.0"
 DEFAULT_OUTPUT_MONTHS = 120
 MAX_OUTPUT_MONTHS = 240
 ROLLING_WINDOW_MONTHS = 60
@@ -60,6 +60,7 @@ class CycleSignalSpec:
     operation: SignalOperation = "level"
     direction: int = 1
     calibration_start: str | None = None
+    observation_lag_months: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,13 +72,20 @@ class CycleBlockSpec:
     weight: float = 0.2
 
 
-def _direct(code: str, weight: float, *, direction: int = 1) -> CycleSignalSpec:
+def _direct(
+    code: str,
+    weight: float,
+    *,
+    direction: int = 1,
+    observation_lag_months: int = 0,
+) -> CycleSignalSpec:
     return CycleSignalSpec(
         key=code,
         name=code,
         input_codes=(code,),
         weight=weight,
         direction=direction,
+        observation_lag_months=observation_lag_months,
     )
 
 
@@ -122,7 +130,7 @@ CHINA_CYCLE_BLOCKS: tuple[CycleBlockSpec, ...] = (
                 operation="mean",
                 weight=0.20,
             ),
-            _direct("CN_CONSUMER_EXPECTATIONS", 0.15),
+            _direct("CN_CONSUMER_EXPECTATIONS", 0.15, observation_lag_months=1),
         ),
     ),
     CycleBlockSpec(
@@ -205,6 +213,13 @@ def _validate_block_specs(blocks: tuple[CycleBlockSpec, ...]) -> None:
             raise ValueError(f"signal weights in {block.key} must sum to one")
         if any(signal.direction not in {-1, 1} for signal in block.signals):
             raise ValueError("cycle signal direction must be +1 or -1")
+        if any(
+            not isinstance(signal.observation_lag_months, int)
+            or isinstance(signal.observation_lag_months, bool)
+            or signal.observation_lag_months < 0
+            for signal in block.signals
+        ):
+            raise ValueError("cycle signal observation lag must be a non-negative integer")
 
 
 _validate_block_specs(CHINA_CYCLE_BLOCKS)
@@ -223,6 +238,34 @@ def cycle_indicator_codes(
             for code in signal.input_codes
         )
     )
+
+
+def cycle_indicator_observation_lags(
+    blocks: tuple[CycleBlockSpec, ...] = CHINA_CYCLE_BLOCKS,
+) -> dict[str, int]:
+    """Return the unique model-alignment lag configured for each stored input.
+
+    Readiness diagnostics operate on stored input codes while the lag belongs
+    to the signal specification.  Reject conflicting reuse explicitly so a
+    future registry edit cannot make an input's decision cutoff depend on
+    iteration order.
+    """
+
+    result: dict[str, int] = {}
+    for block in blocks:
+        for signal in block.signals:
+            for code in signal.input_codes:
+                configured = result.get(code)
+                if (
+                    configured is not None
+                    and configured != signal.observation_lag_months
+                ):
+                    raise ValueError(
+                        f"cycle input {code} has conflicting observation lags: "
+                        f"{configured} and {signal.observation_lag_months}"
+                    )
+                result[code] = signal.observation_lag_months
+    return result
 
 
 def _one_sided_robust_zscore(
@@ -392,12 +435,31 @@ def _prepare_signal(
     frequency: str,
     direction: int,
     calendar: pd.PeriodIndex,
+    observation_lag_months: int = 0,
 ) -> PreparedSignal:
     minimum = QUARTERLY_MIN_HISTORY if frequency == "quarterly" else MONTHLY_MIN_HISTORY
     score = _one_sided_robust_zscore(observations, min_history=minimum) * direction
     source_period = pd.Series(
-        [str(period) for period in observations.index], index=observations.index, dtype=object
+        [str(period) for period in observations.index],
+        index=observations.index,
+        dtype="string",
     )
+    # Nullable extension dtypes preserve missing values without pandas' legacy
+    # object-array downcasting during quarterly forward fill.
+    realtime_known = realtime_known.astype("boolean")
+    if observation_lag_months:
+        # Some releases are not available by the model's next-month decision
+        # cutoff.  Move the observation to the first target month in which its
+        # configured release lag permits use, while retaining its true source
+        # month for audit.  Standardisation stays on the source chronology.
+        target_index = observations.index + observation_lag_months
+        score = score.copy()
+        score.index = score.index + observation_lag_months
+        observations = observations.copy()
+        observations.index = target_index
+        source_period.index = target_index
+        realtime_known = realtime_known.copy()
+        realtime_known.index = realtime_known.index + observation_lag_months
     aligned_score = score.reindex(calendar)
     aligned_raw = observations.reindex(calendar)
     aligned_source = source_period.reindex(calendar)
@@ -895,6 +957,7 @@ def _block_metadata(blocks: tuple[CycleBlockSpec, ...]) -> list[dict]:
                     "direction": "positive" if signal.direction > 0 else "negative",
                     "frequency": _signal_frequency(signal),
                     "calibration_start": signal.calibration_start,
+                    "observation_lag_months": signal.observation_lag_months,
                     "sources": list(
                         dict.fromkeys(catalog[code].source for code in signal.input_codes)
                     ),
@@ -929,6 +992,10 @@ def _methodology() -> dict:
         "quarterly_min_history": QUARTERLY_MIN_HISTORY,
         "zscore_clip": ZSCORE_CLIP,
         "quarterly_forward_fill_months": QUARTERLY_FORWARD_FILL_MONTHS,
+        "signal_observation_lag_policy": (
+            "configured_source_period_shift; score_on_source_chronology; "
+            "source_period_retained_for_audit"
+        ),
         "block_min_coverage": BLOCK_MIN_COVERAGE,
         "minimum_active_blocks": MIN_ACTIVE_BLOCKS,
         "overall_min_coverage": OVERALL_MIN_COVERAGE,
@@ -1038,6 +1105,7 @@ def _matrix_from_rows(
                 frequency=_signal_frequency(spec),
                 direction=spec.direction,
                 calendar=full_calendar,
+                observation_lag_months=spec.observation_lag_months,
             )
     validations: dict[str, PreparedSignal] = {}
     catalog = get_indicator_catalog()
@@ -1081,6 +1149,7 @@ def _matrix_from_rows(
         "当前结果使用最新/最终数据库快照，不是历史时点可见数据；伪实时结论必须等待A3使用vintage/as_of重算。",
         "指数100是各输入相对自身既往历史的中性值，不是PMI 50点荣枯线，也不是经济增速。",
         "季度指标在原频率标准化后仅向后延用2个月；缺失值不按0计入。",
+        "消费者预期指数按上一观察月使用：观察月评分后映射到下一个决策月，source_period保留原月份，避免把尚未发布的当月数据带入判断。",
         "房地产销售面积、新开工和投资采用年内累计同比；其月度变化含累计窗口机械平滑，不等同于单月增速或单月动能。",
         "CLI、GDP和国房景气仅作外部对照、不参与评分；CLI与国房景气存在成分重叠，不能冒充独立样本外验证，GDP才是更接近结果变量的主验证目标。",
     ]
@@ -1129,6 +1198,7 @@ def _matrix_from_rows(
         "methodology_version": METHODOLOGY_VERSION,
         "methodology_note": (
             "各信号只使用当期之前最多60个月历史，以中位数和MAD计算稳健z分数并截尾至±3。"
+            "对发布时间晚于常规决策截止日的消费者预期，固定使用上一观察月。"
             "五个板块固定等权20%；缺项时仅在板块覆盖达50%后动态归一。"
             "总指数至少需要4个有效板块且有效板块覆盖不低于65%；"
             "只有5个板块均有效且输入覆盖不低于85%时才标为高置信度。"

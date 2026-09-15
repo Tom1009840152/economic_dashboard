@@ -210,6 +210,7 @@ function IndicatorDetails({
                   <div className="font-medium">{meta.name}</div>
                   <div className="mt-0.5 text-[11px] text-muted-foreground">
                     {meta.sources.join(" / ")} · {meta.frequency} · {meta.direction === "positive" ? "正向" : "反向"}
+                    {meta.observation_lag_months > 0 ? ` · 固定滞后${meta.observation_lag_months}个月` : ""}
                   </div>
                 </div>
                 <Badge variant={status?.is_stale ? "outline" : "secondary"}>
@@ -251,6 +252,11 @@ function IndicatorDetails({
                 <td className="px-3 py-3 tabular-nums">
                   {point?.source_period ?? "--"}
                   {status?.is_stale && <span className="ml-1 text-amber-700 dark:text-amber-400">滞后</span>}
+                  {meta.observation_lag_months > 0 && (
+                    <span className="ml-1 text-muted-foreground" title="按发布时间约束，使用更早观察期，避免未来信息">
+                      固定-{meta.observation_lag_months}月
+                    </span>
+                  )}
                 </td>
                 <td className="px-3 py-3 text-right tabular-nums">
                   {point?.raw_value == null ? "--" : point.raw_value.toLocaleString()}
@@ -522,7 +528,7 @@ export function ChinaActivityMatrixDetail({ data }: { data: ActivityMatrixDashbo
       <section>
         <div className="mb-4">
           <h2 className="text-lg font-semibold">模型信号采用情况</h2>
-          <p className="mt-1 text-sm text-muted-foreground">展开板块可核对原始或组合值、采用期、方向、标准分和最终贡献；季度信号最多向后延用两个月。</p>
+          <p className="mt-1 text-sm text-muted-foreground">展开板块可核对原始或组合值、采用期、方向、标准分和最终贡献；季度信号最多向后延用两个月，发布时间较晚的信号会明确采用更早观察期。</p>
         </div>
         <div className="space-y-3">
           {data.blocks.map((block) => (

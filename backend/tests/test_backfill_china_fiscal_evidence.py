@@ -64,6 +64,9 @@ class BackfillChinaFiscalEvidenceTests(unittest.TestCase):
                     "status": "published",
                     "formula_version": None,
                     "provenance_json": '{"kind":"initial_release"}',
+                    "evidence_kind": "official_release",
+                    "chain_verified": True,
+                    "availability_precision": "exact_minute",
                 }
             ]
         )

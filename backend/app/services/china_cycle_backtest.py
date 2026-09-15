@@ -35,6 +35,7 @@ from app.services.china_business_cycle import (
     VALIDATION_CODES,
     _matrix_from_rows,
     cycle_indicator_codes,
+    cycle_indicator_observation_lags,
 )
 from app.services.china_cycle_regime import (
     FIXED_SURVEY_CORE_CODES,
@@ -44,7 +45,7 @@ from app.services.china_cycle_regime import (
 )
 
 
-METHODOLOGY_VERSION = "1.2.0"
+METHODOLOGY_VERSION = "1.3.1"
 DEFAULT_BACKTEST_MONTHS = 120
 MAX_BACKTEST_MONTHS = 120
 MIN_RATE_SAMPLE = 24
@@ -54,11 +55,18 @@ DECISION_HOUR = 18
 DECISION_TIMEZONE = "Asia/Shanghai"
 INFLATION_CODES = ("CN_CORE_CPI", "CN_PPI")
 CYCLE_CODES = cycle_indicator_codes()
+CYCLE_INPUT_OBSERVATION_LAGS = cycle_indicator_observation_lags()
 MODEL_CODES = tuple(dict.fromkeys((*CYCLE_CODES, *VALIDATION_CODES, *INFLATION_CODES)))
 REQUIRED_CODES = tuple(dict.fromkeys((*CYCLE_CODES, *INFLATION_CODES)))
 _DEFINITIONS = {row["code"]: row for row in INDICATOR_DEFS}
 _BACKTEST_CACHE_MAX_SIZE = 8
 _BACKTEST_CACHE_TTL_SECONDS = 15 * 60
+AUTHORITATIVE_EVIDENCE_KINDS = frozenset(
+    {"official_release", "official_distribution_mirror"}
+)
+AUTHORITATIVE_AVAILABILITY_PRECISIONS = frozenset(
+    {"exact_minute", "date_upper_bound"}
+)
 
 
 @dataclass(frozen=True)
@@ -112,8 +120,14 @@ def _clear_backtest_cache() -> None:
         _backtest_cache.clear()
 
 
-def _table_watermark(db: Session, model, *, observation_end: date) -> _InputWatermark:
-    row = db.execute(
+def _table_watermark(
+    db: Session,
+    model,
+    *,
+    observation_end: date,
+    extra_filters: tuple = (),
+) -> _InputWatermark:
+    query = (
         select(
             func.count(model.id),
             func.max(model.id),
@@ -122,7 +136,10 @@ def _table_watermark(db: Session, model, *, observation_end: date) -> _InputWate
         )
         .where(model.indicator_code.in_(MODEL_CODES))
         .where(model.date <= observation_end)
-    ).one()
+    )
+    for predicate in extra_filters:
+        query = query.where(predicate)
+    row = db.execute(query).one()
     return _InputWatermark(
         row_count=int(row[0] or 0),
         max_id=int(row[1] or 0),
@@ -150,6 +167,13 @@ def _backtest_data_watermark(
                 watermark_db,
                 ReleaseEvidence,
                 observation_end=observation_end,
+                extra_filters=(
+                    ReleaseEvidence.chain_verified.is_(True),
+                    ReleaseEvidence.evidence_kind.in_(AUTHORITATIVE_EVIDENCE_KINDS),
+                    ReleaseEvidence.availability_precision.in_(
+                        AUTHORITATIVE_AVAILABILITY_PRECISIONS
+                    ),
+                ),
             ),
         )
 
@@ -257,23 +281,48 @@ def _plain_row(row) -> dict:
         "version": int(_row_value(row, "version", 1)),
         "source_url": _row_value(row, "source_url"),
         "provenance_json": _row_value(row, "provenance_json"),
+        "evidence_kind": _row_value(row, "evidence_kind"),
+        "chain_verified": _row_value(row, "chain_verified"),
+        "availability_precision": _row_value(row, "availability_precision"),
         "vintage_provenance": provenance,
     }
+
+
+def _is_authoritative_release_evidence(row) -> bool:
+    """Return whether a row is qualified to replace the generic vintage chain.
+
+    Keep this guard in the pure combination function as well as the database
+    query.  Tests, maintenance callers, and cached/preloaded rows can bypass
+    the ORM query and must not gain precedence merely by calling themselves
+    release evidence.
+    """
+
+    return bool(
+        _row_value(row, "chain_verified") is True
+        and _row_value(row, "evidence_kind") in AUTHORITATIVE_EVIDENCE_KINDS
+        and _row_value(row, "availability_precision")
+        in AUTHORITATIVE_AVAILABILITY_PRECISIONS
+    )
 
 
 def _authoritative_vintage_rows(
     vintage_rows: Iterable,
     evidence_rows: Iterable,
 ) -> list[dict]:
-    """Combine replay inputs with official release evidence taking precedence.
+    """Combine replay inputs with qualified release evidence taking precedence.
 
-    Evidence is an independently verified publication chain.  Once at least
-    one evidence row exists for an indicator/observation pair, every generic
+    Only independently verified evidence with a supported source class and
+    availability precision may shadow the generic chain.  Once at least one
+    qualified row exists for an indicator/observation pair, every generic
     ``DataPointVintage`` row for that pair is excluded; mixing the two chains
     could otherwise leak the revised current value into the first vintage.
     """
 
-    evidence = [_plain_row(row) for row in evidence_rows]
+    evidence = [
+        _plain_row(row)
+        for row in evidence_rows
+        if _is_authoritative_release_evidence(row)
+    ]
     evidence_keys = {(row["indicator_code"], row["date"]) for row in evidence}
     vintages = [
         _plain_row(row)
@@ -494,6 +543,7 @@ def _input_readiness(vintage_rows: list[dict], final_rows: list[dict]) -> list[d
 
     result = []
     for code in REQUIRED_CODES:
+        observation_lag_months = CYCLE_INPUT_OBSERVATION_LAGS.get(code, 0)
         known_dates: set[date] = set()
         on_schedule_dates: set[date] = set()
         unknown_dates: set[date] = set()
@@ -512,9 +562,11 @@ def _input_readiness(vintage_rows: list[dict], final_rows: list[dict]) -> list[d
                 non_reconstructable_dates.add(observation_date)
             elif safe_known:
                 known_dates.add(observation_date)
-                decision_cutoff, _ = _decision_as_of(
+                model_period = (
                     pd.Period(observation_date, freq="M")
+                    + observation_lag_months
                 )
+                decision_cutoff, _ = _decision_as_of(model_period)
                 if any(
                     row["available_at"] is not None
                     and row["available_at"] <= decision_cutoff
@@ -535,6 +587,7 @@ def _input_readiness(vintage_rows: list[dict], final_rows: list[dict]) -> list[d
                 "code": code,
                 "name": _DEFINITIONS.get(code, {}).get("name", code),
                 "role": _model_role(code),
+                "observation_lag_months": observation_lag_months,
                 "final_observations": final_count,
                 "known_available_at_observations": known_count,
                 "on_schedule_observations": len(on_schedule_dates),
@@ -1477,7 +1530,7 @@ def _build_backtest_from_rows(
         "end_period": str(periods[-1]) if len(periods) else None,
         "methodology_note": (
             "每个观察月固定在次月20日18:00（北京时间）截取信息，只使用发布时间明确且当时已经发布的安全历史版本，"
-            "独立核验的官方发布证据优先于通用历史版本，并把观察期锁在当月；"
+            "仅有证据链已核验且证据类型、时间精度受支持的发布证据优先于通用历史版本，并把观察期锁在当月；"
             "当时判断与事后参考都复用同一套活动矩阵和阶段判断方法。"
         ),
         "summary": summary,
@@ -1489,7 +1542,7 @@ def _build_backtest_from_rows(
             "observation_alignment": "decision_as_of=m+1月20日18:00 Asia/Shanghai; observation_end=m月末",
             "availability_policy": "available_at_required_and_not_after_decision_as_of",
             "vintage_selection": (
-                "official release-evidence chain is authoritative per indicator/date and excludes generic vintages for that key; "
+                "only chain-verified release evidence with a supported evidence kind and availability precision is authoritative per indicator/date and excludes generic vintages for that key; "
                 "latest safe release by available_at is selected; a value/formula revision without a strictly later timestamp quarantines the whole observation"
             ),
             "final_reference": "latest stored values with the same observation_end and identical model code; ex-post reference, not ground truth",
@@ -1606,6 +1659,15 @@ def build_china_cycle_backtest(
             select(ReleaseEvidence)
             .where(ReleaseEvidence.indicator_code.in_(MODEL_CODES))
             .where(ReleaseEvidence.date <= observation_end)
+            .where(ReleaseEvidence.chain_verified.is_(True))
+            .where(
+                ReleaseEvidence.evidence_kind.in_(AUTHORITATIVE_EVIDENCE_KINDS)
+            )
+            .where(
+                ReleaseEvidence.availability_precision.in_(
+                    AUTHORITATIVE_AVAILABILITY_PRECISIONS
+                )
+            )
             .order_by(
                 ReleaseEvidence.indicator_code,
                 ReleaseEvidence.date,

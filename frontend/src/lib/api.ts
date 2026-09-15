@@ -260,6 +260,8 @@ export interface ActivityMatrixSignalMeta {
   operation: ActivityMatrixSignalOperation;
   direction: "positive" | "negative";
   frequency: string;
+  calibration_start: string | null;
+  observation_lag_months: number;
   sources: string[];
 }
 
@@ -370,6 +372,7 @@ export interface ActivityMatrixMethodology {
   quarterly_min_history: number;
   zscore_clip: number;
   quarterly_forward_fill_months: number;
+  signal_observation_lag_policy: string;
   block_min_coverage: number;
   minimum_active_blocks: number;
   overall_min_coverage: number;
@@ -688,6 +691,7 @@ export interface BusinessCycleBacktestInputReadiness {
   code: string;
   name: string;
   role: string;
+  observation_lag_months: number;
   final_observations: number;
   known_available_at_observations: number;
   on_schedule_observations: number;

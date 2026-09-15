@@ -11,6 +11,7 @@ from app.services.china_cycle_backtest import (
     _authoritative_vintage_rows,
     _build_backtest_from_rows,
     _decision_as_of,
+    _input_readiness,
     _latest_completed_period,
     _regime_for_rows,
     _select_strict_vintages,
@@ -81,13 +82,14 @@ class ChinaCycleBacktestTests(unittest.TestCase):
         self.assertEqual([(row["value"], row["version"]) for row in february], [(100, 1)])
         self.assertEqual([(row["value"], row["version"]) for row in march], [(101, 2)])
 
-    def test_release_evidence_replaces_generic_vintages_for_the_same_key(self) -> None:
+    def test_verified_official_fiscal_evidence_replaces_generic_vintage(self) -> None:
         observation_date = date(2025, 1, 31)
         revised_current_vintage = self.vintage(
             row_id=1,
             observation_date=observation_date,
             value=999,
             available_at=datetime(2025, 2, 1, 9),
+            code="CN_GOV_BOND_FINANCING",
         )
         initial_release_evidence = {
             **self.vintage(
@@ -95,10 +97,14 @@ class ChinaCycleBacktestTests(unittest.TestCase):
                 observation_date=observation_date,
                 value=100,
                 available_at=datetime(2025, 2, 1, 9),
+                code="CN_GOV_BOND_FINANCING",
             ),
             "vintage_provenance": "release_evidence",
             "source_url": "https://www.stats.gov.cn/official-release.html",
             "provenance_json": '{"kind":"official_release"}',
+            "evidence_kind": "official_release",
+            "chain_verified": True,
+            "availability_precision": "exact_minute",
         }
 
         authoritative = _authoritative_vintage_rows(
@@ -118,6 +124,90 @@ class ChinaCycleBacktestTests(unittest.TestCase):
             selected[0]["source_url"],
             "https://www.stats.gov.cn/official-release.html",
         )
+        self.assertEqual(selected[0]["evidence_kind"], "official_release")
+        self.assertTrue(selected[0]["chain_verified"])
+        self.assertEqual(selected[0]["availability_precision"], "exact_minute")
+
+    def test_unverified_release_evidence_cannot_shadow_generic_vintage(self) -> None:
+        observation_date = date(2025, 1, 31)
+        generic = self.vintage(
+            row_id=1,
+            observation_date=observation_date,
+            value=100,
+            available_at=datetime(2025, 2, 1, 9),
+        )
+        disqualified_variants = (
+            {
+                "evidence_kind": "official_distribution_mirror",
+                "chain_verified": False,
+                "availability_precision": "date_upper_bound",
+            },
+            {
+                "evidence_kind": "unclassified",
+                "chain_verified": True,
+                "availability_precision": "date_upper_bound",
+            },
+            {
+                "evidence_kind": "official_release",
+                "chain_verified": True,
+                "availability_precision": "unknown",
+            },
+        )
+
+        for row_id, qualification in enumerate(disqualified_variants, start=7):
+            with self.subTest(qualification=qualification):
+                disqualified = {
+                    **self.vintage(
+                        row_id=row_id,
+                        observation_date=observation_date,
+                        value=999,
+                        available_at=datetime(2025, 2, 1, 9),
+                    ),
+                    "vintage_provenance": "release_evidence",
+                    **qualification,
+                }
+                authoritative = _authoritative_vintage_rows(
+                    [generic], [disqualified]
+                )
+
+                self.assertEqual(len(authoritative), 1)
+                self.assertEqual(authoritative[0]["value"], 100)
+                self.assertEqual(
+                    authoritative[0]["vintage_provenance"],
+                    "data_point_vintage",
+                )
+
+    def test_verified_distribution_mirror_can_shadow_generic_vintage(self) -> None:
+        observation_date = date(2025, 1, 31)
+        generic = self.vintage(
+            row_id=1,
+            observation_date=observation_date,
+            value=100,
+            available_at=datetime(2025, 2, 1, 9),
+        )
+        mirror = {
+            **self.vintage(
+                row_id=7,
+                observation_date=observation_date,
+                value=90.4,
+                available_at=datetime(2025, 2, 2),
+            ),
+            "vintage_provenance": "release_evidence",
+            "evidence_kind": "official_distribution_mirror",
+            "chain_verified": True,
+            "availability_precision": "date_upper_bound",
+        }
+
+        authoritative = _authoritative_vintage_rows([generic], [mirror])
+
+        self.assertEqual(len(authoritative), 1)
+        self.assertEqual(authoritative[0]["value"], 90.4)
+        self.assertEqual(
+            authoritative[0]["evidence_kind"], "official_distribution_mirror"
+        )
+        self.assertEqual(
+            authoritative[0]["availability_precision"], "date_upper_bound"
+        )
 
     def test_release_evidence_chronology_uses_availability_not_append_version(self) -> None:
         observation_date = date(2025, 1, 31)
@@ -133,6 +223,9 @@ class ChinaCycleBacktestTests(unittest.TestCase):
                     version=1,
                 ),
                 "vintage_provenance": "release_evidence",
+                "evidence_kind": "official_release",
+                "chain_verified": True,
+                "availability_precision": "exact_minute",
             },
             {
                 **self.vintage(
@@ -143,6 +236,9 @@ class ChinaCycleBacktestTests(unittest.TestCase):
                     version=2,
                 ),
                 "vintage_provenance": "release_evidence",
+                "evidence_kind": "official_release",
+                "chain_verified": True,
+                "availability_precision": "exact_minute",
             },
         ]
         authoritative = _authoritative_vintage_rows([], evidence)
@@ -399,6 +495,41 @@ class ChinaCycleBacktestTests(unittest.TestCase):
 
         self.assertEqual(str(_latest_completed_period(before)), "2026-07")
         self.assertEqual(str(_latest_completed_period(at_cutoff)), "2026-08")
+
+    def test_input_readiness_uses_each_inputs_model_target_month(self) -> None:
+        observation_date = date(2025, 1, 31)
+        published_after_source_cutoff = datetime(2025, 3, 1, 9)
+        consumer = self.vintage(
+            row_id=1,
+            observation_date=observation_date,
+            value=100,
+            available_at=published_after_source_cutoff,
+            code="CN_CONSUMER_EXPECTATIONS",
+        )
+        ordinary = self.vintage(
+            row_id=2,
+            observation_date=observation_date,
+            value=50,
+            available_at=published_after_source_cutoff,
+            code="CN_NMI",
+        )
+
+        readiness = {
+            item["code"]: item
+            for item in _input_readiness(
+                [consumer, ordinary],
+                [consumer, ordinary],
+            )
+        }
+
+        self.assertEqual(
+            readiness["CN_CONSUMER_EXPECTATIONS"]["observation_lag_months"], 1
+        )
+        self.assertEqual(
+            readiness["CN_CONSUMER_EXPECTATIONS"]["on_schedule_observations"], 1
+        )
+        self.assertEqual(readiness["CN_NMI"]["observation_lag_months"], 0)
+        self.assertEqual(readiness["CN_NMI"]["on_schedule_observations"], 0)
 
     def test_accuracy_rate_is_suppressed_below_24_comparable_months(self) -> None:
         def row(index: int) -> dict:

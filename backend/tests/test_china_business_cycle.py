@@ -10,6 +10,7 @@ from app.schemas import ChinaBusinessCycleMatrixOut
 from app.services.china_business_cycle import (
     CHINA_CYCLE_BLOCKS,
     FORMULA_VERSIONED_CYCLE_INPUTS,
+    METHODOLOGY_VERSION,
     VALIDATION_CODES,
     PreparedSignal,
     _annotate_comparability,
@@ -267,6 +268,101 @@ class ChinaBusinessCycleTests(unittest.TestCase):
         with_future = _one_sided_robust_zscore(extended, min_history=24)
 
         pd.testing.assert_series_equal(original, with_future.reindex(original.index))
+
+    def test_consumer_expectations_uses_previous_observation_month(self) -> None:
+        spec = next(
+            signal
+            for block in CHINA_CYCLE_BLOCKS
+            for signal in block.signals
+            if signal.key == "CN_CONSUMER_EXPECTATIONS"
+        )
+        periods = pd.period_range("2022-01", periods=30, freq="M")
+        observations = pd.Series(
+            [float(index + (index % 4) * 0.25) for index in range(len(periods))],
+            index=periods,
+        )
+        known = pd.Series(True, index=periods)
+        known.iloc[-1] = False
+        calendar = pd.period_range(periods.min(), periods.max() + 1, freq="M")
+
+        prepared = _prepare_signal(
+            observations,
+            known,
+            frequency="monthly",
+            direction=1,
+            calendar=calendar,
+            observation_lag_months=spec.observation_lag_months,
+        )
+        target = periods[-1] + 1
+        expected_score = _one_sided_robust_zscore(
+            observations, min_history=24
+        ).iloc[-1]
+
+        self.assertEqual(spec.observation_lag_months, 1)
+        self.assertEqual(prepared.raw.loc[target], observations.iloc[-1])
+        self.assertEqual(prepared.source_period.loc[target], str(periods[-1]))
+        self.assertEqual(prepared.score.loc[target], expected_score)
+        self.assertFalse(bool(prepared.realtime_known.loc[target]))
+        self.assertTrue(pd.isna(prepared.raw.loc[periods.min()]))
+
+    def test_consumer_lag_does_not_expand_requested_matrix_end(self) -> None:
+        rows = self._complete_rows("2018-01", 72)
+        payload = _matrix_from_rows(rows, end=date(2023, 12, 1), months=3)
+        validated = ChinaBusinessCycleMatrixOut.model_validate(payload)
+        consumer_meta = next(
+            signal
+            for block in validated.blocks
+            for signal in block.signals
+            if signal.code == "CN_CONSUMER_EXPECTATIONS"
+        )
+        consumer_latest = next(
+            item
+            for item in validated.latest.input_latest_periods
+            if item.code == "CN_CONSUMER_EXPECTATIONS"
+        )
+
+        self.assertEqual(METHODOLOGY_VERSION, "1.1.0")
+        self.assertEqual(validated.methodology_version, "1.1.0")
+        self.assertEqual(validated.months[-1].period, "2023-12")
+        self.assertEqual(consumer_meta.observation_lag_months, 1)
+        self.assertEqual(consumer_latest.used_observation, "2023-11")
+        self.assertEqual(consumer_latest.lag_months, 1)
+
+    def test_prior_month_consumer_release_adds_five_points_of_leading_coverage(self) -> None:
+        period = pd.Period("2025-06", freq="M")
+        prepared = {
+            signal.key: self._prepared(period, None)
+            for block in CHINA_CYCLE_BLOCKS
+            for signal in block.signals
+        }
+        demand = next(
+            block for block in CHINA_CYCLE_BLOCKS if block.key == "demand_expectations"
+        )
+        property_fiscal = next(
+            block for block in CHINA_CYCLE_BLOCKS if block.key == "property_fiscal"
+        )
+        for signal in (*demand.signals[:-1], *property_fiscal.signals):
+            prepared[signal.key] = self._prepared(period, 1.0)
+        validations = {
+            code: self._prepared(period, 0.0) for code in VALIDATION_CODES
+        }
+
+        without_consumer = _compose_month(
+            period,
+            blocks=CHINA_CYCLE_BLOCKS,
+            prepared=prepared,
+            validations=validations,
+        )
+        prepared["CN_CONSUMER_EXPECTATIONS"] = self._prepared(period, 1.0)
+        with_consumer = _compose_month(
+            period,
+            blocks=CHINA_CYCLE_BLOCKS,
+            prepared=prepared,
+            validations=validations,
+        )
+
+        self.assertEqual(without_consumer["leading_coverage"], 0.6167)
+        self.assertEqual(with_consumer["leading_coverage"], 0.6667)
 
     def test_future_validation_observation_does_not_extend_matrix_calendar(self) -> None:
         rows = self._complete_rows("2018-01", 72)

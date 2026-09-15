@@ -59,6 +59,9 @@ class ReleaseEvidenceTests(unittest.TestCase):
         status: str = "published",
         source_url: str = "https://www.stats.gov.cn/sj/zxfb/release.html",
         provenance=None,
+        evidence_kind: str = "official_release",
+        chain_verified: bool = True,
+        availability_precision: str = "exact_minute",
     ) -> dict:
         return {
             "date": dt.date(2024, 6, 1),
@@ -69,6 +72,9 @@ class ReleaseEvidenceTests(unittest.TestCase):
             "status": status,
             "formula_version": formula_version,
             "provenance_json": provenance,
+            "evidence_kind": evidence_kind,
+            "chain_verified": chain_verified,
+            "availability_precision": availability_precision,
         }
 
     def _evidence(self) -> list[ReleaseEvidence]:
@@ -116,6 +122,9 @@ class ReleaseEvidenceTests(unittest.TestCase):
         self.assertEqual(evidence.available_at, dt.datetime(2024, 7, 16, 10, 0))
         self.assertEqual(evidence.status, "derived")
         self.assertEqual(evidence.formula_version, "nbs_nominal_gdp_v1")
+        self.assertEqual(evidence.evidence_kind, "official_release")
+        self.assertTrue(evidence.chain_verified)
+        self.assertEqual(evidence.availability_precision, "exact_minute")
         self.assertEqual(json.loads(evidence.provenance_json), provenance)
         self.assertEqual(len(evidence.evidence_key), 64)
         self.assertEqual(evidence.version, 1)
@@ -243,8 +252,55 @@ class ReleaseEvidenceTests(unittest.TestCase):
             [self._row(available_at=dt.datetime(2024, 7, 16, 10, 0))]
         )
         wrong_release_date.loc[0, "release_date"] = dt.date(2024, 7, 15)
-        with self.assertRaisesRegex(ValueError, "release_date must equal"):
+        with self.assertRaisesRegex(ValueError, "release_date to equal"):
             upsert_release_evidence(self.db, self.CODE, wrong_release_date)
+
+    def test_date_upper_bound_requires_next_day_midnight(self) -> None:
+        release_date = dt.date(2024, 7, 16)
+        valid = self._row(
+            available_at=dt.datetime(2024, 7, 17),
+            evidence_kind="official_distribution_mirror",
+            availability_precision="date_upper_bound",
+        )
+        valid["release_date"] = release_date
+        self.assertEqual(
+            upsert_release_evidence(self.db, self.CODE, pd.DataFrame([valid])), 1
+        )
+
+        for invalid_at in (
+            dt.datetime(2024, 7, 16),
+            dt.datetime(2024, 7, 16, 23, 59, 59),
+            dt.datetime(2024, 7, 17, 0, 0, 1),
+        ):
+            with self.subTest(invalid_at=invalid_at):
+                invalid = dict(valid, available_at=invalid_at)
+                with self.assertRaisesRegex(ValueError, "date_upper_bound"):
+                    upsert_release_evidence(
+                        self.db, self.CODE, pd.DataFrame([invalid])
+                    )
+
+    def test_classification_and_verification_fields_must_be_explicit(self) -> None:
+        complete = pd.DataFrame(
+            [self._row(available_at=dt.datetime(2024, 7, 16, 10))]
+        )
+        for column in (
+            "evidence_kind",
+            "chain_verified",
+            "availability_precision",
+        ):
+            with self.subTest(column=column):
+                with self.assertRaisesRegex(ValueError, "missing columns"):
+                    upsert_release_evidence(
+                        self.db, self.CODE, complete.drop(columns=[column])
+                    )
+
+        invalid_boolean = complete.copy()
+        invalid_boolean["chain_verified"] = invalid_boolean[
+            "chain_verified"
+        ].astype(object)
+        invalid_boolean.loc[0, "chain_verified"] = "true"
+        with self.assertRaisesRegex(ValueError, "explicit boolean"):
+            upsert_release_evidence(self.db, self.CODE, invalid_boolean)
 
     def test_timezone_aware_timestamp_is_rejected_until_utc_contract_exists(self) -> None:
         aware = dt.datetime(

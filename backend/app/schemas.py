@@ -274,6 +274,7 @@ class CycleMethodologyOut(BaseModel):
     quarterly_min_history: int
     zscore_clip: float
     quarterly_forward_fill_months: int
+    signal_observation_lag_policy: str
     block_min_coverage: float
     minimum_active_blocks: int
     overall_min_coverage: float
@@ -295,6 +296,7 @@ class CycleSignalDefinitionOut(BaseModel):
     direction: Literal["positive", "negative"]
     frequency: str
     calibration_start: str | None = None
+    observation_lag_months: int = 0
     sources: list[str]
 
 
@@ -786,6 +788,7 @@ class CycleBacktestInputReadinessOut(BaseModel):
     code: str
     name: str
     role: str
+    observation_lag_months: int = 0
     final_observations: int
     known_available_at_observations: int
     on_schedule_observations: int

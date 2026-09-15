@@ -181,6 +181,9 @@ class ChinaCycleBacktestCacheTests(unittest.TestCase):
                     retrieved_at=datetime(2026, 1, 2, 12),
                     source_url="https://www.stats.gov.cn/official-release.html",
                     status="published",
+                    evidence_kind="official_release",
+                    chain_verified=True,
+                    availability_precision="exact_minute",
                     version=1,
                 )
             )
@@ -191,6 +194,60 @@ class ChinaCycleBacktestCacheTests(unittest.TestCase):
         self.assertEqual(observed_provenance[0], ["data_point_vintage"])
         self.assertEqual(observed_provenance[1], ["release_evidence"])
         self.assertEqual(observed_values[1], ([49.0], [50.0]))
+
+    def test_unverified_evidence_neither_invalidates_nor_enters_replay(self) -> None:
+        observed_provenance: list[list[str]] = []
+
+        def fake_build(vintages, _finals, *, periods, final_cutoff_at):
+            observed_provenance.append(
+                [row["vintage_provenance"] for row in vintages]
+            )
+            return self._fake_payload(len(vintages), final_cutoff_at)
+
+        request = {
+            "start": date(2025, 1, 1),
+            "end": date(2025, 1, 31),
+            "months": 1,
+            "now": datetime(2026, 1, 1, tzinfo=UTC),
+        }
+        with patch(
+            "app.services.china_cycle_backtest._build_backtest_from_rows",
+            side_effect=fake_build,
+        ) as builder:
+            build_china_cycle_backtest(self.db, **request)
+            self.db.add(
+                ReleaseEvidence(
+                    evidence_key="b" * 64,
+                    indicator_code="CN_NMI",
+                    date=date(2025, 1, 31),
+                    value=49,
+                    release_date=date(2025, 2, 1),
+                    available_at=datetime(2025, 2, 1, 9),
+                    retrieved_at=datetime(2026, 1, 2, 12),
+                    source_url="https://example.invalid/unverified",
+                    status="published",
+                    evidence_kind="official_release",
+                    chain_verified=False,
+                    availability_precision="exact_minute",
+                    version=1,
+                )
+            )
+            self.db.commit()
+
+            # Disqualified evidence is outside the cache watermark, so it does
+            # not trigger a pointless rebuild.
+            build_china_cycle_backtest(self.db, **request)
+            self.assertEqual(builder.call_count, 1)
+
+            # A cold rebuild also filters it at the query boundary.
+            _clear_backtest_cache()
+            build_china_cycle_backtest(self.db, **request)
+
+        self.assertEqual(builder.call_count, 2)
+        self.assertEqual(
+            observed_provenance,
+            [["data_point_vintage"], ["data_point_vintage"]],
+        )
 
     def test_resolved_range_is_reused_and_method_versions_invalidate(self) -> None:
         watermark = _InputWatermark(1, 1, 1, datetime(2025, 2, 1, 10))
@@ -221,8 +278,13 @@ class ChinaCycleBacktestCacheTests(unittest.TestCase):
                 "test-new-a1-version",
             ):
                 build_china_cycle_backtest(fake_db, months=2, **base)
+            with patch(
+                "app.services.china_cycle_backtest.METHODOLOGY_VERSION",
+                "test-new-a3-version",
+            ):
+                build_china_cycle_backtest(fake_db, months=2, **base)
 
-        self.assertEqual(builder.call_count, 2)
+        self.assertEqual(builder.call_count, 3)
 
     def test_expired_entry_is_rebuilt(self) -> None:
         watermark = _InputWatermark(1, 1, 1, datetime(2025, 2, 1, 10))

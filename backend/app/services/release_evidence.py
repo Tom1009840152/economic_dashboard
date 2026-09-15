@@ -19,8 +19,25 @@ from app.models import Indicator, ReleaseEvidence
 
 _VALUE_QUANTUM = Decimal("0.000001")
 _REQUIRED_COLUMNS = frozenset(
-    {"date", "value", "release_date", "available_at", "source_url", "status"}
+    {
+        "date",
+        "value",
+        "release_date",
+        "available_at",
+        "source_url",
+        "status",
+        "evidence_kind",
+        "chain_verified",
+        "availability_precision",
+    }
 )
+EVIDENCE_KINDS = frozenset(
+    {
+        "official_release",
+        "official_distribution_mirror",
+    }
+)
+AVAILABILITY_PRECISIONS = frozenset({"exact_minute", "date_upper_bound"})
 
 
 class ReleaseEvidenceConflictError(ValueError):
@@ -38,6 +55,9 @@ class _EvidenceCandidate:
     status: str
     formula_version: str | None
     provenance_json: str | None
+    evidence_kind: str
+    chain_verified: bool
+    availability_precision: str
 
 
 def _is_missing(value: object) -> bool:
@@ -166,6 +186,16 @@ def _normalized_provenance(value: object) -> str | None:
         raise ValueError("release evidence provenance_json must contain valid JSON") from exc
 
 
+def _normalized_chain_verified(value: object) -> bool:
+    # Do not accept truthy strings/integers: verification is a deliberate
+    # assertion by the source-specific collector, not a storage default.
+    if isinstance(value, bool):
+        return value
+    if type(value).__module__ == "numpy" and type(value).__name__ == "bool_":
+        return bool(value)
+    raise ValueError("release evidence chain_verified must be an explicit boolean")
+
+
 def _semantic_key(
     code: str,
     observed: date,
@@ -210,10 +240,39 @@ def _candidate(code: str, row, columns: set[str]) -> _EvidenceCandidate:
     )
     assert release_date is not None
     available_at = _normalized_available_at(getattr(row, "available_at"))
-    if release_date != available_at.date():
+    evidence_kind = _normalized_text(
+        getattr(row, "evidence_kind"), "evidence_kind", limit=32
+    )
+    assert evidence_kind is not None
+    if evidence_kind not in EVIDENCE_KINDS:
+        raise ValueError(f"unsupported release evidence kind: {evidence_kind!r}")
+    chain_verified = _normalized_chain_verified(getattr(row, "chain_verified"))
+    availability_precision = _normalized_text(
+        getattr(row, "availability_precision"),
+        "availability_precision",
+        limit=32,
+    )
+    assert availability_precision is not None
+    if availability_precision not in AVAILABILITY_PRECISIONS:
         raise ValueError(
-            "release evidence release_date must equal the available_at calendar date"
+            "unsupported release evidence availability_precision: "
+            f"{availability_precision!r}"
         )
+    if availability_precision == "exact_minute":
+        if release_date != available_at.date():
+            raise ValueError(
+                "exact_minute release evidence requires release_date to equal "
+                "the available_at calendar date"
+            )
+    else:
+        conservative_upper_bound = datetime.combine(
+            release_date + pd.Timedelta(days=1), datetime.min.time()
+        )
+        if available_at != conservative_upper_bound:
+            raise ValueError(
+                "date_upper_bound release evidence requires available_at to equal "
+                "release_date + 1 day at 00:00"
+            )
     source_url = _normalized_source_url(getattr(row, "source_url"))
     status = _normalized_text(getattr(row, "status"), "status", limit=32)
     assert status is not None
@@ -238,6 +297,9 @@ def _candidate(code: str, row, columns: set[str]) -> _EvidenceCandidate:
         status=status,
         formula_version=formula_version,
         provenance_json=provenance_json,
+        evidence_kind=evidence_kind,
+        chain_verified=chain_verified,
+        availability_precision=availability_precision,
     )
 
 
@@ -245,14 +307,23 @@ def _conflicts(
     left_value: Decimal,
     left_formula: str | None,
     left_status: str,
+    left_kind: str,
+    left_verified: bool,
+    left_precision: str,
     right_value: Decimal,
     right_formula: str | None,
     right_status: str,
+    right_kind: str,
+    right_verified: bool,
+    right_precision: str,
 ) -> bool:
     return (
         left_value != right_value
         or left_formula != right_formula
         or left_status != right_status
+        or left_kind != right_kind
+        or left_verified != right_verified
+        or left_precision != right_precision
     )
 
 
@@ -287,7 +358,7 @@ def upsert_release_evidence(
 
     candidates_by_key: dict[str, _EvidenceCandidate] = {}
     incoming_instants: dict[
-        tuple[date, datetime], tuple[Decimal, str | None, str]
+        tuple[date, datetime], tuple[Decimal, str | None, str, str, bool, str]
     ] = {}
     for row in df.itertuples(index=False):
         candidate = _candidate(normalized_code, row, columns)
@@ -297,9 +368,15 @@ def upsert_release_evidence(
             prior[0],
             prior[1],
             prior[2],
+            prior[3],
+            prior[4],
+            prior[5],
             candidate.value,
             candidate.formula_version,
             candidate.status,
+            candidate.evidence_kind,
+            candidate.chain_verified,
+            candidate.availability_precision,
         ):
             raise ReleaseEvidenceConflictError(
                 f"conflicting release evidence for {normalized_code} "
@@ -309,6 +386,9 @@ def upsert_release_evidence(
             candidate.value,
             candidate.formula_version,
             candidate.status,
+            candidate.evidence_kind,
+            candidate.chain_verified,
+            candidate.availability_precision,
         )
         prior_candidate = candidates_by_key.get(candidate.evidence_key)
         if prior_candidate is None or (
@@ -350,7 +430,8 @@ def upsert_release_evidence(
 
         existing_keys = {row.evidence_key for row in existing}
         existing_instants: dict[
-            tuple[date, datetime], list[tuple[Decimal, str | None, str]]
+            tuple[date, datetime],
+            list[tuple[Decimal, str | None, str, str, bool, str]],
         ] = {}
         max_versions: dict[date, int] = {}
         for row in existing:
@@ -360,22 +441,38 @@ def upsert_release_evidence(
                     Decimal(row.value).quantize(_VALUE_QUANTUM),
                     row.formula_version,
                     row.status,
+                    row.evidence_kind,
+                    row.chain_verified,
+                    row.availability_precision,
                 )
             )
             max_versions[row.date] = max(max_versions.get(row.date, 0), row.version)
 
         pending: list[_EvidenceCandidate] = []
         for candidate in candidates:
-            for existing_value, existing_formula, existing_status in existing_instants.get(
+            for (
+                existing_value,
+                existing_formula,
+                existing_status,
+                existing_kind,
+                existing_verified,
+                existing_precision,
+            ) in existing_instants.get(
                 (candidate.date, candidate.available_at), []
             ):
                 if _conflicts(
                     existing_value,
                     existing_formula,
                     existing_status,
+                    existing_kind,
+                    existing_verified,
+                    existing_precision,
                     candidate.value,
                     candidate.formula_version,
                     candidate.status,
+                    candidate.evidence_kind,
+                    candidate.chain_verified,
+                    candidate.availability_precision,
                 ):
                     raise ReleaseEvidenceConflictError(
                         f"conflicting release evidence for {normalized_code} "
@@ -401,6 +498,9 @@ def upsert_release_evidence(
                     status=candidate.status,
                     formula_version=candidate.formula_version,
                     provenance_json=candidate.provenance_json,
+                    evidence_kind=candidate.evidence_kind,
+                    chain_verified=candidate.chain_verified,
+                    availability_precision=candidate.availability_precision,
                     version=version,
                 )
             )
@@ -422,6 +522,8 @@ def upsert_release_evidence(
 
 
 __all__ = [
+    "AVAILABILITY_PRECISIONS",
+    "EVIDENCE_KINDS",
     "ReleaseEvidenceConflictError",
     "upsert_release_evidence",
 ]

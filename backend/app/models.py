@@ -142,6 +142,15 @@ class ReleaseEvidence(Base):
     status: Mapped[str] = mapped_column(String(32), default="published", nullable=False)
     formula_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
     provenance_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    evidence_kind: Mapped[str] = mapped_column(
+        String(32), server_default="unclassified", nullable=False
+    )
+    chain_verified: Mapped[bool] = mapped_column(
+        Boolean, server_default="0", nullable=False
+    )
+    availability_precision: Mapped[str] = mapped_column(
+        String(32), server_default="unknown", nullable=False
+    )
     version: Mapped[int] = mapped_column(Integer, nullable=False)
 
 

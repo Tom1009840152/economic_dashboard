@@ -343,7 +343,7 @@ export function ChinaCycleBacktestDetail({ data }: { data: BusinessCycleBacktest
               <Layers3 className="size-5" aria-hidden="true" />
               <CardTitle>最需要补齐的数据履历</CardTitle>
             </div>
-            <CardDescription>优先列出固定决策时点就绪率最低的输入：不仅要有发布时间，还必须在次月20日18:00前已经发布。</CardDescription>
+            <CardDescription>优先列出固定决策时点就绪率最低的输入：按模型实际使用月份检查，数据必须在该月的次月20日18:00前已经发布。</CardDescription>
           </CardHeader>
           <CardContent>
             {readiness.length > 0 ? (
@@ -353,7 +353,10 @@ export function ChinaCycleBacktestDetail({ data }: { data: BusinessCycleBacktest
                     <div className="flex items-start justify-between gap-3">
                       <div>
                         <div className="text-xs font-medium">{item.name}</div>
-                        <div className="mt-0.5 text-[11px] text-muted-foreground">{roleName(item.role)} · {item.code}</div>
+                        <div className="mt-0.5 text-[11px] text-muted-foreground">
+                          {roleName(item.role)} · {item.code}
+                          {item.observation_lag_months > 0 ? ` · 源数据固定滞后${item.observation_lag_months}个月使用` : ""}
+                        </div>
                       </div>
                       <div className="text-right">
                         <div className="text-sm font-semibold tabular-nums">{percent(item.on_schedule_rate)}</div>
@@ -361,7 +364,7 @@ export function ChinaCycleBacktestDetail({ data }: { data: BusinessCycleBacktest
                       </div>
                     </div>
                     <div className="mt-2 text-[11px] leading-5 text-muted-foreground">
-                      <span className="block">按时可见 {item.on_schedule_observations}/{item.final_observations} · 已知发布时间 {item.known_available_at_observations}/{item.final_observations} · 未知发布时间 {item.unknown_available_at_observations}</span>
+                      <span className="block">按模型使用时点可见 {item.on_schedule_observations}/{item.final_observations} · 已知发布时间 {item.known_available_at_observations}/{item.final_observations} · 未知发布时间 {item.unknown_available_at_observations}</span>
                       <span className="block">整组不可还原 {item.non_reconstructable_observations} · 同时戳歧义 {item.ambiguous_revision_observations} · 修订发布时间未知 {item.unknown_revision_observations}</span>
                     </div>
                   </div>

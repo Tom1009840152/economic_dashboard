@@ -42,6 +42,9 @@ _EVIDENCE_COLUMNS = (
     "status",
     "formula_version",
     "provenance_json",
+    "evidence_kind",
+    "chain_verified",
+    "availability_precision",
 )
 
 
@@ -117,6 +120,9 @@ def _clean_direct_release(
                 "source_url": str(source_url),
                 "status": "published",
                 "formula_version": None,
+                "evidence_kind": "official_release",
+                "chain_verified": True,
+                "availability_precision": "exact_minute",
             }
         )
 
@@ -195,6 +201,9 @@ def _derived_row(
         "status": "derived",
         "formula_version": DERIVED_METRIC_SPECS[code].version,
         "provenance_json": _provenance_json(leaves),
+        "evidence_kind": "official_release",
+        "chain_verified": True,
+        "availability_precision": "exact_minute",
     }
 
 
