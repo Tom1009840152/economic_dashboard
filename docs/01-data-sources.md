@@ -15,7 +15,7 @@
 | **Eurostat EU-LFS** | 欧盟EU27的失业、青年失业、就业率、参与率、男女就业率和劳动力市场闲置 | 月度与季度混合，使用 `EU27_2020` 聚合口径 | 不需要 |
 | **OECD Data Explorer** | 中美日韩综合领先指标；美日韩核心CPI | 直接使用新版SDMX接口，避免FRED中的旧OECD序列停更 | 不需要 |
 | **Eurostat STS / HICP** | 欧元区工业生产与核心HICP | 工业生产取EA20季调工作日调整指数并计算同比；核心HICP剔除食品、能源、酒精和烟草 | 不需要 |
-| **中国国家统计局发布页** | 中国规上工业增加值同比、核心CPI/PPI、PMI/房地产历史发布证据、季度名义 GDP 首发值 | 官方原发布稿提供可核验的值与发布时间；通胀只接受标题区可见分钟，名义 GDP 首发直接进入独立证据链，不以今天的修订值替代 | 不需要 |
+| **中国国家统计局发布页** | 中国规上工业增加值同比、核心CPI/PPI、PMI/房地产历史发布证据、季度名义 GDP 首发值 | 核心 CPI 以官方月度数据表为 canonical 来源，PPI 使用月度解读稿；两者都保留可核验的值、分钟级发布时间和官方链接，名义 GDP 首发也直接进入独立证据链 | 不需要 |
 | **中国人民银行发布页** | 社融及其人民币贷款、企业债、政府债分项，社融/贷款存量同比，M1/M2 与信用脉冲证据链 | 官方月度原发布稿提供当时值和分钟级发布时间；正文只有累计值时保留相邻发布叶子并明确标记差分残差 | 不需要 |
 | **中国财政部发布页** | 一般公共预算支出、政府性基金预算支出及其财政脉冲派生链 | 从 `gks.mof.gov.cn` 月度财政收支稿恢复当时值和发布时间；派生项保留全部叶子来源 | 不需要 |
 | **中国经济信息网（CEI）** | 中国消费者预期、满意和信心指数的历史发布快照 | 页面标注数据来源为国家统计局，但 CEI 是分发镜像而非统计局官网；页面只有日期，按次日 00:00 的保守上界进入回测 | 不需要 |
@@ -40,6 +40,8 @@ FRED 是本项目第一个非 akshare 数据源，后续凡是 akshare 查不到
 - `backend/app/services/china_consumer_evidence.py`（CEI 消费者调查发布快照的来源校验与有序证据链）
 - `backend/app/services/china_credit_evidence.py`（人民银行信用、货币与信用脉冲的独立证据链）
 - `backend/app/services/china_inflation_evidence.py`（国家统计局核心 CPI/PPI 的严格解析、来源校验、连续性门和独立 v2 缓存）
+- `backend/app/services/china_core_cpi_table_evidence.py`（国家统计局月度 CPI 表的受控表头解析与核心 CPI canonical 证据帧）
+- `backend/app/services/china_core_cpi_current_backfill.py`（核心 CPI current 的严格 missing-only 补全与事务门禁）
 - `backend/app/services/china_core_cpi_current_repair.py`（仅两条固定官方证据的核心 CPI current 修复）
 - `backend/app/services/china_trade_evidence.py`（海关出口初值的独立证据链与固定生产窗口）
 - `backend/scripts/backfill_china_fiscal_evidence.py`（默认只预检、显式 `--apply` 才写入的回填入口）
@@ -47,6 +49,7 @@ FRED 是本项目第一个非 akshare 数据源，后续凡是 akshare 查不到
 - `backend/scripts/backfill_china_consumer_evidence.py`（消费者证据默认预检、显式 `--apply` 写入）
 - `backend/scripts/backfill_china_credit_evidence.py`（信用证据默认预检、显式 `--apply` 原子写入）
 - `backend/scripts/backfill_china_inflation_evidence.py`（通胀证据默认预检、完整链才允许 `--apply`）
+- `backend/scripts/backfill_china_core_cpi_current.py`（核心 CPI current 默认 source-only；`--check-current` 只读，`--apply` 原子补缺）
 - `backend/scripts/repair_china_core_cpi_current.py`（核心 CPI 两条白名单修复，默认 dry-run）
 - `backend/scripts/backfill_china_trade_evidence.py`（出口初值证据默认预检、固定连续性与新鲜度门）
 
@@ -105,9 +108,10 @@ A1，并固定使用前一观察月；满意和信心序列用于保存完整来
 
 人民银行信用链随后独立完成。它覆盖 15 个证据代码：社融、社融口径人民币贷款、企业债和
 政府债的年内累计与月度流量，社融和人民币贷款存量同比，M1、M2、M1-M2，以及信用强度和
-标准信用脉冲。首次写入 1,174 条合格 `release_evidence`，使全库证据总量由上述消费者里程碑
-的 678 条增至 1,852 条；相同参数复跑 15 个代码均新增 0 条。完整 `data_points` 仍为 213,509
-条，聚合值与内容均未变化，因此这次升级只补“当时知道什么”，不改看板的当前/修订值。
+标准信用脉冲。首次写入 1,174 条合格 `release_evidence`；相同参数复跑 15 个代码均新增 0 条。
+这是信用链完成时的历史里程碑，不是当前全库水位。通胀链完成后全库共有 2,089 条
+`ReleaseEvidence`，2,089 条全部 verified；其中核心 CPI 116 条、PPI 121 条、出口 0 条。
+信用链升级本身只补“当时知道什么”，没有改看板的当前/修订值。
 
 月度社融证据共 140 期（2015-01—2026-08，其中正文直接发布 88 期、累计差分 52 期）；
 社融口径人民币贷款流量 127 期（67/60），企业债 124 期（66/58），政府债 80 期
@@ -137,6 +141,33 @@ A1，并固定使用前一观察月；满意和信心序列用于保存完整来
 到 2026-07，严格领先板块覆盖与领先口径覆盖均为 100%，领先指数为 95.01，最终值参照为
 95.52。完整证据提高了可追溯性和领先信息覆盖，但没有改变 120 个月中的任何阶段标签，不能据此
 宣称回测稳定性已经改善。
+
+国家统计局通胀链随后完成。核心 CPI 的 canonical 来源是月度 CPI 数据表：解析器只接受
+“其中：不包括食品和能源”行，以及两种受控的“同比涨跌幅”表头，不按列位置猜测；2017-01—
+2026-08 连续 116/116。PPI 继续使用月度解读稿，2016-08—2026-08 连续 121/121。截至
+2026-07 的生产完整性门为 `ready=true`，正式写入核心 CPI 116 条、PPI 121 条合格
+`ReleaseEvidence`。2025-02 核心 CPI 的直接月表值为 `-0.1%`，发布时间校正为
+2025-03-09 09:30；2025-06 为 `0.7%`。
+
+常规六小时刷新中的核心 CPI 已复用同一月表解析器，仅扫描当前 `zxfb` 分片的近期滚动窗口，
+不再执行解读稿核心 CPI 文本解析。匹配详情坏页、空结果、非分钟级发布时间，或发布时间未晚于
+观察月末时整批拒绝；近期详情每次实际采集都会重新验证，避免同 URL 订正被永久缓存遮蔽。
+PPI 常规刷新同样改为近期官方解读稿，并与 AkShare 长历史合并；官方行覆盖重叠月份，若聚合源
+最新月晚于官方近期窗口，则拒绝返回，不能用“有数但无发布时间”的记录更新 current。两条普通
+刷新链只更新 current/vintage，`ReleaseEvidence` 的追加仍由专用回填流程负责。
+
+核心 CPI current 使用独立 missing-only 流程，从固定起点 2017-01 生成计划：23 个已有键在
+六位小数下全部一致且 metadata 不变，只新增 93 个缺失键，current 由 23 增至 116，vintage
+由 24 增至 117。入口默认只构造官方来源帧，不打开数据库；`--check-current` 只读检查，只有
+`--apply` 才在单一事务中重建并复核计划。首次 apply 因生产会话 `autoflush=False` 使 pending
+vintage 尚未进入数量查询而被增量门完整回滚；在计数前显式 `flush` 后执行成功。成功写入后的
+生产库只读复检为 116 个重叠月份全一致、冲突 0、待新增 0。该流程不覆盖已有 current，也不把
+首发值冒充今天的最终值。
+
+固定 A3 窗口内核心 CPI final/known/on-schedule 均为 115，PPI strict/on-schedule 均为 120；
+新增证据没有改变 93 个含沿用标签可比月、25 个主动判断月和 2 个匹配转换。2026-07 current
+价格环境为核心 CPI `0.9%`、三月均值 `1.0%`、动量 `-0.37`（温和、回落），PPI `3.5%`、
+三月均值 `3.83%`。
 
 ### 中国人口专题（World Bank WDI）
 
@@ -222,12 +253,12 @@ Statistics 的月度季调序列，并统一为15—64岁口径。除总体和�
 | code | 名称 | 数据源接口 | 口径备注 |
 | --- | --- | --- | --- |
 | CN_CPI | CPI同比 | `ak.macro_china_cpi` | 月度，取"全国-同比增长" |
-| CN_PPI | PPI同比 | 当前值：`ak.macro_china_ppi`；严格历史候选：国家统计局月度 CPI/PPI 解读稿 | 月度出厂价格同比；严格解析排除购进价格、环比、全年和累计值。140页 dry-run 得到113期，但生产窗口缺8期，尚未写入独立证据 |
+| CN_PPI | PPI同比 | 当前值：`ak.macro_china_ppi`；严格历史：国家统计局月度 CPI/PPI 解读稿 | 月度出厂价格同比；严格解析排除购进价格、环比、全年和累计值。2016-08—2026-08 连续121/121，已写入121条合格证据；固定A3窗口 strict/on-schedule 均为120 |
 | CN_PMI | 制造业PMI | `ak.macro_china_pmi` | 月度，取"制造业-指数" |
 | CN_NMI | 非制造业商务活动指数 | `ak.macro_china_pmi` 长历史 + 国家统计局《中国采购经理指数运行情况》原发布页 | 月度，50为荣枯线；常规刷新保留长历史，近期原发布页补真实发布时间，归档回填逐月核验当时值 |
 | CN_IP | 规上工业增加值同比 | 国家统计局数据发布页；`ak.macro_china_gyzjz`（东方财富镜像）补历史 | 月度可比价同比，不等于全部工业企业产出；官方近期值优先，镜像补至 2008-02 且发布时点未知；1—2 月合并值记在 2 月，1 月不插值 |
 | CN_CLI | 综合领先指标 | OECD Data Explorer `DF_CLI` | 月度，振幅调整，长期均值=100 |
-| CN_CORE_CPI | 核心CPI同比 | 国家统计局月度CPI/PPI解读稿 | 剔除食品和能源；只在单一 HTML 段落内读取明确值，不自行估算权重。已修复 2025-02 `-0.1%` 和 2025-06 `0.7%`；严格证据候选79期，生产窗口缺37期，尚未整批写入 |
+| CN_CORE_CPI | 核心CPI同比 | 国家统计局月度 CPI 数据表 | 只读取“其中：不包括食品和能源”行及受控同比表头。2017-01—2026-08 连续116/116，已写入116条合格证据，current/vintage为116/117；固定A3窗口 final/known/on-schedule 均为115 |
 | CN_CONSUMER_EXPECTATIONS | 消费者预期指数 | 当前值：东方财富镜像；严格历史：CEI 分发页（标注来源国家统计局） | 只有本项进入 A1；源月 `t` 固定用于模型月 `t+1`，并继续由真实/保守 `available_at` 控制可见性 |
 | CN_CONSUMER_SATISFACTION | 消费者满意指数 | 当前值：东方财富镜像；严格历史：CEI 分发页 | 保存完整调查快照与交叉审计，不直接进入 A1 |
 | CN_CONSUMER_CONFIDENCE | 消费者信心指数 | 当前值：东方财富镜像；严格历史：CEI 分发页 | 保存完整调查快照与交叉审计；不假设一套恒定 60/40 权重公式 |
@@ -245,7 +276,7 @@ Statistics 的月度季调序列，并统一为15—64岁口径。除总体和�
 | CN_FISCAL_IMPULSE_PROXY | 财政脉冲代理 | 本季与上年同季财政支出强度派生 | 同比百分点变化；首发证据 15 季（2022Q4—2026Q2），current 25 季，其中修复新增 8 个键；首发证据保留六条叶子并取最晚发布时间 |
 | CN_RETAIL | 社会消费品零售总额同比 | `ak.macro_china_consumer_goods_retail` | 月度 |
 | CN_FAI | 固定资产投资同比 | `ak.macro_china_gdzctz` | 月度 |
-| CN_EXPORTS | 出口同比 | `ak.macro_china_hgjck` 的“当月出口额-同比增长”；[海关总署英文初值目录](https://english.customs.gov.cn/Statistics/Statistics?ColumnId=1)与“China's Total Export & Import Values (in USD)”详情页用于历史发布证据 | 月度美元口径。独立证据解析只接受唯一单月同比，1—2月合并稿不造单月值；只有日期时使用次日00:00的 `date_upper_bound`。生产门固定自2020-03并检查最新月份；当前主机受官方站证书链异常影响，严格证据仍为0 |
+| CN_EXPORTS | 出口同比 | `ak.macro_china_hgjck` 的“当月出口额-同比增长”；海关官方美元初值链作为严格历史候选 | 月度美元口径。真实初值域同时存在 TLS 主机名与信任链失败；证书有效的 online 域没有相应数据，ChinaPort 近期页面多为人民币口径，不能混入本序列。系统不降级 TLS、HTTP 或口径，合格证据保持0；后续只做官方传输 canary 或另建 formal derived 序列 |
 | CN_EXPORTS_ABS | 出口额（伴生指标，不单独出卡片） | `ak.macro_china_hgjck` | 原始单位"千美元"，除以 1e5 换算成"亿美元" |
 | CN_HOG | 生猪现货价格指数 | `ak.index_hog_spot_price` | 周频，判断"猪周期"最常用的原始价格序列 |
 | CN_REALESTATE | 国房景气指数 | `ak.macro_china_real_estate` | 全国综合房地产市场冷热度 |

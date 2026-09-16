@@ -7,6 +7,7 @@ import json
 
 from app.db import SessionLocal
 from app.services.china_inflation_evidence import (
+    DEFAULT_INFLATION_INDEX_PAGE_COUNT,
     collect_inflation_release_evidence,
     evidence_summary,
     store_inflation_evidence,
@@ -17,7 +18,9 @@ from app.services.indicator_service import ensure_indicators_seeded
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--pages", type=int, default=140)
+    parser.add_argument(
+        "--pages", type=int, default=DEFAULT_INFLATION_INDEX_PAGE_COUNT
+    )
     parser.add_argument("--start-page", type=int, default=0)
     parser.add_argument(
         "--shards",

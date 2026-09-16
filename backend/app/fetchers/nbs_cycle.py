@@ -1,14 +1,17 @@
-"""Recent China industrial production and core CPI from NBS release pages.
+"""Recent China industrial production, core CPI and PPI from NBS releases.
 
-Core CPI is stated in the monthly NBS commentary but is not exposed as a stable
-series in the public data table, so this fetcher reads the official releases.
-Only a rolling recent official window is requested. CN_IP joins that window to
-an explicitly labelled transport-mirror backfill; other series retain older
-observations in the dashboard database after each upsert.
+Core CPI is read from the official monthly CPI table row for prices excluding
+food and energy, using its explicitly labelled year-on-year column.  Only a
+rolling recent official window is requested here; the strict historical
+evidence backfill owns full archive coverage.  CN_IP joins its recent official
+window to an explicitly labelled transport-mirror backfill.  PPI similarly
+keeps its long aggregate-source history while official commentary rows provide
+exact release metadata for the rolling recent window.
 """
 
 import datetime as dt
 import html
+import math
 import re
 import time
 from urllib.parse import urljoin, urlparse
@@ -209,34 +212,87 @@ def parse_ppi_value(source: str) -> float | None:
         re.I,
     )
     from_yoy = re.compile(
-        r"从同比看[，,]\s*(?:全国\s*)?PPI\s*"
-        r"(?P<direction>上涨|下降|持平)\s*(?P<number>\d+(?:\.\d+)?)%",
+        r"从同比看[，,]\s*(?P<context>[^。！？%]{0,48}?)"
+        r"(?:全国\s*)?PPI\s*(?P<direction>上涨|下降|持平)"
+        r"(?:\s*(?P<number>\d+(?:\.\d+)?)%)?",
+        re.I,
+    )
+    from_yoy_transition = re.compile(
+        r"从同比看[，,]\s*(?P<context>[^。！？%]{0,48}?)"
+        r"(?:全国\s*)?PPI\s*(?:同比\s*)?"
+        r"由(?:上月\s*)?(?:(?:上涨|下降)\s*\d+(?:\.\d+)?%|持平)"
+        r"\s*转为\s*(?P<direction>上涨|下降|持平)"
+        r"(?:\s*(?P<number>\d+(?:\.\d+)?)%)?",
+        re.I,
+    )
+    mom_then_yoy_transition = re.compile(
+        marker
+        + r"\s*环比[^。！？]{0,72}?[，,；;]\s*同比\s*"
+        r"由(?:上月\s*)?(?:(?:上涨|下降)\s*\d+(?:\.\d+)?%|持平)"
+        r"\s*转为\s*(?P<direction>上涨|下降|持平)"
+        r"(?:\s*(?P<number>\d+(?:\.\d+)?)%)?",
         re.I,
     )
     found: set[float] = set()
+    month_range = re.compile(
+        r"(?:\d{1,2}|[一二三四五六七八九十]+)\s*"
+        r"(?:-|—|–|－|~|～|至)\s*"
+        r"(?:\d{1,2}|[一二三四五六七八九十]+)\s*月"
+    )
+
+    def add_directional(match: re.Match[str]) -> None:
+        direction = match.group("direction")
+        number = match.groupdict().get("number")
+        if direction == "持平":
+            if number is None or float(number) == 0.0:
+                found.add(0.0)
+            return
+        if number is not None:
+            found.add(round(_signed(direction, number), 6))
+
+    def headline_context(match: re.Match[str], block: str) -> bool:
+        context = match.groupdict().get("context", "") or ""
+        middle = match.groupdict().get("middle", "") or ""
+        local = context + middle
+        if re.search(
+            r"(?:CPI|购进价格|生产资料|生活资料|采掘工业|原材料工业|"
+            r"加工工业|行业|合计影响)",
+            local,
+            re.I,
+        ):
+            return False
+        prefix = block[max(0, match.start() - 120) : match.start()]
+        # Qualifiers from a completed sentence can describe CPI or another
+        # assertion in the same paragraph.  Only the current clause may scope
+        # this PPI match.
+        prefix_clause = re.split(r"[。！？；;]", prefix)[-1]
+        cumulative_context = prefix_clause + local
+        return not (
+            re.search(r"(?:全年|季度|平均|累计)", cumulative_context)
+            or month_range.search(cumulative_context)
+        )
+
     for block in _article_blocks(source):
+        for pattern in (from_yoy_transition, mom_then_yoy_transition):
+            for match in pattern.finditer(block):
+                if headline_context(match, block):
+                    add_directional(match)
+
         transition_matches = list(transition.finditer(block))
         patterns = (transition,) if transition_matches else (direct, reaches, from_yoy)
         for pattern in patterns:
             for match in pattern.finditer(block):
                 middle = match.groupdict().get("middle", "") or ""
+                context = match.groupdict().get("context", "") or ""
                 # The long official phrase can be followed by headline CPI
                 # before the page reaches PPI. Never cross that second token.
-                if "购进价格" in middle or re.search(
-                    r"(?:CPI|PPI)", middle, re.I
+                if not headline_context(match, block) or "购进价格" in middle or re.search(
+                    r"(?:CPI|PPI)", middle + context, re.I
                 ):
                     continue
-                prefix = block[max(0, match.start() - 24) : match.start()]
-                if re.search(r"(?:全年|季度|平均|累计)", prefix):
-                    continue
                 if pattern in (direct, transition, from_yoy):
-                    value = (
-                        0.0
-                        if match.group("direction") == "持平"
-                        else _signed(
-                            match.group("direction"), match.group("number")
-                        )
-                    )
+                    add_directional(match)
+                    continue
                 else:
                     number = float(match.group("number"))
                     value = (
@@ -353,17 +409,115 @@ def _load_industrial() -> pd.DataFrame:
 
 
 def _load_core_cpi() -> pd.DataFrame:
-    rows: list[tuple[dt.date, float]] = []
-    for url, title in _links(
-        "sjjd", r"解读20\d{2}年\d{1,2}月份CPI(?:和|、)PPI数据"
-    ):
-        observed = inflation_title_observation(title)
-        if observed is None:
-            continue
-        values = parse_core_cpi_values(_get_text(url), observed)
-        if observed in values:
-            rows.append((observed, values[observed]))
-    return pd.DataFrame(rows, columns=["date", "value"]).drop_duplicates("date").sort_values("date")
+    from app.services.china_core_cpi_table_evidence import (
+        collect_recent_core_cpi_table_evidence,
+    )
+
+    evidence = collect_recent_core_cpi_table_evidence()
+    columns = [
+        "date",
+        "value",
+        "release_date",
+        "available_at",
+        "source_url",
+        "status",
+        "formula_version",
+    ]
+    return evidence.loc[:, columns].sort_values("date", kind="stable").reset_index(
+        drop=True
+    )
+
+
+def _load_ppi() -> pd.DataFrame:
+    # Imported lazily because the strict evidence module reuses the parsers in
+    # this module.  By the time a fetcher is called this module is fully loaded,
+    # so the dependency cannot form an import-time cycle.
+    from app.services.china_inflation_evidence import (
+        collect_recent_ppi_release_evidence,
+    )
+
+    evidence = collect_recent_ppi_release_evidence()
+    columns = [
+        "date",
+        "value",
+        "release_date",
+        "available_at",
+        "source_url",
+        "status",
+        "formula_version",
+    ]
+    return evidence.loc[:, columns].sort_values("date", kind="stable").reset_index(
+        drop=True
+    )
+
+
+def _load_ppi_history() -> pd.DataFrame:
+    """Load the existing long PPI history without inventing release times."""
+
+    # Import AkShare itself rather than macro_source: macro_source participates
+    # in the aggregate fetcher registry and importing it from a directly loaded
+    # nbs_cycle module would recreate the registry's historical import cycle.
+    import akshare as ak
+
+    raw = ak.macro_china_ppi()
+    required = {"月份", "当月同比增长"}
+    missing = required.difference(raw.columns)
+    if missing:
+        raise KeyError(f"PPI history source missing columns: {sorted(missing)}")
+    history = raw[["月份", "当月同比增长"]].rename(
+        columns={"月份": "date", "当月同比增长": "value"}
+    )
+    history["date"] = pd.to_datetime(
+        history["date"], format="%Y年%m月份", errors="coerce"
+    ).dt.date
+    history["value"] = pd.to_numeric(history["value"], errors="coerce")
+    history = history.dropna(subset=["date", "value"])
+    history = history.loc[history["date"] >= dt.date(2000, 1, 1)].copy()
+    history["release_date"] = None
+    history["available_at"] = None
+    history["source_url"] = None
+    history["status"] = "historical_backfill"
+    history["formula_version"] = None
+    return history.sort_values("date", kind="stable").reset_index(drop=True)
+
+
+def _merge_ppi_history(
+    official: pd.DataFrame, history: pd.DataFrame | None = None
+) -> pd.DataFrame:
+    """Retain long history while letting exact official releases win overlaps."""
+
+    from app.fetchers.china_cycle_data import _frame
+
+    if history is None:
+        history = _cached("ppi_long_history", _load_ppi_history)
+    def valid_dates(frame: pd.DataFrame) -> pd.Series:
+        if not {"date", "value"}.issubset(frame.columns):
+            raise ValueError("PPI history merge requires date/value columns")
+        dates = pd.to_datetime(frame["date"], errors="coerce")
+        values = pd.to_numeric(frame["value"], errors="coerce")
+        finite = values.map(
+            lambda value: math.isfinite(float(value)) if pd.notna(value) else False
+        )
+        return dates.loc[dates.notna() & finite]
+
+    official_dates = valid_dates(official)
+    history_dates = valid_dates(history)
+    if official_dates.empty:
+        raise RuntimeError("official recent PPI window has no valid month")
+    if not history_dates.empty and history_dates.max() > official_dates.max():
+        raise RuntimeError(
+            "PPI long history is newer than the official recent window; "
+            "refusing an aggregate-only latest month without release metadata"
+        )
+    history_rows = [
+        {**row, "status": row.get("status") or "historical_backfill"}
+        for row in history.to_dict("records")
+    ]
+    official_rows = [
+        {**row, "status": row.get("status") or "published"}
+        for row in official.to_dict("records")
+    ]
+    return _frame([*history_rows, *official_rows])
 
 
 def fetch_cn_industrial_production() -> pd.DataFrame:
@@ -377,10 +531,16 @@ def fetch_cn_industrial_production() -> pd.DataFrame:
 
 
 def fetch_cn_core_cpi() -> pd.DataFrame:
-    return _cached("core_cpi", _load_core_cpi).reset_index(drop=True)
+    return _cached("core_cpi_table_v1", _load_core_cpi).reset_index(drop=True)
+
+
+def fetch_cn_ppi() -> pd.DataFrame:
+    official = _cached("ppi_commentary_v2", _load_ppi).reset_index(drop=True)
+    return _merge_ppi_history(official)
 
 
 NBS_CYCLE_FETCHERS = {
     "CN_IP": fetch_cn_industrial_production,
     "CN_CORE_CPI": fetch_cn_core_cpi,
+    "CN_PPI": fetch_cn_ppi,
 }

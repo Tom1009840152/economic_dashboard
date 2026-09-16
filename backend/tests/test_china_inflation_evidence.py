@@ -17,12 +17,15 @@ from app.fetchers.nbs_cycle import parse_core_cpi_values, parse_ppi_value
 from app.models import DataPoint, Indicator, ReleaseEvidence
 from app.services import china_inflation_evidence as inflation_evidence
 from app.services.china_inflation_evidence import (
+    DEFAULT_RECENT_INFLATION_INDEX_PAGE_COUNT,
     INFLATION_EVIDENCE_CODES,
     InflationCoverageError,
     InflationEvidenceError,
     collect_inflation_release_evidence,
+    collect_recent_ppi_release_evidence,
     _get_nbs_inflation_archive_text,
     _request_nbs_inflation_text,
+    inflation_index_url,
     parse_inflation_index,
     parse_inflation_release,
     store_inflation_evidence,
@@ -42,6 +45,27 @@ def article(title: str, body: str, *, timestamp: str = "2025/07/09 09:30") -> st
     """
 
 
+def core_table_collector_kwargs() -> dict:
+    title = "2025年6月份居民消费价格上涨0.1%"
+    url = "https://www.stats.gov.cn/sj/zxfb/202507/release.html"
+    index = f'<html><a href="{url}" title="{title}">{title}</a></html>'
+    detail = f"""
+    <html><head><title>{title}</title></head><body>
+      <h1>{title}</h1>
+      <div class="detail-title-des"><p>2025/07/09 09:30</p></div>
+      <table>
+        <tr><th>项目</th><th>环比涨跌幅（%）</th><th>同比涨跌幅（%）</th></tr>
+        <tr><td>其中：不包括食品和能源</td><td>0.1</td><td>0.7</td></tr>
+      </table>
+    </body></html>
+    """
+    return {
+        "core_page_count": 1,
+        "fetch_core_index": lambda _: index,
+        "fetch_core_release": lambda _: detail,
+    }
+
+
 class FakeResponse:
     apparent_encoding = "utf-8"
 
@@ -56,26 +80,156 @@ class FakeResponse:
 
 
 class ChinaInflationParserTests(unittest.TestCase):
-    def test_existing_core_cpi_fetcher_uses_the_strict_parser(self) -> None:
-        title = "国家统计局解读2025年6月份CPI和PPI数据"
-        source = article(
-            title,
-            """
-            <h2>核心CPI同比继续回升</h2>
-            <p>CPI同比上涨0.1%。</p>
-            <p>扣除食品和能源价格的核心CPI同比上涨0.7%。</p>
-            """,
+    def test_regular_core_cpi_refresh_uses_recent_tables_with_metadata(self) -> None:
+        source_url = "https://www.stats.gov.cn/sj/zxfb/202507/release.html"
+        available_at = dt.datetime(2025, 7, 9, 9, 30)
+        evidence = pd.DataFrame(
+            [
+                {
+                    "date": dt.date(2025, 6, 1),
+                    "value": 0.7,
+                    "release_date": available_at.date(),
+                    "available_at": available_at,
+                    "source_url": source_url,
+                    "status": "published",
+                    "formula_version": None,
+                }
+            ]
         )
         with (
+            patch.dict(nbs_cycle._cache, {}, clear=True),
+            patch(
+                "app.services.china_core_cpi_table_evidence."
+                "collect_recent_core_cpi_table_evidence",
+                return_value=evidence,
+            ) as collect,
             patch.object(
                 nbs_cycle,
-                "_links",
-                return_value=[("https://www.stats.gov.cn/release.html", title)],
+                "parse_core_cpi_values",
+                side_effect=AssertionError("commentary parser must not run"),
             ),
-            patch.object(nbs_cycle, "_get_text", return_value=source),
         ):
-            frame = nbs_cycle._load_core_cpi()
-        self.assertEqual(frame.to_dict("records"), [{"date": dt.date(2025, 6, 1), "value": 0.7}])
+            frame = nbs_cycle.fetch_cn_core_cpi()
+
+        collect.assert_called_once_with()
+        self.assertEqual(frame.to_dict("records"), evidence.to_dict("records"))
+
+    def test_regular_ppi_refresh_keeps_long_history_and_official_metadata(
+        self,
+    ) -> None:
+        source_url = "https://www.stats.gov.cn/sj/sjjd/202507/release.html"
+        available_at = dt.datetime(2025, 7, 9, 9, 30)
+        official = pd.DataFrame(
+            [
+                {
+                    "date": dt.date(2025, 6, 1),
+                    "value": -3.6,
+                    "release_date": available_at.date(),
+                    "available_at": available_at,
+                    "source_url": source_url,
+                    "status": "published",
+                    "formula_version": None,
+                }
+            ]
+        )
+        history = pd.DataFrame(
+            [
+                {"date": dt.date(2000, 1, 1), "value": -2.7},
+                # Official data must win the overlapping month.
+                {"date": dt.date(2025, 6, 1), "value": -9.9},
+            ]
+        )
+        with (
+            patch.dict(nbs_cycle._cache, {}, clear=True),
+            patch(
+                "app.services.china_inflation_evidence."
+                "collect_recent_ppi_release_evidence",
+                return_value=official,
+            ) as collect,
+            patch.object(nbs_cycle, "_load_ppi_history", return_value=history),
+        ):
+            frame = nbs_cycle.fetch_cn_ppi()
+
+        collect.assert_called_once_with()
+        self.assertIs(
+            nbs_cycle.NBS_CYCLE_FETCHERS["CN_PPI"], nbs_cycle.fetch_cn_ppi
+        )
+        from app.fetchers.akshare_source import FETCHERS
+
+        self.assertIs(FETCHERS["CN_PPI"], nbs_cycle.fetch_cn_ppi)
+        self.assertEqual(
+            frame.columns.tolist(),
+            [
+                "date",
+                "value",
+                "release_date",
+                "available_at",
+                "source_url",
+                "status",
+                "formula_version",
+            ],
+        )
+        by_date = frame.set_index("date")
+        self.assertEqual(float(by_date.loc[dt.date(2000, 1, 1), "value"]), -2.7)
+        self.assertEqual(
+            by_date.loc[dt.date(2000, 1, 1), "status"],
+            "historical_backfill",
+        )
+        self.assertEqual(float(by_date.loc[dt.date(2025, 6, 1), "value"]), -3.6)
+        self.assertEqual(
+            by_date.loc[dt.date(2025, 6, 1), "available_at"], available_at
+        )
+        self.assertEqual(
+            by_date.loc[dt.date(2025, 6, 1), "source_url"], source_url
+        )
+
+    def test_ppi_history_loader_preserves_long_values_without_fake_timestamps(
+        self,
+    ) -> None:
+        raw = pd.DataFrame(
+            {
+                "月份": ["1999年12月份", "2000年01月份", "2025年06月份", "bad"],
+                "当月同比增长": [-1.0, "-2.7", "-3.6", 99.0],
+            }
+        )
+        with patch("akshare.macro_china_ppi", return_value=raw):
+            history = nbs_cycle._load_ppi_history()
+
+        self.assertEqual(
+            history[["date", "value", "status"]].to_dict("records"),
+            [
+                {
+                    "date": dt.date(2000, 1, 1),
+                    "value": -2.7,
+                    "status": "historical_backfill",
+                },
+                {
+                    "date": dt.date(2025, 6, 1),
+                    "value": -3.6,
+                    "status": "historical_backfill",
+                },
+            ],
+        )
+        self.assertTrue(history["release_date"].isna().all())
+        self.assertTrue(history["available_at"].isna().all())
+        self.assertTrue(history["source_url"].isna().all())
+        self.assertTrue(history["formula_version"].isna().all())
+
+    def test_ppi_merge_rejects_aggregate_only_latest_month(self) -> None:
+        official = pd.DataFrame(
+            [{"date": dt.date(2025, 6, 1), "value": -3.6, "status": "published"}]
+        )
+        history = pd.DataFrame(
+            [
+                {"date": dt.date(2025, 6, 1), "value": -3.6},
+                {"date": dt.date(2025, 7, 1), "value": -2.8},
+            ]
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError, "newer than the official recent window"
+        ):
+            nbs_cycle._merge_ppi_history(official, history)
 
     def test_2025_06_does_not_turn_headline_cpi_into_core_cpi(self) -> None:
         observed = dt.date(2025, 6, 1)
@@ -166,6 +320,173 @@ class ChinaInflationParserTests(unittest.TestCase):
             "同比涨幅扩大至3.8%。</p>"
         )
         self.assertEqual(parse_ppi_value(new_wording), 3.8)
+        prior_sentence_qualifier = (
+            "<p>2017年全年CPI上涨1.6%。PPI环比上涨0.8%，"
+            "同比上涨4.9%。2017年全年PPI上涨6.3%。</p>"
+        )
+        self.assertEqual(parse_ppi_value(prior_sentence_qualifier), 4.9)
+
+    def test_ppi_parser_covers_eight_verified_legacy_release_forms(self) -> None:
+        cases = {
+            "2016-08 direct release": (
+                "<p>2016年8月份全国居民消费价格指数（CPI）和"
+                "工业生产者出厂价格指数（PPI）数据显示，CPI环比上涨0.1%，"
+                "同比上涨1.3%；PPI环比上涨0.2%，同比下降0.8%。</p>",
+                -0.8,
+            ),
+            "2019-06 transition to flat": (
+                "<p>从同比看，PPI由上月上涨0.6%转为持平。其中，"
+                "生产资料价格由上月上涨0.6%转为下降0.3%。</p>",
+                0.0,
+            ),
+            "2019-07 transition from flat": (
+                "<p>从同比看，PPI由上月持平转为下降0.3%。其中，"
+                "生产资料价格下降0.7%。</p>",
+                -0.3,
+            ),
+            "2020-01 from-yoy transition": (
+                "<p>从同比看，PPI由上月下降0.5%转为上涨0.1%。其中，"
+                "生产资料价格下降0.4%。</p>",
+                0.1,
+            ),
+            "2020-02 mom then yoy transition": (
+                "<p>PPI略有下降。2月份，受季节和疫情因素影响，全国PPI"
+                "环比由上月持平转为下降0.5%，同比由上涨0.1%转为下降0.4%。</p>",
+                -0.4,
+            ),
+            "2020-05 qualified from-yoy": (
+                "<p>从同比看，受去年对比基数略高影响，PPI下降3.7%，"
+                "降幅比上月扩大0.6个百分点。</p>",
+                -3.7,
+            ),
+            "2021-01 from-yoy transition": (
+                "<p>从同比看，PPI由上月下降0.4%转为上涨0.3%。其中，"
+                "生产资料价格由上月下降0.5%转为上涨0.5%。</p>",
+                0.3,
+            ),
+            "2022-10 from-yoy transition": (
+                "<p>从同比看，PPI由上月上涨0.9%转为下降1.3%，"
+                "主要受去年同期对比基数较高影响。</p>",
+                -1.3,
+            ),
+        }
+        for label, (source, expected) in cases.items():
+            with self.subTest(label=label):
+                self.assertEqual(parse_ppi_value(source), expected)
+
+    def test_ppi_legacy_forms_still_reject_non_headline_rates(self) -> None:
+        rejected = {
+            "purchase price": "<p>从同比看，工业生产者购进价格下降1.7%。</p>",
+            "month on month": "<p>从同比看，PPI环比下降0.4%。</p>",
+            "cumulative average": "<p>从同比看，1—5月平均，PPI下降1.7%。</p>",
+            "industry contribution": (
+                "<p>从同比看，上述行业价格合计影响PPI下降0.44%。</p>"
+            ),
+            "producer-goods component": (
+                "<p>工业生产者出厂价格中，生产资料价格同比下降2.1%。</p>"
+            ),
+            "consumer-goods component": (
+                "<p>工业生产者出厂价格中，生活资料价格同比上涨0.8%。</p>"
+            ),
+            "mining component": (
+                "<p>工业生产者出厂价格中，采掘工业价格同比下降3.2%。</p>"
+            ),
+            "month-range cumulative": (
+                "<p>1—5月份，全国工业生产者出厂价格指数（PPI）"
+                "同比下降1.7%。</p>"
+            ),
+        }
+        for label, source in rejected.items():
+            with self.subTest(label=label):
+                self.assertIsNone(parse_ppi_value(source))
+
+    def test_ppi_release_rejects_nonzero_publication_seconds(self) -> None:
+        title = "国家统计局解读2025年6月份CPI和PPI数据"
+        source = article(
+            title,
+            "<p>工业生产者出厂价格指数（PPI）同比下降3.6%。</p>",
+            timestamp="2025/07/09 09:30:45",
+        )
+        with self.assertRaisesRegex(
+            InflationEvidenceError, "not minute-precision"
+        ):
+            parse_inflation_release(
+                source,
+                title=title,
+                source_url=(
+                    "https://www.stats.gov.cn/sj/sjjd/202507/release.html"
+                ),
+                include_core=False,
+            )
+
+    def test_ppi_same_month_exact_duplicate_is_deduplicated(self) -> None:
+        title = "国家统计局解读2025年6月份CPI和PPI数据"
+        first = "https://www.stats.gov.cn/sj/sjjd/202507/first.html"
+        second = "https://www.stats.gov.cn/sj/sjjd/202507/second.html"
+        source = article(
+            title,
+            "<p>工业生产者出厂价格指数（PPI）同比下降3.6%。</p>",
+        )
+        evidence = collect_inflation_release_evidence(
+            page_count=1,
+            fetch_index=lambda _: (
+                f'<a href="{first}" title="{title}">{title}</a>'
+                f'<a href="{second}" title="{title}">{title}</a>'
+            ),
+            fetch_release=lambda _: source,
+            **core_table_collector_kwargs(),
+        )
+        self.assertEqual(len(evidence["CN_PPI"]), 1)
+        self.assertEqual(float(evidence["CN_PPI"].iloc[0]["value"]), -3.6)
+
+    def test_ppi_same_month_nonidentical_release_fails_closed(self) -> None:
+        title = "国家统计局解读2025年6月份CPI和PPI数据"
+        first = "https://www.stats.gov.cn/sj/sjjd/202507/first.html"
+        second = "https://www.stats.gov.cn/sj/sjjd/202507/second.html"
+
+        def detail(url: str) -> str:
+            value = "3.6" if url == first else "3.5"
+            timestamp = "2025/07/09 09:30" if url == first else "2025/07/09 09:31"
+            return article(
+                title,
+                f"<p>工业生产者出厂价格指数（PPI）同比下降{value}%。</p>",
+                timestamp=timestamp,
+            )
+
+        with self.assertRaisesRegex(
+            InflationEvidenceError, "non-identical PPI subject-month"
+        ):
+            collect_inflation_release_evidence(
+                page_count=1,
+                fetch_index=lambda _: (
+                    f'<a href="{first}" title="{title}">{title}</a>'
+                    f'<a href="{second}" title="{title}">{title}</a>'
+                ),
+                fetch_release=detail,
+                **core_table_collector_kwargs(),
+            )
+
+    def test_ppi_same_value_but_different_source_digest_fails_closed(self) -> None:
+        title = "国家统计局解读2025年6月份CPI和PPI数据"
+        first = "https://www.stats.gov.cn/sj/sjjd/202507/first.html"
+        second = "https://www.stats.gov.cn/sj/sjjd/202507/second.html"
+        base = article(
+            title,
+            "<p>工业生产者出厂价格指数（PPI）同比下降3.6%。</p>",
+        )
+
+        with self.assertRaisesRegex(
+            InflationEvidenceError, "non-identical PPI subject-month"
+        ):
+            collect_inflation_release_evidence(
+                page_count=1,
+                fetch_index=lambda _: (
+                    f'<a href="{first}" title="{title}">{title}</a>'
+                    f'<a href="{second}" title="{title}">{title}</a>'
+                ),
+                fetch_release=lambda url: base if url == first else base + "<!-- mirror -->",
+                **core_table_collector_kwargs(),
+            )
 
     def test_index_rejects_matching_official_lookalike_domain(self) -> None:
         with self.assertRaises(InflationEvidenceError):
@@ -259,7 +580,7 @@ class ChinaInflationParserTests(unittest.TestCase):
         )
         self.assertFalse(get.call_args_list[0].kwargs["allow_redirects"])
 
-    def test_collector_uses_shared_article_once_for_both_series(self) -> None:
+    def test_collector_fetches_commentary_once_for_ppi(self) -> None:
         title = "国家统计局解读2025年6月份CPI和PPI数据"
         url = "https://www.stats.gov.cn/sj/sjjd/202507/release.html"
         index = f'<html><a href="{url}" title="{title}">{title}</a></html>'
@@ -277,6 +598,7 @@ class ChinaInflationParserTests(unittest.TestCase):
             page_count=1,
             fetch_index=lambda _: index,
             fetch_release=fetch_release,
+            **core_table_collector_kwargs(),
         )
         self.assertEqual(calls, [url])
         self.assertEqual(len(evidence["CN_CORE_CPI"]), 1)
@@ -300,9 +622,41 @@ class ChinaInflationParserTests(unittest.TestCase):
             page_count=3,
             fetch_index=fetch_index,
             fetch_release=lambda _: source,
+            **core_table_collector_kwargs(),
         )
         self.assertEqual(len(evidence["CN_CORE_CPI"]), 1)
         self.assertEqual(len(evidence["CN_PPI"]), 1)
+
+    def test_default_collector_reaches_archive_index_140(self) -> None:
+        title = "国家统计局解读2016年8月份CPI、PPI数据"
+        detail_url = (
+            "https://www.stats.gov.cn/sj/sjjd/202302/"
+            "t20230202_1895770.html"
+        )
+        index = f'<a href="{detail_url}" title="{title}">{title}</a>'
+        source = article(
+            title,
+            "<p>PPI环比上涨0.2%，同比下降0.8%。</p>",
+            timestamp="2016/09/09 09:30",
+        )
+        requested_indexes: list[str] = []
+
+        def fetch_index(url: str) -> str:
+            requested_indexes.append(url)
+            return index if url.endswith("index_140.html") else "<html></html>"
+
+        evidence = collect_inflation_release_evidence(
+            fetch_index=fetch_index,
+            fetch_release=lambda _: source,
+            **core_table_collector_kwargs(),
+        )
+
+        self.assertEqual(len(requested_indexes), 141)
+        self.assertTrue(requested_indexes[-1].endswith("index_140.html"))
+        self.assertEqual(
+            evidence["CN_PPI"][["date", "value"]].to_dict("records"),
+            [{"date": dt.date(2016, 8, 1), "value": -0.8}],
+        )
 
     def test_collector_fails_closed_after_one_non_404_index_failure(self) -> None:
         title = "国家统计局解读2025年6月份CPI和PPI数据"
@@ -348,6 +702,187 @@ class ChinaInflationParserTests(unittest.TestCase):
             InflationEvidenceError, "release scan failed"
         ):
             collect_inflation_release_evidence(
+                page_count=1,
+                fetch_index=lambda _: index,
+                fetch_release=fetch_release,
+            )
+
+
+class RecentPpiReleaseCollectorTests(unittest.TestCase):
+    title = "国家统计局城市司首席统计师解读2025年6月份CPI和PPI数据"
+    url = "https://www.stats.gov.cn/sj/sjjd/202507/release.html"
+
+    def test_recent_details_are_revalidated_without_persistent_cache(self) -> None:
+        index = f'<a href="{self.url}" title="{self.title}">{self.title}</a>'
+        detail = article(
+            self.title,
+            "<p>工业生产者出厂价格指数（PPI）同比下降3.6%。</p>",
+        )
+        requested: list[tuple[str, bool]] = []
+
+        def load(url: str, *, cache: bool) -> str:
+            requested.append((url, cache))
+            if url == inflation_index_url(0):
+                return index
+            if url == self.url:
+                return detail
+            self.fail(f"unexpected URL: {url}")
+
+        with patch.object(
+            inflation_evidence,
+            "_get_nbs_inflation_archive_text",
+            side_effect=load,
+        ):
+            evidence = collect_recent_ppi_release_evidence(page_count=1)
+
+        self.assertEqual(len(evidence), 1)
+        self.assertEqual(
+            requested,
+            [(inflation_index_url(0), False), (self.url, False)],
+        )
+
+    def test_default_scan_is_bounded_and_returns_refresh_metadata(self) -> None:
+        requested_indexes: list[str] = []
+        requested_details: list[str] = []
+        index = f'<a href="{self.url}" title="{self.title}">{self.title}</a>'
+        detail = article(
+            self.title,
+            (
+                "<p>核心CPI同比上涨9.9%。核心CPI同比上涨8.8%。</p>"
+                "<p>工业生产者出厂价格指数（PPI）同比下降3.6%。</p>"
+            ),
+        )
+
+        def fetch_index(url: str) -> str:
+            requested_indexes.append(url)
+            return index if url == inflation_index_url(0) else "<html></html>"
+
+        def fetch_release(url: str) -> str:
+            requested_details.append(url)
+            return detail
+
+        evidence = collect_recent_ppi_release_evidence(
+            fetch_index=fetch_index,
+            fetch_release=fetch_release,
+        )
+
+        self.assertEqual(
+            requested_indexes,
+            [
+                inflation_index_url(page)
+                for page in range(DEFAULT_RECENT_INFLATION_INDEX_PAGE_COUNT)
+            ],
+        )
+        self.assertFalse(
+            any("index_1000" in url or "index_2000" in url for url in requested_indexes)
+        )
+        self.assertEqual(requested_details, [self.url])
+        self.assertEqual(
+            evidence[
+                [
+                    "date",
+                    "value",
+                    "release_date",
+                    "available_at",
+                    "source_url",
+                    "status",
+                    "formula_version",
+                ]
+            ].to_dict("records"),
+            [
+                {
+                    "date": dt.date(2025, 6, 1),
+                    "value": -3.6,
+                    "release_date": dt.date(2025, 7, 9),
+                    "available_at": dt.datetime(2025, 7, 9, 9, 30),
+                    "source_url": self.url,
+                    "status": "published",
+                    "formula_version": None,
+                }
+            ],
+        )
+
+    def test_empty_recent_indexes_fail_closed(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "no monthly releases"):
+            collect_recent_ppi_release_evidence(
+                page_count=1,
+                fetch_index=lambda _: "<html></html>",
+                fetch_release=lambda _: self.fail("empty discovery has no detail"),
+            )
+
+    def test_numbered_index_hole_is_allowed_after_primary_index_succeeds(
+        self,
+    ) -> None:
+        index = f'<a href="{self.url}" title="{self.title}">{self.title}</a>'
+        detail = article(
+            self.title,
+            "<p>工业生产者出厂价格指数（PPI）同比下降3.6%。</p>",
+        )
+
+        def fetch_index(url: str) -> str:
+            if url == inflation_index_url(0):
+                return index
+            raise FileNotFoundError(url)
+
+        evidence = collect_recent_ppi_release_evidence(
+            page_count=2,
+            fetch_index=fetch_index,
+            fetch_release=lambda _: detail,
+        )
+        self.assertEqual(len(evidence), 1)
+
+    def test_missing_primary_index_fails_even_if_later_page_exists(self) -> None:
+        index = f'<a href="{self.url}" title="{self.title}">{self.title}</a>'
+
+        def fetch_index(url: str) -> str:
+            if url == inflation_index_url(0):
+                raise FileNotFoundError(url)
+            return index
+
+        with self.assertRaisesRegex(RuntimeError, "primary index page failed"):
+            collect_recent_ppi_release_evidence(
+                page_count=2,
+                fetch_index=fetch_index,
+                fetch_release=lambda _: self.fail(
+                    "primary-index failure must stop before detail fetch"
+                ),
+            )
+
+    def test_matching_detail_without_headline_ppi_fails_closed(self) -> None:
+        index = f'<a href="{self.url}" title="{self.title}">{self.title}</a>'
+        detail = article(
+            self.title,
+            "<p>居民消费价格指数（CPI）同比上涨0.1%。</p>",
+        )
+        with self.assertRaisesRegex(
+            InflationEvidenceError, "recent NBS PPI detail scan failed"
+        ):
+            collect_recent_ppi_release_evidence(
+                page_count=1,
+                fetch_index=lambda _: index,
+                fetch_release=lambda _: detail,
+            )
+
+    def test_one_matching_bad_detail_rejects_the_whole_recent_batch(self) -> None:
+        july_title = "国家统计局解读2025年7月份CPI和PPI数据"
+        july_url = "https://www.stats.gov.cn/sj/sjjd/202508/release.html"
+        index = (
+            f'<a href="{self.url}" title="{self.title}">{self.title}</a>'
+            f'<a href="{july_url}" title="{july_title}">{july_title}</a>'
+        )
+
+        def fetch_release(url: str) -> str:
+            if url == self.url:
+                return article(
+                    self.title,
+                    "<p>工业生产者出厂价格指数（PPI）同比下降3.6%。</p>",
+                )
+            return article(july_title, "<p>CPI同比上涨0.2%。</p>")
+
+        with self.assertRaisesRegex(
+            InflationEvidenceError, "recent NBS PPI detail scan failed"
+        ):
+            collect_recent_ppi_release_evidence(
                 page_count=1,
                 fetch_index=lambda _: index,
                 fetch_release=fetch_release,
@@ -468,7 +1003,10 @@ class ChinaInflationArchiveCacheTests(unittest.TestCase):
             "_get_nbs_inflation_archive_text",
             side_effect=load,
         ) as loader:
-            collect_inflation_release_evidence(page_count=1)
+            collect_inflation_release_evidence(
+                page_count=1,
+                **core_table_collector_kwargs(),
+            )
         self.assertFalse(loader.call_args_list[0].kwargs["cache"])
         self.assertEqual(loader.call_args_list[1].args[0], detail_url)
         self.assertTrue(loader.call_args_list[1].kwargs["cache"])
@@ -661,7 +1199,7 @@ class ChinaInflationStorageTests(unittest.TestCase):
                     "provenance_json": {
                         "article_observation": period.start_time.date().isoformat(),
                         "evidence_semantics": "subject_month_release",
-                        "parser_version": "nbs_inflation_release_v1",
+                        "parser_version": "nbs_inflation_release_v2",
                         "publication_time_source": "visible_nbs_detail_title",
                         "source_sha256": "a" * 64,
                         "title": (
@@ -782,6 +1320,13 @@ class ChinaInflationStorageTests(unittest.TestCase):
             build_parser().parse_args(
                 ["--apply", "--coverage-as-of", "2017-03-20"]
             )
+
+    def test_cli_default_scan_includes_index_140(self) -> None:
+        args = build_parser().parse_args([])
+        self.assertEqual(args.pages, 141)
+        self.assertEqual(
+            args.pages, inflation_evidence.DEFAULT_INFLATION_INDEX_PAGE_COUNT
+        )
 
     def test_dry_run_is_default_and_never_opens_database(self) -> None:
         gate = {"ready": False, "missing": {"CN_CORE_CPI": ["2017-02"]}}

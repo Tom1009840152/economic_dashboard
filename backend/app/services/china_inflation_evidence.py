@@ -1,9 +1,10 @@
 """Strict NBS release evidence for China's core CPI and PPI.
 
-The collector reads only monthly CPI/PPI commentary pages on the official NBS
-HTTPS host.  Core CPI and PPI deliberately use different parsers.  All source
-timestamps are the visible NBS publication minute; an article that explicitly
-states an earlier core-CPI value keeps the later article's real availability.
+Core CPI comes from the official monthly CPI table; PPI comes from the monthly
+CPI/PPI commentary.  The sources and parsers are deliberately isolated.  All
+timestamps must be an exact minute rendered in the NBS title/byline area.
+Legacy commentary parsing remains available for auditing existing evidence,
+but the integrated collector never emits commentary-derived core CPI.
 """
 
 from __future__ import annotations
@@ -34,14 +35,27 @@ from app.fetchers.nbs_cycle import (
     parse_core_cpi_values,
     parse_ppi_value,
 )
+from app.services.china_core_cpi_table_evidence import (
+    CORE_CPI_ARCHIVE_SHARDS,
+    CORE_CPI_REQUIRED_FROM,
+    CORE_CPI_TABLE_CACHE_VERSION,
+    CORE_CPI_TABLE_PARSER_VERSION,
+    DEFAULT_CORE_CPI_INDEX_PAGE_COUNT,
+    NbsCoreCpiFetch,
+    collect_core_cpi_table_evidence,
+    core_cpi_table_assertion_digest,
+    cpi_release_title_observation,
+    is_core_cpi_yoy_column_label,
+)
 from app.services.release_evidence import upsert_release_evidence
 
 
 INFLATION_EVIDENCE_CODES = ("CN_CORE_CPI", "CN_PPI")
 NBS_INTERPRETATION_BASE = "https://www.stats.gov.cn/sj/sjjd/"
-CORE_CPI_REQUIRED_FROM = pd.Period("2017-01", freq="M")
 PPI_REQUIRED_FROM = pd.Period("2016-08", freq="M")
-PARSER_VERSION = "nbs_inflation_release_v1"
+DEFAULT_INFLATION_INDEX_PAGE_COUNT = 141
+DEFAULT_RECENT_INFLATION_INDEX_PAGE_COUNT = 14
+PARSER_VERSION = "nbs_inflation_release_v2"
 _NBS_HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Referer": NBS_INTERPRETATION_BASE,
@@ -191,16 +205,20 @@ def _nbs_inflation_publication_metadata(
     patterns = (
         re.compile(
             r"(20\d{2})[/-](\d{1,2})[/-](\d{1,2})\s+"
-            r"(\d{1,2}):(\d{2})(?::\d{2})?"
+            r"(\d{1,2}):(\d{2})(?::(\d{2}))?"
         ),
         re.compile(
             r"(20\d{2})年(\d{1,2})月(\d{1,2})日?\s+"
-            r"(\d{1,2}):(\d{2})(?::\d{2})?"
+            r"(\d{1,2}):(\d{2})(?::(\d{2}))?"
         ),
     )
     found: set[dt.datetime] = set()
     for pattern in patterns:
         for match in pattern.finditer(visible):
+            if match.group(6) is not None and int(match.group(6)) != 0:
+                raise InflationEvidenceError(
+                    "NBS inflation publication time is not minute-precision"
+                )
             try:
                 found.add(
                     dt.datetime(
@@ -486,8 +504,13 @@ def parse_inflation_release(
     *,
     title: str,
     source_url: str,
+    include_core: bool = True,
 ) -> dict[str, pd.DataFrame]:
-    """Parse one official monthly commentary into two isolated evidence sets."""
+    """Parse one official monthly commentary into isolated evidence sets.
+
+    ``include_core=False`` is the production PPI-only path.  The default keeps
+    legacy core-commentary parsing available for audits and existing callers.
+    """
 
     if not _is_nbs_https_url(source_url):
         raise InflationEvidenceError("NBS inflation release must use official HTTPS")
@@ -501,7 +524,7 @@ def parse_inflation_release(
 
     metadata = _nbs_inflation_publication_metadata(source, source_url)
     ppi = parse_ppi_value(source)
-    core_values = parse_core_cpi_values(source, observed)
+    core_values = parse_core_cpi_values(source, observed) if include_core else {}
     rows: dict[str, list[dict]] = {code: [] for code in INFLATION_EVIDENCE_CODES}
 
     if ppi is not None:
@@ -546,25 +569,58 @@ def parse_inflation_release(
     }
 
 
-def _merge_frames(frames: Iterable[pd.DataFrame]) -> pd.DataFrame:
+def _merge_ppi_frames(frames: Iterable[pd.DataFrame]) -> pd.DataFrame:
     nonempty = [frame for frame in frames if isinstance(frame, pd.DataFrame) and not frame.empty]
     if not nonempty:
         return pd.DataFrame(columns=_OUTPUT_COLUMNS)
     result = pd.concat(nonempty, ignore_index=True)
-    return result.sort_values(
+    selected: list[pd.Series] = []
+    for observed, assertions in result.groupby("date", sort=True, dropna=False):
+        signatures: set[tuple[object, ...]] = set()
+        for _, row in assertions.iterrows():
+            provenance = _provenance_value(row.get("provenance_json"))
+            signatures.add(
+                (
+                    round(float(row.get("value")), 12),
+                    row.get("available_at"),
+                    provenance.get("source_sha256"),
+                    provenance.get("evidence_semantics"),
+                    row.get("status"),
+                )
+            )
+        if len(signatures) != 1:
+            raise InflationEvidenceError(
+                "conflicting or non-identical PPI subject-month releases for "
+                f"{observed}"
+            )
+        selected.append(
+            assertions.sort_values("source_url", kind="stable").iloc[0]
+        )
+    deduplicated = pd.DataFrame(selected, columns=result.columns)
+    return deduplicated.sort_values(
         ["date", "available_at", "source_url"], kind="stable"
     ).reset_index(drop=True)
 
 
 def collect_inflation_release_evidence(
     *,
-    page_count: int = 140,
+    page_count: int = DEFAULT_INFLATION_INDEX_PAGE_COUNT,
     start_page: int = 0,
     archive_shards: tuple[int, ...] = (0,),
     fetch_index: Callable[[str], str] | None = None,
     fetch_release: Callable[[str], str] | None = None,
+    core_page_count: int = DEFAULT_CORE_CPI_INDEX_PAGE_COUNT,
+    core_start_page: int = 0,
+    core_archive_shards: tuple[int, ...] = CORE_CPI_ARCHIVE_SHARDS,
+    fetch_core_index: Callable[[str], str] | None = None,
+    fetch_core_release: Callable[[str], str | NbsCoreCpiFetch] | None = None,
 ) -> dict[str, pd.DataFrame]:
-    """Collect official NBS evidence without touching current observations."""
+    """Collect table-backed core CPI and commentary-backed PPI evidence.
+
+    Core CPI is intentionally ignored in commentary pages.  This prevents the
+    same release minute from entering the batch twice through prose and the
+    canonical monthly CPI table, while PPI retains its dedicated prose parser.
+    """
 
     if page_count < 1 or start_page < 0:
         raise ValueError("invalid NBS inflation archive page range")
@@ -603,9 +659,7 @@ def collect_inflation_release_evidence(
     if not refs:
         raise RuntimeError("NBS inflation archive contains no monthly commentary")
 
-    collected: dict[str, list[pd.DataFrame]] = {
-        code: [] for code in INFLATION_EVIDENCE_CODES
-    }
+    collected_ppi: list[pd.DataFrame] = []
     successful_releases = 0
     for ref in sorted(
         refs.values(), key=lambda item: (item.observation_date, item.source_url)
@@ -615,6 +669,7 @@ def collect_inflation_release_evidence(
                 release_loader(ref.source_url),
                 title=ref.title,
                 source_url=ref.source_url,
+                include_core=False,
             )
         except Exception as exc:
             raise InflationEvidenceError(
@@ -622,15 +677,124 @@ def collect_inflation_release_evidence(
                 f"collection: {ref.source_url}"
             ) from exc
         successful_releases += 1
-        for code in INFLATION_EVIDENCE_CODES:
-            collected[code].append(parsed[code])
+        collected_ppi.append(parsed["CN_PPI"])
     if successful_releases == 0:
         raise RuntimeError("all NBS inflation commentary pages failed")
+    try:
+        core = collect_core_cpi_table_evidence(
+            page_count=core_page_count,
+            start_page=core_start_page,
+            archive_shards=core_archive_shards,
+            fetch_index=fetch_core_index,
+            fetch_release=fetch_core_release,
+        )
+    except Exception as exc:
+        raise InflationEvidenceError(
+            "NBS core-CPI table scan failed; refusing an incomplete collection"
+        ) from exc
     merged = {
-        code: _merge_frames(collected[code]) for code in INFLATION_EVIDENCE_CODES
+        "CN_CORE_CPI": core,
+        "CN_PPI": _merge_ppi_frames(collected_ppi),
     }
     validate_inflation_evidence_rows(merged)
     return merged
+
+
+def collect_recent_ppi_release_evidence(
+    *,
+    page_count: int = DEFAULT_RECENT_INFLATION_INDEX_PAGE_COUNT,
+    start_page: int = 0,
+    fetch_index: Callable[[str], str] | None = None,
+    fetch_release: Callable[[str], str] | None = None,
+) -> pd.DataFrame:
+    """Collect a bounded recent PPI window from official NBS commentary.
+
+    This is the lightweight ordinary-refresh path, not the fixed historical
+    coverage gate.  It scans only the current commentary shard and requires
+    every discovered monthly CPI/PPI article to yield one valid headline PPI
+    observation.  A malformed matching detail therefore fails the whole batch
+    instead of silently leaving a hole in the current/vintage refresh.  The
+    ordinary fetcher separately compares this official window with its long
+    history so an aggregate-only latest month cannot pass without metadata.
+    """
+
+    if page_count < 1 or start_page < 0:
+        raise ValueError("invalid recent NBS inflation archive page range")
+    index_loader = fetch_index or (
+        lambda url: _get_nbs_inflation_archive_text(url, cache=False)
+    )
+    # Recent current/vintage refreshes must revalidate mutable detail URLs.
+    # The outer fetcher cache bounds this work to once per refresh window; the
+    # persistent detail cache remains reserved for resumable full-history
+    # backfills, where silently missing an archive page is the larger risk.
+    release_loader = fetch_release or (
+        lambda url: _get_nbs_inflation_archive_text(url, cache=False)
+    )
+
+    refs: dict[str, InflationArticleRef] = {}
+    successful_indexes = 0
+    primary_index_succeeded = False
+    for page in range(start_page, start_page + page_count):
+        url = inflation_index_url(page, archive_shard=0)
+        try:
+            source = index_loader(url)
+        except FileNotFoundError:
+            # NBS numbering has real holes.  Later missing pages may be skipped
+            # only after the primary requested page has proved the live shard;
+            # the long-history merge below supplies the freshness backstop.
+            continue
+        except Exception as exc:
+            raise InflationEvidenceError(
+                "recent NBS PPI index scan failed; refusing an incomplete "
+                f"collection: {url}"
+            ) from exc
+        successful_indexes += 1
+        if page == start_page:
+            primary_index_succeeded = True
+        for ref in parse_inflation_index(source, url):
+            if pd.Period(ref.observation_date, freq="M") < PPI_REQUIRED_FROM:
+                continue
+            previous = refs.get(ref.source_url)
+            if previous is not None and previous.observation_date != ref.observation_date:
+                raise InflationEvidenceError(
+                    f"one NBS PPI URL advertises conflicting months: {ref.source_url}"
+                )
+            refs[ref.source_url] = ref
+
+    if successful_indexes == 0:
+        raise RuntimeError("all recent NBS PPI index pages failed")
+    if not primary_index_succeeded:
+        raise RuntimeError("recent NBS PPI primary index page failed")
+    if not refs:
+        raise RuntimeError("recent NBS PPI indexes contain no monthly releases")
+
+    frames: list[pd.DataFrame] = []
+    for ref in sorted(
+        refs.values(), key=lambda item: (item.observation_date, item.source_url)
+    ):
+        try:
+            parsed = parse_inflation_release(
+                release_loader(ref.source_url),
+                title=ref.title,
+                source_url=ref.source_url,
+                include_core=False,
+            )["CN_PPI"]
+            if len(parsed) != 1 or parsed.iloc[0]["date"] != ref.observation_date:
+                raise InflationEvidenceError(
+                    "monthly NBS commentary did not yield exactly one subject-month PPI"
+                )
+        except Exception as exc:
+            raise InflationEvidenceError(
+                "recent NBS PPI detail scan failed; refusing an incomplete "
+                f"collection: {ref.source_url}"
+            ) from exc
+        frames.append(parsed)
+
+    result = _merge_ppi_frames(frames)
+    if result.empty:
+        raise RuntimeError("recent NBS PPI collector returned no rows")
+    validate_inflation_evidence_rows({"CN_PPI": result})
+    return result
 
 
 def _latest_required_month(as_of: dt.date) -> pd.Period:
@@ -765,7 +929,15 @@ def validate_inflation_evidence_rows(
             provenance = _provenance_value(
                 getattr(row, "provenance_json", None)
             )
-            if provenance.get("parser_version") != PARSER_VERSION:
+            semantics = provenance.get("evidence_semantics")
+            is_core_table = (
+                code == "CN_CORE_CPI"
+                and semantics == "subject_month_official_cpi_table_row"
+            )
+            expected_parser = (
+                CORE_CPI_TABLE_PARSER_VERSION if is_core_table else PARSER_VERSION
+            )
+            if provenance.get("parser_version") != expected_parser:
                 raise InflationEvidenceError(f"{code} parser provenance is invalid")
             if (
                 provenance.get("publication_time_source")
@@ -790,8 +962,14 @@ def validate_inflation_evidence_rows(
                 raise InflationEvidenceError(
                     f"{code} article-observation provenance is invalid"
                 ) from exc
-            title_observation = inflation_title_observation(
-                str(provenance.get("title") or "")
+            title_observation = (
+                cpi_release_title_observation(
+                    str(provenance.get("title") or "")
+                )
+                if is_core_table
+                else inflation_title_observation(
+                    str(provenance.get("title") or "")
+                )
             )
             if title_observation != article_observation:
                 raise InflationEvidenceError(
@@ -799,8 +977,41 @@ def validate_inflation_evidence_rows(
                 )
 
             status = getattr(row, "status", None)
-            semantics = provenance.get("evidence_semantics")
-            if status == "published" and semantics == "subject_month_release":
+            if is_core_table:
+                chain = provenance.get("redirect_chain")
+                request_url = provenance.get("source_request_url")
+                final_url = provenance.get("source_final_url")
+                assertion_digest = provenance.get("table_assertion_sha256")
+                expected_assertion_digest = core_cpi_table_assertion_digest(
+                    observed,
+                    value,
+                    provenance.get("column_label"),
+                )
+                if (
+                    status != "published"
+                    or article_observation != observed
+                    or provenance.get("source_kind")
+                    != "nbs_cpi_release_table"
+                    or provenance.get("row_label")
+                    != "其中：不包括食品和能源"
+                    or not is_core_cpi_yoy_column_label(
+                        provenance.get("column_label")
+                    )
+                    or provenance.get("cache_version")
+                    != CORE_CPI_TABLE_CACHE_VERSION
+                    or assertion_digest != expected_assertion_digest
+                    or request_url != source_url
+                    or not isinstance(chain, list)
+                    or not chain
+                    or chain[0] != request_url
+                    or chain[-1] != final_url
+                    or not all(_is_nbs_https_url(item) for item in chain)
+                    or not _is_nbs_https_url(final_url)
+                ):
+                    raise InflationEvidenceError(
+                        "CN_CORE_CPI table provenance is invalid"
+                    )
+            elif status == "published" and semantics == "subject_month_release":
                 if article_observation != observed:
                     raise InflationEvidenceError(
                         f"{code} subject-month provenance is inconsistent"
@@ -906,13 +1117,18 @@ def store_inflation_evidence(
 
 
 __all__ = [
+    "CORE_CPI_ARCHIVE_SHARDS",
     "CORE_CPI_REQUIRED_FROM",
+    "DEFAULT_CORE_CPI_INDEX_PAGE_COUNT",
+    "DEFAULT_INFLATION_INDEX_PAGE_COUNT",
+    "DEFAULT_RECENT_INFLATION_INDEX_PAGE_COUNT",
     "INFLATION_EVIDENCE_CODES",
     "InflationArticleRef",
     "InflationCoverageError",
     "InflationEvidenceError",
     "PPI_REQUIRED_FROM",
     "collect_inflation_release_evidence",
+    "collect_recent_ppi_release_evidence",
     "evidence_summary",
     "inflation_index_url",
     "parse_inflation_index",
