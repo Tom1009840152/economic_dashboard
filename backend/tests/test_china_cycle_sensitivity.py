@@ -222,7 +222,7 @@ class ChinaCycleSensitivityTests(unittest.TestCase):
         self.assertEqual(january["transitions"]["events"], [])
 
     def test_methodology_version_includes_current_formula_readiness(self) -> None:
-        self.assertEqual(METHODOLOGY_VERSION, "1.3.4")
+        self.assertEqual(METHODOLOGY_VERSION, "1.4.0")
 
 
 if __name__ == "__main__":

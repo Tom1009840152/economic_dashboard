@@ -16,6 +16,7 @@ from app.services.china_cycle_backtest import (
     _cached_backtest_result,
     _clear_backtest_cache,
     build_china_cycle_backtest,
+    build_china_cycle_backtest_attribution,
 )
 
 
@@ -104,6 +105,88 @@ class ChinaCycleBacktestCacheTests(unittest.TestCase):
             second["backtest_definition"]["final_cutoff_at"],
             second_now.isoformat(),
         )
+
+    def test_attribution_cache_reuses_one_period_and_refreshes_cutoff(self) -> None:
+        watermark = _InputWatermark(1, 1, 1, datetime(2025, 2, 1, 10))
+        fake_db = Mock()
+        fake_db.scalars.return_value = []
+        first_now = datetime(2026, 1, 1, tzinfo=UTC)
+        second_now = datetime(2026, 1, 2, tzinfo=UTC)
+
+        def fake_attribution(*_args, final_cutoff_at, **_kwargs):
+            return {
+                "status": "not_comparable",
+                "final_cutoff_at": final_cutoff_at.isoformat(),
+            }
+
+        with (
+            patch(
+                "app.services.china_cycle_backtest._backtest_data_watermark",
+                return_value=(watermark, watermark, watermark),
+            ),
+            patch(
+                "app.services.china_cycle_backtest._build_counterfactual_attribution",
+                side_effect=fake_attribution,
+            ) as builder,
+        ):
+            first = build_china_cycle_backtest_attribution(
+                fake_db,
+                period="2025-01",
+                now=first_now,
+            )
+            first["status"] = "caller_mutation"
+            second = build_china_cycle_backtest_attribution(
+                fake_db,
+                period="2025-01",
+                now=second_now,
+            )
+
+        self.assertEqual(builder.call_count, 1)
+        self.assertEqual(second["status"], "not_comparable")
+        self.assertEqual(second["final_cutoff_at"], second_now.isoformat())
+
+    def test_current_value_watermark_invalidates_attribution_cache(self) -> None:
+        observed_final_values: list[list[float]] = []
+
+        def fake_attribution(
+            _vintages,
+            finals,
+            _period,
+            *,
+            decision_as_of,
+            final_cutoff_at,
+        ):
+            observed_final_values.append(
+                [float(row["value"]) for row in finals]
+            )
+            return {
+                "status": "not_comparable",
+                "decision_as_of": decision_as_of,
+                "final_cutoff_at": final_cutoff_at.isoformat(),
+            }
+
+        request = {
+            "period": "2025-01",
+            "now": datetime(2026, 1, 1, tzinfo=UTC),
+        }
+        with patch(
+            "app.services.china_cycle_backtest._build_counterfactual_attribution",
+            side_effect=fake_attribution,
+        ) as builder:
+            build_china_cycle_backtest_attribution(self.db, **request)
+
+            point = self.db.query(DataPoint).filter_by(
+                indicator_code="CN_NMI"
+            ).one()
+            point.value = 51
+            point.version = 2
+            point.retrieved_at = datetime(2025, 3, 1, 10)
+            self.db.commit()
+
+            build_china_cycle_backtest_attribution(self.db, **request)
+
+        self.assertEqual(builder.call_count, 2)
+        self.assertEqual(observed_final_values, [[50.0], [51.0]])
 
     def test_supported_data_update_automatically_invalidates_cache(self) -> None:
         def fake_build(vintages, _finals, *, periods, final_cutoff_at):

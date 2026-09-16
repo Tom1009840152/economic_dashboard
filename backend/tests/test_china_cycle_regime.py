@@ -17,9 +17,11 @@ from app.services.china_cycle_regime import (
     _build_regime_from_matrix,
     _confidence,
     _drivers,
+    _fixed_survey_core_panel,
     _inflation_by_month,
     _leading_direction,
     _outlook,
+    _state_change_context,
 )
 
 
@@ -443,6 +445,230 @@ class ChinaCycleRegimeTests(unittest.TestCase):
         self.assertFalse(any(item["block_key"] == "demand_expectations" for item in positives))
         self.assertAlmostEqual(sum(item["contribution"] for item in positives), 5.0)
 
+    def test_balanced_panel_driver_decomposition_reconciles_both_axes(self) -> None:
+        values = [95.0, 97.0, 99.0, 101.0, 103.0, 105.0]
+        months = [
+            self._a1_month(f"2025-0{index}", value, 100.0)
+            for index, value in enumerate(values, start=1)
+        ]
+
+        panel = _balanced_role_panels(months, "coincident")[-1]
+        decomposition = panel["decomposition"]
+
+        self.assertTrue(panel["valid"])
+        self.assertEqual(decomposition["status"], "available")
+        self.assertEqual(decomposition["recent_window_start"], "2025-04")
+        self.assertEqual(decomposition["comparison_window_end"], "2025-03")
+        self.assertAlmostEqual(decomposition["level_gap"], 3.0)
+        self.assertAlmostEqual(decomposition["momentum_3m"], 6.0)
+        self.assertAlmostEqual(
+            sum(item["effective_weight"] for item in decomposition["drivers"]),
+            1.0,
+        )
+        self.assertAlmostEqual(
+            sum(item["level_contribution"] for item in decomposition["drivers"]),
+            decomposition["level_contribution_sum"],
+            places=5,
+        )
+        self.assertAlmostEqual(
+            sum(item["momentum_contribution"] for item in decomposition["drivers"]),
+            decomposition["momentum_contribution_sum"],
+            places=5,
+        )
+        self.assertEqual(decomposition["level_residual"], 0.0)
+        self.assertEqual(decomposition["momentum_residual"], 0.0)
+        self.assertTrue(decomposition["additivity_passed"])
+        self.assertEqual(
+            decomposition["drivers"][0]["recent_source_periods"],
+            ["2025-04", "2025-05", "2025-06"],
+        )
+
+    def test_driver_decomposition_never_turns_missing_history_into_zero(self) -> None:
+        months = [
+            self._a1_month(f"2025-0{index}", 100.0, 100.0)
+            for index in range(1, 6)
+        ]
+
+        decomposition = _balanced_role_panels(months, "coincident")[-1][
+            "decomposition"
+        ]
+
+        self.assertEqual(decomposition["status"], "unavailable")
+        self.assertEqual(decomposition["reason"], "insufficient_history")
+        self.assertIsNone(decomposition["level_gap"])
+        self.assertIsNone(decomposition["momentum_3m"])
+        self.assertFalse(decomposition["additivity_passed"])
+
+    def test_fixed_survey_decomposition_uses_four_equal_weights_and_reconciles(self) -> None:
+        values = [95.0, 97.0, 99.0, 101.0, 103.0, 105.0]
+        months = [
+            self._a1_month(f"2025-0{index}", value, 100.0)
+            for index, value in enumerate(values, start=1)
+        ]
+
+        panel = _fixed_survey_core_panel(months, 5)
+        decomposition = panel["decomposition"]
+
+        self.assertTrue(panel["valid"])
+        self.assertEqual(decomposition["status"], "available")
+        self.assertEqual(len(decomposition["drivers"]), 4)
+        self.assertTrue(
+            all(item["effective_weight"] == 0.25 for item in decomposition["drivers"])
+        )
+        self.assertAlmostEqual(decomposition["level_gap"], 3.0)
+        self.assertAlmostEqual(decomposition["momentum_3m"], 6.0)
+        self.assertEqual(decomposition["level_residual"], 0.0)
+        self.assertEqual(decomposition["momentum_residual"], 0.0)
+        self.assertTrue(decomposition["additivity_passed"])
+
+    def test_fixed_survey_decomposition_is_unavailable_when_one_signal_is_missing(self) -> None:
+        months = [
+            self._a1_month(f"2025-0{index}", 100.0, 100.0)
+            for index in range(1, 7)
+        ]
+        months[-1]["blocks"][0]["signals"][0]["standardized_score"] = None
+
+        decomposition = _fixed_survey_core_panel(months, 5)["decomposition"]
+
+        self.assertEqual(decomposition["status"], "unavailable")
+        self.assertEqual(decomposition["reason"], "insufficient_common_basis")
+        self.assertEqual(decomposition["drivers"], [])
+        self.assertFalse(decomposition["additivity_passed"])
+
+    def test_internal_replay_can_skip_explanations_without_changing_state(self) -> None:
+        periods = pd.period_range("2025-01", periods=10, freq="M")
+        matrix = {
+            "mode": "current",
+            "data_basis": "final",
+            "methodology_version": "1.0.0",
+            "months": [
+                self._a1_month(str(period), 91.0 + index * 2, 100.0)
+                for index, period in enumerate(periods)
+            ],
+            "warnings": [],
+        }
+
+        explained = _build_regime_from_matrix(matrix, [], output_months=10)
+        replay = _build_regime_from_matrix(
+            matrix,
+            [],
+            output_months=10,
+            include_explanations=False,
+        )
+
+        self.assertEqual(
+            [
+                (month["phase"], month["phase_status"], month["candidate_phase"])
+                for month in explained["months"]
+            ],
+            [
+                (month["phase"], month["phase_status"], month["candidate_phase"])
+                for month in replay["months"]
+            ],
+        )
+        self.assertNotIn("coincident_decomposition", replay["latest"])
+        self.assertNotIn("leading_decomposition", replay["latest"])
+        self.assertNotIn("state_change", replay["latest"])
+
+    def test_fixed_survey_replay_without_explanations_keeps_coordinates_and_state(self) -> None:
+        periods = pd.period_range("2025-01", periods=10, freq="M")
+        matrix = {
+            "mode": "current",
+            "data_basis": "final",
+            "methodology_version": "1.0.0",
+            "months": [
+                self._a1_month(str(period), 91.0 + index * 2, 100.0)
+                for index, period in enumerate(periods)
+            ],
+            "warnings": [],
+        }
+        shared = {
+            "output_months": 10,
+            "coincident_panel_mode": "fixed_survey_core_v1",
+        }
+
+        explained = _build_regime_from_matrix(matrix, [], **shared)
+        replay = _build_regime_from_matrix(
+            matrix,
+            [],
+            include_explanations=False,
+            **shared,
+        )
+        compared_fields = (
+            "phase",
+            "confirmed_phase",
+            "phase_status",
+            "candidate_phase",
+            "level_3m",
+            "momentum_3m",
+            "decision_eligible",
+        )
+
+        self.assertEqual(
+            [tuple(month[field] for field in compared_fields) for month in explained["months"]],
+            [tuple(month[field] for field in compared_fields) for month in replay["months"]],
+        )
+
+    def test_state_change_context_separates_axes_candidate_and_confirmation_rule(self) -> None:
+        context = _state_change_context(
+            previous_decision={
+                "period": "2025-05",
+                "level_axis": "below",
+                "momentum_axis": "falling",
+                "raw_phase": "contraction",
+                "confirmed_phase": "contraction",
+            },
+            tracker_before={
+                "confirmed_phase": "contraction",
+                "candidate_phase": None,
+            },
+            state={
+                "confirmed_phase": "contraction",
+                "candidate_phase": "recovery",
+                "phase_basis": "active_decision",
+                "required_confirmation_months": 2,
+            },
+            decision_eligible=True,
+            basis_changed=False,
+            level_gap=-2.0,
+            momentum=2.0,
+            level_axis="below",
+            momentum_axis="rising",
+            raw_phase="recovery",
+        )
+
+        self.assertEqual(context["previous_decision_period"], "2025-05")
+        self.assertNotIn("level_axis_changed", context["reason_codes"])
+        self.assertIn("momentum_axis_changed", context["reason_codes"])
+        self.assertIn("raw_phase_changed", context["reason_codes"])
+        self.assertIn("candidate_started", context["reason_codes"])
+        self.assertIn("leading_shortened_confirmation", context["reason_codes"])
+
+    def test_state_change_labels_complete_dead_zone_as_unclassified_not_missing(self) -> None:
+        context = _state_change_context(
+            previous_decision=None,
+            tracker_before={
+                "confirmed_phase": None,
+                "candidate_phase": None,
+            },
+            state={
+                "confirmed_phase": None,
+                "candidate_phase": None,
+                "phase_basis": "unclassified",
+                "required_confirmation_months": None,
+            },
+            decision_eligible=False,
+            basis_changed=False,
+            level_gap=0.2,
+            momentum=-0.2,
+            level_axis="neutral",
+            momentum_axis="neutral",
+            raw_phase=None,
+        )
+
+        self.assertIn("dead_zone_unclassified", context["reason_codes"])
+        self.assertNotIn("insufficient_hold", context["reason_codes"])
+
     def test_missing_leading_role_does_not_block_three_month_confirmation(self) -> None:
         periods = pd.period_range("2025-01", periods=10, freq="M")
         months = []
@@ -561,7 +787,7 @@ class ChinaCycleRegimeTests(unittest.TestCase):
         self.assertEqual(len(validated.months), 12)
         self.assertEqual(validated.as_of, "2024-12")
         self.assertEqual(validated.data_basis, "final")
-        self.assertEqual(validated.methodology_version, "1.0.1")
+        self.assertEqual(validated.methodology_version, "1.1.0")
         self.assertEqual(validated.a1_warnings, ["A1 warning"])
         self.assertEqual(
             validated.latest.last_decision_period,

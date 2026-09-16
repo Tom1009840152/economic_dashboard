@@ -446,6 +446,68 @@ export interface BusinessCycleDriver {
   contribution: number;
 }
 
+export interface BusinessCycleDriverContribution {
+  code: string;
+  name: string;
+  block_key: string;
+  effective_weight: number;
+  recent_score: number;
+  comparison_score: number;
+  level_contribution: number;
+  momentum_contribution: number;
+  recent_source_periods: string[];
+  comparison_source_periods: string[];
+}
+
+export interface BusinessCycleDriverDecomposition {
+  role: "coincident" | "leading";
+  status: "available" | "unavailable";
+  reason: "insufficient_history" | "insufficient_common_basis" | null;
+  basis_signature: string | null;
+  basis_codes: string[];
+  basis_coverage: number;
+  recent_window_start: string | null;
+  recent_window_end: string | null;
+  comparison_window_start: string | null;
+  comparison_window_end: string | null;
+  level_gap: number | null;
+  momentum_3m: number | null;
+  level_contribution_sum: number | null;
+  momentum_contribution_sum: number | null;
+  level_residual: number | null;
+  momentum_residual: number | null;
+  additivity_passed: boolean;
+  drivers: BusinessCycleDriverContribution[];
+}
+
+export type BusinessCycleStateChangeReason =
+  | "first_decision"
+  | "level_axis_changed"
+  | "momentum_axis_changed"
+  | "raw_phase_changed"
+  | "candidate_started"
+  | "candidate_progressed"
+  | "candidate_reset"
+  | "candidate_cleared"
+  | "phase_confirmed"
+  | "phase_maintained"
+  | "phase_carried_forward"
+  | "basis_changed_hold"
+  | "insufficient_hold"
+  | "dead_zone_unclassified"
+  | "level_dead_zone_inherited"
+  | "momentum_dead_zone_inherited"
+  | "leading_shortened_confirmation";
+
+export interface BusinessCycleStateChange {
+  previous_decision_period: string | null;
+  previous_level_axis: "above" | "below" | "neutral" | "unavailable" | null;
+  previous_momentum_axis: "rising" | "falling" | "neutral" | "unavailable" | null;
+  previous_raw_phase: BusinessCyclePhase | null;
+  previous_confirmed_phase: BusinessCyclePhase | null;
+  reason_codes: BusinessCycleStateChangeReason[];
+}
+
 export interface BusinessCycleAbsoluteAnchorPoint {
   code: string;
   name: string;
@@ -515,6 +577,8 @@ export interface BusinessCycleRegimePoint {
   leading_basis_coverage: number | null;
   coincident_basis_changed: boolean;
   leading_basis_changed: boolean;
+  coincident_decomposition: BusinessCycleDriverDecomposition;
+  leading_decomposition: BusinessCycleDriverDecomposition;
   coincident_index: number | null;
   leading_index: number | null;
   level_3m: number | null;
@@ -540,6 +604,7 @@ export interface BusinessCycleRegimePoint {
   summary: string;
   outlook: string;
   triggers: string[];
+  state_change: BusinessCycleStateChange;
   positive_contributions: BusinessCycleDriver[];
   negative_contributions: BusinessCycleDriver[];
 }
@@ -606,6 +671,8 @@ export interface BusinessCycleMethodology {
   absolute_breadth_expansionary: number;
   absolute_breadth_contractionary: number;
   inflation_direction_buffer_pp: number;
+  driver_decomposition: string;
+  decomposition_tolerance: number;
 }
 
 export function getChinaBusinessCycleRegime(months = 120): Promise<BusinessCycleRegimeDashboard> {
@@ -751,13 +818,132 @@ export interface BusinessCycleBacktestRegimeSnapshot {
   last_decision_period: string | null;
   carry_forward_months: number;
   decision_eligible: boolean;
+  raw_phase?: BusinessCyclePhase | null;
+  candidate_phase?: BusinessCyclePhase | null;
+  candidate_since?: string | null;
+  candidate_streak?: number;
+  required_confirmation_months?: number | null;
   level_axis: "above" | "below" | "neutral" | "unavailable";
   momentum_axis: "rising" | "falling" | "neutral" | "unavailable";
   level_3m: number | null;
+  level_gap?: number | null;
   momentum_3m: number | null;
+  leading_level_3m?: number | null;
+  leading_gap?: number | null;
+  leading_momentum_3m?: number | null;
+  leading_direction?: "up" | "down" | "neutral" | "unavailable";
   coincident_index: number | null;
   leading_index: number | null;
+  coincident_basis_signature?: string | null;
+  leading_basis_signature?: string | null;
+  coincident_basis_changed?: boolean;
+  leading_basis_changed?: boolean;
   confidence: ActivityMatrixConfidence;
+}
+
+export type BusinessCycleBacktestAttributionStatus =
+  | "available"
+  | "hybrid_unavailable"
+  | "not_comparable"
+  | "additivity_failed";
+
+export type BusinessCycleBacktestAttributionStepResult =
+  | "changed"
+  | "unchanged"
+  | "not_comparable";
+
+export type BusinessCycleBacktestAttributionStepValue =
+  | BusinessCycleBacktestAttributionStepResult
+  | boolean
+  | null;
+
+export interface BusinessCycleBacktestAttributionPhaseStep {
+  revision_step?: BusinessCycleBacktestAttributionStepValue;
+  support_step?: BusinessCycleBacktestAttributionStepValue;
+}
+
+export interface BusinessCycleBacktestAttributionPhaseSteps {
+  display?: BusinessCycleBacktestAttributionPhaseStep | null;
+  confirmed?: BusinessCycleBacktestAttributionPhaseStep | null;
+  raw?: BusinessCycleBacktestAttributionPhaseStep | null;
+}
+
+export type BusinessCycleBacktestAttributionMetricStatus =
+  | "available"
+  | "unavailable"
+  | "not_comparable"
+  | "additivity_failed";
+
+export interface BusinessCycleBacktestAttributionMetric {
+  status?: BusinessCycleBacktestAttributionMetricStatus;
+  realtime?: number | null;
+  hybrid?: number | null;
+  final?: number | null;
+  revision_path_delta?: number | null;
+  support_expansion_path_delta?: number | null;
+  total_delta?: number | null;
+  residual?: number | null;
+  additivity_passed?: boolean;
+}
+
+export interface BusinessCycleBacktestAttributionMetrics {
+  level_gap?: BusinessCycleBacktestAttributionMetric | null;
+  momentum_3m?: BusinessCycleBacktestAttributionMetric | null;
+  leading_gap?: BusinessCycleBacktestAttributionMetric | null;
+  leading_momentum_3m?: BusinessCycleBacktestAttributionMetric | null;
+}
+
+export interface BusinessCycleBacktestAttributionSupportAudit {
+  realtime_support_count?: number | null;
+  hybrid_support_count?: number | null;
+  final_support_count?: number | null;
+  matched_final_value_count?: number | null;
+  revised_input_count?: number | null;
+  expanded_input_count?: number | null;
+  missing_counterpart_count?: number | null;
+  ambiguous_counterpart_count?: number | null;
+  formula_mismatch_count?: number | null;
+  input_support_preserved?: boolean | null;
+  missing_counterpart_keys?: string[];
+  ambiguous_counterpart_keys?: string[];
+  formula_mismatch_keys?: string[];
+  support_window_start?: string | null;
+  realtime_coincident_basis_signature?: string | null;
+  hybrid_coincident_basis_signature?: string | null;
+  final_coincident_basis_signature?: string | null;
+  realtime_leading_basis_signature?: string | null;
+  hybrid_leading_basis_signature?: string | null;
+  final_leading_basis_signature?: string | null;
+  basis_changed_on_revision_path?: boolean | null;
+  basis_changed_on_support_path?: boolean | null;
+  decision_eligibility_changed_on_revision_path?: boolean | null;
+  decision_eligibility_changed_on_support_path?: boolean | null;
+  state_path_changed?: boolean | null;
+}
+
+export type BusinessCycleBacktestAttributionPath =
+  | "realtime_visible_information"
+  | "final_values_on_realtime_support"
+  | "full_final_information";
+
+export interface BusinessCycleBacktestAttribution {
+  observation_period?: string;
+  decision_as_of?: string;
+  attribution_methodology_version?: string;
+  a1_methodology_version?: string;
+  a2_methodology_version?: string;
+  a3_methodology_version?: string;
+  final_cutoff_at?: string;
+  status: BusinessCycleBacktestAttributionStatus;
+  realtime?: BusinessCycleBacktestRegimeSnapshot | null;
+  hybrid?: BusinessCycleBacktestRegimeSnapshot | null;
+  final?: BusinessCycleBacktestRegimeSnapshot | null;
+  support_audit?: BusinessCycleBacktestAttributionSupportAudit | null;
+  metrics?: BusinessCycleBacktestAttributionMetrics | null;
+  phase_steps?: BusinessCycleBacktestAttributionPhaseSteps | null;
+  path_order?: BusinessCycleBacktestAttributionPath[];
+  reasons?: string[];
+  warnings?: string[];
 }
 
 export interface BusinessCycleBacktestMonth {
@@ -805,4 +991,11 @@ export interface BusinessCycleBacktestDashboard {
 export function getChinaBusinessCycleBacktest(months = 120): Promise<BusinessCycleBacktestDashboard> {
   const query = new URLSearchParams({ months: String(months) });
   return apiFetch(`/api/analysis/cn/business-cycle/backtest?${query}`);
+}
+
+export function getChinaBusinessCycleBacktestAttribution(
+  period: string,
+): Promise<BusinessCycleBacktestAttribution> {
+  const query = new URLSearchParams({ period });
+  return apiFetch(`/api/analysis/cn/business-cycle/backtest/attribution?${query}`);
 }

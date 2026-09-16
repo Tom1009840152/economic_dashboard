@@ -321,7 +321,12 @@ def _valid_mof_archive_source(source: str) -> bool:
     return bool(document.xpath("//html")) and bool(document.text_content().strip())
 
 
-def _get_mof_archive_text(url: str, *, refresh: bool = False) -> str:
+def _get_mof_archive_text(
+    url: str,
+    *,
+    refresh: bool = False,
+    allow_cache_fallback: bool = True,
+) -> str:
     """Read official MOF HTML with a live-first, last-good fallback for indexes."""
 
     if not _is_mof_https_url(url):
@@ -349,7 +354,7 @@ def _get_mof_archive_text(url: str, *, refresh: bool = False) -> str:
             if attempt == 0:
                 time.sleep(0.5)
 
-    if cache_path.exists():
+    if allow_cache_fallback and cache_path.exists():
         cached = cache_path.read_text(encoding="utf-8")
         if _valid_mof_archive_source(cached):
             logger.warning("MOF live refresh failed; using last-good cache: %s", url)
@@ -2695,15 +2700,26 @@ def _load_credit_data() -> dict[str, pd.DataFrame]:
     return _merge_credit_current_values(_load_tsf_components(), _load_pboc_credit())
 
 
-def _mof_catalog(base_url: str, pages: int = 2) -> tuple[tuple[str, str], ...]:
+def _mof_catalog(
+    base_url: str,
+    pages: int = 2,
+    *,
+    strict_live: bool = False,
+) -> tuple[tuple[str, str], ...]:
     if not _is_mof_https_url(base_url):
         raise ValueError(f"refusing non-official MOF archive URL: {base_url}")
     found: dict[str, str] = {}
     for page in range(pages):
         page_url = base_url if page == 0 else urljoin(base_url, f"index_{page}.htm")
         try:
-            source = _get_mof_archive_text(page_url, refresh=True)
+            source = _get_mof_archive_text(
+                page_url,
+                refresh=True,
+                allow_cache_fallback=not strict_live,
+            )
         except Exception:
+            if strict_live:
+                raise
             logger.warning("MOF archive index failed: %s", page_url, exc_info=True)
             continue
         document = lxml_html.fromstring(source)
@@ -2726,7 +2742,12 @@ def _extract_yoy(text: str, label: str) -> tuple[float, float] | None:
     return float(match.group(1)), _signed(match.group(2), match.group(3))
 
 
-def _load_fiscal(page_count: int = 2) -> dict[str, pd.DataFrame]:
+def _load_fiscal(
+    page_count: int = 2,
+    *,
+    refresh_releases: bool = False,
+    strict_live: bool = False,
+) -> dict[str, pd.DataFrame]:
     output: dict[str, list[dict]] = {
         "CN_FISCAL_GENERAL_SPEND_YTD": [],
         "CN_FISCAL_GENERAL_SPEND_YOY": [],
@@ -2735,12 +2756,22 @@ def _load_fiscal(page_count: int = 2) -> dict[str, pd.DataFrame]:
         "CN_FISCAL_BROAD_EXPENDITURE_YTD": [],
         "CN_FISCAL_BROAD_EXPENDITURE_YOY": [],
     }
-    for source_url, title in _mof_catalog(_MOF_FISCAL_BASE, page_count):
+    for source_url, title in _mof_catalog(
+        _MOF_FISCAL_BASE,
+        page_count,
+        strict_live=strict_live,
+    ):
         if "财政收支情况" not in title:
             continue
         try:
-            source = _get_mof_archive_text(source_url)
+            source = _get_mof_archive_text(
+                source_url,
+                refresh=refresh_releases or strict_live,
+                allow_cache_fallback=not strict_live,
+            )
         except Exception:
+            if strict_live:
+                raise
             logger.warning("MOF fiscal release failed: %s", source_url, exc_info=True)
             continue
         text = _text_from_html(source)

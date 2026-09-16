@@ -7,6 +7,7 @@ from app.db import get_db
 from app.fetchers.china_monetary_transmission import fetch_china_monetary_transmission
 from app.schemas import (
     ChinaBusinessCycleMatrixOut,
+    ChinaCycleBacktestAttributionOut,
     ChinaCycleBacktestOut,
     ChinaCycleRegimeOut,
     MonetaryTransmissionDashboardOut,
@@ -21,6 +22,7 @@ from app.services.china_cycle_backtest import (
     DEFAULT_BACKTEST_MONTHS,
     MAX_BACKTEST_MONTHS,
     build_china_cycle_backtest,
+    build_china_cycle_backtest_attribution,
 )
 
 
@@ -124,5 +126,21 @@ def get_china_cycle_backtest(
             end=end,
             months=months,
         )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get(
+    "/cn/business-cycle/backtest/attribution",
+    response_model=ChinaCycleBacktestAttributionOut,
+)
+def get_china_cycle_backtest_attribution(
+    period: str = Query(description="需要拆解的观察月，格式为YYYY-MM"),
+    db: Session = Depends(get_db),
+):
+    """Build one lazy R→H→F model-output attribution audit."""
+
+    try:
+        return build_china_cycle_backtest_attribution(db, period=period)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

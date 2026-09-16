@@ -32,6 +32,7 @@ from app.services.china_business_cycle import (
     FORMULA_VERSIONED_CYCLE_INPUTS,
     MAX_OUTPUT_MONTHS,
     METHODOLOGY_VERSION as A1_METHODOLOGY_VERSION,
+    ROLLING_WINDOW_MONTHS,
     VALIDATION_CODES,
     _matrix_from_rows,
     cycle_indicator_codes,
@@ -46,7 +47,8 @@ from app.services.china_cycle_regime import (
 )
 
 
-METHODOLOGY_VERSION = "1.3.4"
+METHODOLOGY_VERSION = "1.4.0"
+ATTRIBUTION_METHODOLOGY_VERSION = "1.0.0"
 DEFAULT_BACKTEST_MONTHS = 120
 MAX_BACKTEST_MONTHS = 120
 MIN_RATE_SAMPLE = 24
@@ -105,12 +107,29 @@ class _BacktestCacheEntry:
     expires_at: float
 
 
+@dataclass(frozen=True)
+class _AttributionCacheKey:
+    period: str
+    a1_methodology_version: str
+    a2_methodology_version: str
+    a3_methodology_version: str
+    attribution_methodology_version: str
+    model_codes: tuple[str, ...]
+    current_values: _InputWatermark
+    vintages: _InputWatermark
+    release_evidence: _InputWatermark
+
+
 # This LRU is intentionally process-local.  Normal versioned writes change the
 # watermark key immediately; the finite TTL also bounds staleness when an
 # exceptional maintenance operation edits rows in place without bumping their
 # version/retrieval metadata.
 _backtest_cache: OrderedDict[_BacktestCacheKey, _BacktestCacheEntry] = OrderedDict()
 _backtest_inflight: dict[_BacktestCacheKey, Future[dict]] = {}
+_attribution_cache: OrderedDict[
+    _AttributionCacheKey, _BacktestCacheEntry
+] = OrderedDict()
+_attribution_inflight: dict[_AttributionCacheKey, Future[dict]] = {}
 _backtest_cache_lock = RLock()
 
 
@@ -119,6 +138,7 @@ def _clear_backtest_cache() -> None:
 
     with _backtest_cache_lock:
         _backtest_cache.clear()
+        _attribution_cache.clear()
 
 
 def _table_watermark(
@@ -220,6 +240,47 @@ def _cached_backtest_result(key: _BacktestCacheKey, builder) -> dict:
     return deepcopy(result)
 
 
+def _cached_attribution_result(key: _AttributionCacheKey, builder) -> dict:
+    """Return one cached single-month audit with the same safety as A3."""
+
+    with _backtest_cache_lock:
+        cached = _attribution_cache.get(key)
+        if cached is not None and cached.expires_at > monotonic():
+            _attribution_cache.move_to_end(key)
+            return deepcopy(cached.result)
+        if cached is not None:
+            _attribution_cache.pop(key, None)
+        future = _attribution_inflight.get(key)
+        owns_build = future is None
+        if owns_build:
+            future = Future()
+            _attribution_inflight[key] = future
+
+    if not owns_build:
+        return deepcopy(future.result())
+
+    assert future is not None
+    try:
+        result = builder()
+    except BaseException as exc:
+        with _backtest_cache_lock:
+            _attribution_inflight.pop(key, None)
+        future.set_exception(exc)
+        raise
+
+    with _backtest_cache_lock:
+        _attribution_cache[key] = _BacktestCacheEntry(
+            result=result,
+            expires_at=monotonic() + _BACKTEST_CACHE_TTL_SECONDS,
+        )
+        _attribution_cache.move_to_end(key)
+        while len(_attribution_cache) > _BACKTEST_CACHE_MAX_SIZE:
+            _attribution_cache.popitem(last=False)
+        _attribution_inflight.pop(key, None)
+    future.set_result(result)
+    return deepcopy(result)
+
+
 def _period_distance(left: str | pd.Period, right: str | pd.Period) -> int:
     left_period = pd.Period(left, freq="M")
     right_period = pd.Period(right, freq="M")
@@ -242,6 +303,12 @@ def _decision_as_of(period: pd.Period) -> tuple[datetime, str]:
         DECISION_HOUR,
         tzinfo=ZoneInfo(DECISION_TIMEZONE),
     )
+    offset = local.utcoffset()
+    if offset is None or offset.total_seconds() % 60:
+        raise ValueError(
+            "period's fixed Asia/Shanghai decision timestamp falls outside "
+            "the supported minute-offset timezone history"
+        )
     local_naive = local.replace(tzinfo=None)
     return local_naive, local.isoformat()
 
@@ -655,6 +722,7 @@ def _regime_for_rows(
         matrix,
         inflation_rows,
         output_months=MAX_OUTPUT_MONTHS,
+        include_explanations=False,
     )
     month = next(
         (item for item in reversed(regime.get("months", [])) if item["period"] == str(period)),
@@ -720,6 +788,7 @@ def _fixed_survey_regime_from_matrix(
         inflation_rows,
         output_months=MAX_OUTPUT_MONTHS,
         coincident_panel_mode="fixed_survey_core_v1",
+        include_explanations=False,
     )
     month = next(
         (item for item in reversed(regime.get("months", [])) if item["period"] == str(period)),
@@ -753,13 +822,384 @@ def _phase_snapshot(month: dict | None, regime: dict) -> dict | None:
             )
         ),
         "decision_eligible": bool(month.get("decision_eligible")),
+        "raw_phase": month.get("raw_phase"),
+        "candidate_phase": month.get("candidate_phase"),
+        "candidate_since": month.get("candidate_since"),
+        "candidate_streak": int(month.get("candidate_streak") or 0),
+        "required_confirmation_months": month.get(
+            "required_confirmation_months"
+        ),
         "level_axis": month.get("level_axis", "unavailable"),
         "momentum_axis": month.get("momentum_axis", "unavailable"),
         "level_3m": month.get("level_3m"),
-        "momentum_3m": month.get("momentum_3m"),
+        "level_gap": month.get("_attribution_level_gap", month.get("level_gap")),
+        "momentum_3m": month.get(
+            "_attribution_momentum_3m", month.get("momentum_3m")
+        ),
+        "leading_level_3m": month.get("leading_level_3m"),
+        "leading_gap": month.get(
+            "_attribution_leading_gap", month.get("leading_gap")
+        ),
+        "leading_momentum_3m": month.get(
+            "_attribution_leading_momentum_3m",
+            month.get("leading_momentum_3m"),
+        ),
+        "leading_direction": month.get("leading_direction", "unavailable"),
         "coincident_index": month.get("coincident_index"),
         "leading_index": month.get("leading_index"),
+        "coincident_basis_signature": month.get("coincident_basis_signature"),
+        "leading_basis_signature": month.get("leading_basis_signature"),
+        "coincident_basis_changed": bool(
+            month.get("coincident_basis_changed", False)
+        ),
+        "leading_basis_changed": bool(month.get("leading_basis_changed", False)),
         "confidence": month.get("confidence", "insufficient"),
+    }
+
+
+def _attribution_support_key(row: dict) -> tuple[str, date, str | None]:
+    """Identify one model observation without weakening formula semantics."""
+
+    return (
+        str(row["indicator_code"]),
+        row["date"],
+        row.get("formula_version"),
+    )
+
+
+def _hybrid_rows_on_realtime_support(
+    strict_rows: list[dict],
+    final_rows: list[dict],
+    *,
+    support_start: date | None = None,
+) -> tuple[list[dict], dict]:
+    """Return H = final values on exactly R's usable input support.
+
+    The helper deliberately copies R metadata and replaces only ``value``.
+    Formula-ineligible legacy rows are retained for a faithful A1 input replay,
+    but they do not enter the support audit because production A1 excludes them.
+    A missing or non-unique exact peer is fail-closed by the caller.
+    """
+
+    eligible_strict = [
+        row
+        for row in strict_rows
+        if row["indicator_code"] in CYCLE_CODES
+        and _uses_current_formula_version(row)
+        and (support_start is None or row["date"] >= support_start)
+    ]
+    eligible_final = [
+        row
+        for row in final_rows
+        if row["indicator_code"] in CYCLE_CODES
+        and _uses_current_formula_version(row)
+        and (support_start is None or row["date"] >= support_start)
+    ]
+    final_by_exact_key: dict[tuple[str, date, str | None], list[dict]] = defaultdict(list)
+    final_by_observation: dict[tuple[str, date], list[dict]] = defaultdict(list)
+    for row in final_rows:
+        if row["indicator_code"] in CYCLE_CODES and (
+            support_start is None or row["date"] >= support_start
+        ):
+            final_by_observation[(row["indicator_code"], row["date"])].append(row)
+    for row in eligible_final:
+        final_by_exact_key[_attribution_support_key(row)].append(row)
+
+    missing_keys: list[str] = []
+    ambiguous_keys: list[str] = []
+    formula_mismatch_keys: list[str] = []
+    substituted = 0
+    revised = 0
+    hybrid_rows: list[dict] = []
+    eligible_strict_ids = {id(row) for row in eligible_strict}
+    for row in strict_rows:
+        clone = dict(row)
+        if id(row) not in eligible_strict_ids:
+            hybrid_rows.append(clone)
+            continue
+        key = _attribution_support_key(row)
+        peers = final_by_exact_key.get(key, [])
+        key_label = f"{key[0]}:{key[1].isoformat()}:{key[2] or '-'}"
+        if len(peers) == 1:
+            final_peer = peers[0]
+            final_value = float(final_peer["value"])
+            revised += abs(float(row["value"]) - final_value) > 1e-9
+            clone["value"] = final_value
+            substituted += 1
+        elif len(peers) > 1:
+            ambiguous_keys.append(key_label)
+        else:
+            observation_peers = final_by_observation.get(
+                (row["indicator_code"], row["date"]), []
+            )
+            if observation_peers:
+                formula_mismatch_keys.append(key_label)
+            else:
+                missing_keys.append(key_label)
+        hybrid_rows.append(clone)
+
+    strict_keys = {_attribution_support_key(row) for row in eligible_strict}
+    final_keys = {_attribution_support_key(row) for row in eligible_final}
+    audit = {
+        "realtime_support_count": len(strict_keys),
+        "hybrid_support_count": len(strict_keys),
+        "final_support_count": len(final_keys),
+        "matched_final_value_count": substituted,
+        "revised_input_count": revised,
+        "expanded_input_count": len(final_keys - strict_keys),
+        "missing_counterpart_count": len(missing_keys),
+        "ambiguous_counterpart_count": len(ambiguous_keys),
+        "formula_mismatch_count": len(formula_mismatch_keys),
+        "input_support_preserved": True,
+        "missing_counterpart_keys": missing_keys[:10],
+        "ambiguous_counterpart_keys": ambiguous_keys[:10],
+        "formula_mismatch_keys": formula_mismatch_keys[:10],
+        "support_window_start": support_start.isoformat() if support_start else None,
+    }
+    return hybrid_rows, audit
+
+
+def _attribution_metric(
+    realtime: dict | None,
+    hybrid: dict | None,
+    final: dict | None,
+    key: str,
+) -> dict:
+    values = [
+        snapshot.get(key) if snapshot is not None else None
+        for snapshot in (realtime, hybrid, final)
+    ]
+    if any(value is None for value in values):
+        return {
+            "status": "unavailable",
+            "realtime": values[0],
+            "hybrid": values[1],
+            "final": values[2],
+            "revision_path_delta": None,
+            "support_expansion_path_delta": None,
+            "total_delta": None,
+            "residual": None,
+            "additivity_passed": False,
+        }
+    realtime_value, hybrid_value, final_value = (float(value) for value in values)
+    revision_delta = realtime_value - hybrid_value
+    support_delta = hybrid_value - final_value
+    total_delta = realtime_value - final_value
+    residual = total_delta - revision_delta - support_delta
+    passed = abs(residual) <= 1e-8
+    return {
+        "status": "available" if passed else "additivity_failed",
+        "realtime": round(realtime_value, 6),
+        "hybrid": round(hybrid_value, 6),
+        "final": round(final_value, 6),
+        "revision_path_delta": round(revision_delta, 6),
+        "support_expansion_path_delta": round(support_delta, 6),
+        "total_delta": round(total_delta, 6),
+        "residual": round(residual, 10),
+        "additivity_passed": passed,
+    }
+
+
+def _attribution_step(left: dict | None, right: dict | None, key: str) -> str:
+    left_value = left.get(key) if left is not None else None
+    right_value = right.get(key) if right is not None else None
+    if left_value is None or right_value is None:
+        return "not_comparable"
+    return "unchanged" if left_value == right_value else "changed"
+
+
+def _build_counterfactual_attribution(
+    strict_rows: list[dict],
+    final_rows: list[dict],
+    period: pd.Period,
+    *,
+    decision_as_of: str,
+    final_cutoff_at: datetime,
+) -> dict:
+    """Build one on-demand R→H→F model-output audit for an exact endpoint."""
+
+    base = {
+        "observation_period": str(period),
+        "decision_as_of": decision_as_of,
+        "attribution_methodology_version": ATTRIBUTION_METHODOLOGY_VERSION,
+        "a1_methodology_version": A1_METHODOLOGY_VERSION,
+        "a2_methodology_version": A2_METHODOLOGY_VERSION,
+        "a3_methodology_version": METHODOLOGY_VERSION,
+        "path_order": [
+            "realtime_visible_information",
+            "final_values_on_realtime_support",
+            "full_final_information",
+        ],
+        "final_cutoff_at": final_cutoff_at.astimezone(UTC).isoformat(),
+        "realtime": None,
+        "hybrid": None,
+        "final": None,
+        "support_audit": None,
+        "metrics": {},
+        "phase_steps": {},
+        "warnings": [
+            "这是同端点伪实时重跑的模型内部反事实审计，不是历史上真实发布过的决策账本。",
+            "路径拆解依赖R→H→F的替换顺序，包含重新标准化、篮子和状态路径交互，不是经济因果或原因占比。",
+        ],
+    }
+    if not strict_rows or not _has_minimum_coincident_inputs(strict_rows):
+        return {
+            **base,
+            "status": "not_comparable",
+            "reasons": ["realtime_support_insufficient"],
+        }
+    if not final_rows:
+        return {
+            **base,
+            "status": "not_comparable",
+            "reasons": ["final_support_unavailable"],
+        }
+
+    # Audit exact H support before running three expensive A1/A2 paths.  A
+    # missing peer cannot yield a strict attribution regardless of their
+    # endpoint labels, so fail closed quickly.
+    # A1 needs at most 60 prior months for each of A2's 240 replay months;
+    # the extra five months cover the hidden comparison month, trailing means,
+    # and the pre-registered one-month consumer-expectations alignment.
+    support_start = (
+        period - (MAX_OUTPUT_MONTHS + ROLLING_WINDOW_MONTHS + 5)
+    ).start_time.date()
+    hybrid_rows, support_audit = _hybrid_rows_on_realtime_support(
+        strict_rows,
+        final_rows,
+        support_start=support_start,
+    )
+    base["support_audit"] = support_audit
+    if (
+        support_audit["matched_final_value_count"]
+        != support_audit["realtime_support_count"]
+        or support_audit["missing_counterpart_count"]
+        or support_audit["ambiguous_counterpart_count"]
+        or support_audit["formula_mismatch_count"]
+    ):
+        return {
+            **base,
+            "status": "hybrid_unavailable",
+            "reasons": ["realtime_support_not_exactly_matchable"],
+        }
+
+    realtime_regime, realtime_month = _regime_for_rows(strict_rows, period)
+    final_regime, final_month = _regime_for_rows(final_rows, period)
+    realtime = _phase_snapshot(realtime_month, realtime_regime)
+    final = _phase_snapshot(final_month, final_regime)
+    base.update({"realtime": realtime, "final": final})
+    if (
+        realtime is None
+        or final is None
+        or realtime.get("phase") is None
+        or final.get("phase") is None
+    ):
+        return {
+            **base,
+            "status": "not_comparable",
+            "reasons": ["endpoint_phase_not_comparable"],
+        }
+
+    hybrid_regime, hybrid_month = _regime_for_rows(hybrid_rows, period)
+    hybrid = _phase_snapshot(hybrid_month, hybrid_regime)
+    base["hybrid"] = hybrid
+    if hybrid is None:
+        return {
+            **base,
+            "status": "hybrid_unavailable",
+            "reasons": ["hybrid_endpoint_unavailable"],
+        }
+
+    support_audit.update(
+        {
+            "realtime_coincident_basis_signature": realtime.get(
+                "coincident_basis_signature"
+            ),
+            "hybrid_coincident_basis_signature": hybrid.get(
+                "coincident_basis_signature"
+            ),
+            "final_coincident_basis_signature": final.get(
+                "coincident_basis_signature"
+            ),
+            "realtime_leading_basis_signature": realtime.get(
+                "leading_basis_signature"
+            ),
+            "hybrid_leading_basis_signature": hybrid.get(
+                "leading_basis_signature"
+            ),
+            "final_leading_basis_signature": final.get(
+                "leading_basis_signature"
+            ),
+            "basis_changed_on_revision_path": bool(
+                realtime.get("coincident_basis_signature")
+                != hybrid.get("coincident_basis_signature")
+                or realtime.get("leading_basis_signature")
+                != hybrid.get("leading_basis_signature")
+            ),
+            "basis_changed_on_support_path": bool(
+                hybrid.get("coincident_basis_signature")
+                != final.get("coincident_basis_signature")
+                or hybrid.get("leading_basis_signature")
+                != final.get("leading_basis_signature")
+            ),
+            "decision_eligibility_changed_on_revision_path": (
+                realtime.get("decision_eligible") != hybrid.get("decision_eligible")
+            ),
+            "decision_eligibility_changed_on_support_path": (
+                hybrid.get("decision_eligible") != final.get("decision_eligible")
+            ),
+        }
+    )
+    metrics = {
+        key: _attribution_metric(realtime, hybrid, final, key)
+        for key in (
+            "level_gap",
+            "momentum_3m",
+            "leading_gap",
+            "leading_momentum_3m",
+        )
+    }
+    phase_steps = {
+        label: {
+            "revision_step": _attribution_step(realtime, hybrid, key),
+            "support_step": _attribution_step(hybrid, final, key),
+        }
+        for label, key in (
+            ("display", "phase"),
+            ("confirmed", "confirmed_phase"),
+            ("raw", "raw_phase"),
+        )
+    }
+    endpoint_label_changed = any(
+        item["revision_step"] == "changed" or item["support_step"] == "changed"
+        for item in phase_steps.values()
+    )
+    state_keys = (
+        "phase_status",
+        "phase_basis",
+        "confirmed_since",
+        "candidate_phase",
+        "candidate_since",
+        "candidate_streak",
+        "required_confirmation_months",
+        "last_decision_period",
+    )
+    support_audit["state_path_changed"] = bool(
+        endpoint_label_changed
+        or any(realtime.get(key) != hybrid.get(key) for key in state_keys)
+        or any(hybrid.get(key) != final.get(key) for key in state_keys)
+    )
+    additivity_failed = any(
+        item["status"] == "additivity_failed" for item in metrics.values()
+    )
+    return {
+        **base,
+        "status": "additivity_failed" if additivity_failed else "available",
+        "reasons": ["coordinate_additivity_failed"] if additivity_failed else [],
+        "hybrid": hybrid,
+        "support_audit": support_audit,
+        "metrics": metrics,
+        "phase_steps": phase_steps,
     }
 
 
@@ -1609,6 +2049,118 @@ def _build_backtest_from_rows(
             "排除1月只改变评价窗口，不补造1月数据，也不消除缺口对随后共同篮子的影响。",
         ],
     }
+
+
+def build_china_cycle_backtest_attribution(
+    db: Session,
+    *,
+    period: str,
+    now: datetime | None = None,
+) -> dict:
+    """Explain one exact-endpoint R→H→F difference without slowing A3."""
+
+    try:
+        target_period = pd.Period(period, freq="M")
+    except (TypeError, ValueError) as exc:
+        raise ValueError("period must use YYYY-MM") from exc
+    if str(target_period) != period:
+        raise ValueError("period must use YYYY-MM")
+    now = now or datetime.now(UTC)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=UTC)
+    completed_end = _latest_completed_period(now)
+    if target_period > completed_end:
+        raise ValueError(
+            f"period must not be later than {completed_end}; its fixed decision timestamp has not occurred"
+        )
+
+    observation_end = target_period.end_time.date()
+    cutoff_utc, cutoff_display = _decision_as_of(target_period)
+    (
+        current_watermark,
+        vintage_watermark,
+        evidence_watermark,
+    ) = _backtest_data_watermark(db, observation_end=observation_end)
+    cache_key = _AttributionCacheKey(
+        period=str(target_period),
+        a1_methodology_version=A1_METHODOLOGY_VERSION,
+        a2_methodology_version=A2_METHODOLOGY_VERSION,
+        a3_methodology_version=METHODOLOGY_VERSION,
+        attribution_methodology_version=ATTRIBUTION_METHODOLOGY_VERSION,
+        model_codes=MODEL_CODES,
+        current_values=current_watermark,
+        vintages=vintage_watermark,
+        release_evidence=evidence_watermark,
+    )
+
+    def build() -> dict:
+        vintage_query = (
+            select(DataPointVintage)
+            .where(DataPointVintage.indicator_code.in_(MODEL_CODES))
+            .where(DataPointVintage.date <= observation_end)
+            .order_by(
+                DataPointVintage.indicator_code,
+                DataPointVintage.date,
+                DataPointVintage.version,
+            )
+        )
+        final_query = (
+            select(DataPoint)
+            .where(DataPoint.indicator_code.in_(MODEL_CODES))
+            .where(DataPoint.date <= observation_end)
+            .order_by(DataPoint.indicator_code, DataPoint.date)
+        )
+        evidence_query = (
+            select(ReleaseEvidence)
+            .where(ReleaseEvidence.indicator_code.in_(MODEL_CODES))
+            .where(ReleaseEvidence.date <= observation_end)
+            .where(ReleaseEvidence.chain_verified.is_(True))
+            .where(
+                ReleaseEvidence.evidence_kind.in_(AUTHORITATIVE_EVIDENCE_KINDS)
+            )
+            .where(
+                ReleaseEvidence.availability_precision.in_(
+                    AUTHORITATIVE_AVAILABILITY_PRECISIONS
+                )
+            )
+            .order_by(
+                ReleaseEvidence.indicator_code,
+                ReleaseEvidence.date,
+                ReleaseEvidence.available_at,
+                ReleaseEvidence.version,
+                ReleaseEvidence.retrieved_at,
+                ReleaseEvidence.id,
+            )
+        )
+        vintages = _authoritative_vintage_rows(
+            list(db.scalars(vintage_query)),
+            list(db.scalars(evidence_query)),
+        )
+        strict_rows, _ = _select_strict_vintages(
+            vintages,
+            as_of=cutoff_utc,
+            observation_end=observation_end,
+            audit_codes=set(REQUIRED_CODES),
+        )
+        strict_rows = [
+            row for row in strict_rows if row["indicator_code"] in MODEL_CODES
+        ]
+        final_rows = [
+            _plain_row(row)
+            for row in db.scalars(final_query)
+            if row.indicator_code in MODEL_CODES
+        ]
+        return _build_counterfactual_attribution(
+            strict_rows,
+            final_rows,
+            target_period,
+            decision_as_of=cutoff_display,
+            final_cutoff_at=now,
+        )
+
+    result = _cached_attribution_result(cache_key, build)
+    result["final_cutoff_at"] = now.astimezone(UTC).isoformat()
+    return result
 
 
 def _latest_completed_period(now: datetime) -> pd.Period:

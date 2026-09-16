@@ -473,6 +473,8 @@ class RegimeMethodologyOut(BaseModel):
     absolute_breadth_expansionary: float
     absolute_breadth_contractionary: float
     inflation_direction_buffer_pp: float
+    driver_decomposition: str
+    decomposition_tolerance: float
 
 
 class RegimeDriverOut(BaseModel):
@@ -481,6 +483,70 @@ class RegimeDriverOut(BaseModel):
     block_key: str
     source_period: str | None = None
     contribution: float
+
+
+class RegimeDriverContributionOut(BaseModel):
+    code: str
+    name: str
+    block_key: str
+    effective_weight: float
+    recent_score: float
+    comparison_score: float
+    level_contribution: float
+    momentum_contribution: float
+    recent_source_periods: list[str]
+    comparison_source_periods: list[str]
+
+
+class RegimeDriverDecompositionOut(BaseModel):
+    role: Literal["coincident", "leading"]
+    status: Literal["available", "unavailable"]
+    reason: Literal["insufficient_history", "insufficient_common_basis"] | None = None
+    basis_signature: str | None = None
+    basis_codes: list[str]
+    basis_coverage: float
+    recent_window_start: str | None = None
+    recent_window_end: str | None = None
+    comparison_window_start: str | None = None
+    comparison_window_end: str | None = None
+    level_gap: float | None = None
+    momentum_3m: float | None = None
+    level_contribution_sum: float | None = None
+    momentum_contribution_sum: float | None = None
+    level_residual: float | None = None
+    momentum_residual: float | None = None
+    additivity_passed: bool
+    drivers: list[RegimeDriverContributionOut]
+
+
+RegimeStateChangeReason = Literal[
+    "first_decision",
+    "level_axis_changed",
+    "momentum_axis_changed",
+    "raw_phase_changed",
+    "candidate_started",
+    "candidate_progressed",
+    "candidate_reset",
+    "candidate_cleared",
+    "phase_confirmed",
+    "phase_maintained",
+    "phase_carried_forward",
+    "basis_changed_hold",
+    "insufficient_hold",
+    "dead_zone_unclassified",
+    "level_dead_zone_inherited",
+    "momentum_dead_zone_inherited",
+    "leading_shortened_confirmation",
+]
+
+
+class RegimeStateChangeOut(BaseModel):
+    previous_decision_period: str | None = None
+    previous_level_axis: Literal["above", "below", "neutral", "unavailable"] | None = None
+    previous_momentum_axis: Literal["rising", "falling", "neutral", "unavailable"] | None = None
+    previous_raw_phase: RelativeCyclePhase | None = None
+    previous_confirmed_phase: RelativeCyclePhase | None = None
+    reason_codes: list[RegimeStateChangeReason]
 
 
 class AbsoluteAnchorPointOut(BaseModel):
@@ -553,6 +619,8 @@ class RegimeMonthOut(BaseModel):
     leading_basis_coverage: float | None = None
     coincident_basis_changed: bool
     leading_basis_changed: bool
+    coincident_decomposition: RegimeDriverDecompositionOut
+    leading_decomposition: RegimeDriverDecompositionOut
     coincident_index: float | None = None
     leading_index: float | None = None
     level_3m: float | None = None
@@ -578,6 +646,7 @@ class RegimeMonthOut(BaseModel):
     summary: str
     outlook: str
     triggers: list[str]
+    state_change: RegimeStateChangeOut
     positive_contributions: list[RegimeDriverOut]
     negative_contributions: list[RegimeDriverOut]
 
@@ -844,13 +913,109 @@ class CycleBacktestPhaseSnapshotOut(BaseModel):
     last_decision_period: str | None = None
     carry_forward_months: int
     decision_eligible: bool
+    raw_phase: RelativeCyclePhase | None = None
+    candidate_phase: RelativeCyclePhase | None = None
+    candidate_since: str | None = None
+    candidate_streak: int = 0
+    required_confirmation_months: int | None = None
     level_axis: Literal["above", "below", "neutral", "unavailable"]
     momentum_axis: Literal["rising", "falling", "neutral", "unavailable"]
     level_3m: float | None = None
+    level_gap: float | None = None
     momentum_3m: float | None = None
+    leading_level_3m: float | None = None
+    leading_gap: float | None = None
+    leading_momentum_3m: float | None = None
+    leading_direction: Literal["up", "down", "neutral", "unavailable"] = (
+        "unavailable"
+    )
     coincident_index: float | None = None
     leading_index: float | None = None
+    coincident_basis_signature: str | None = None
+    leading_basis_signature: str | None = None
+    coincident_basis_changed: bool = False
+    leading_basis_changed: bool = False
     confidence: Literal["high", "medium", "low", "insufficient"]
+
+
+class CycleBacktestAttributionMetricOut(BaseModel):
+    status: Literal["available", "unavailable", "additivity_failed"]
+    realtime: float | None = None
+    hybrid: float | None = None
+    final: float | None = None
+    revision_path_delta: float | None = None
+    support_expansion_path_delta: float | None = None
+    total_delta: float | None = None
+    residual: float | None = None
+    additivity_passed: bool
+
+
+class CycleBacktestAttributionPhaseStepOut(BaseModel):
+    revision_step: Literal["changed", "unchanged", "not_comparable"]
+    support_step: Literal["changed", "unchanged", "not_comparable"]
+
+
+class CycleBacktestAttributionPhaseStepsOut(BaseModel):
+    display: CycleBacktestAttributionPhaseStepOut | None = None
+    confirmed: CycleBacktestAttributionPhaseStepOut | None = None
+    raw: CycleBacktestAttributionPhaseStepOut | None = None
+
+
+class CycleBacktestAttributionSupportAuditOut(BaseModel):
+    realtime_support_count: int
+    hybrid_support_count: int
+    final_support_count: int
+    matched_final_value_count: int
+    revised_input_count: int
+    expanded_input_count: int
+    missing_counterpart_count: int
+    ambiguous_counterpart_count: int
+    formula_mismatch_count: int
+    input_support_preserved: bool
+    missing_counterpart_keys: list[str]
+    ambiguous_counterpart_keys: list[str]
+    formula_mismatch_keys: list[str]
+    support_window_start: str | None = None
+    realtime_coincident_basis_signature: str | None = None
+    hybrid_coincident_basis_signature: str | None = None
+    final_coincident_basis_signature: str | None = None
+    realtime_leading_basis_signature: str | None = None
+    hybrid_leading_basis_signature: str | None = None
+    final_leading_basis_signature: str | None = None
+    basis_changed_on_revision_path: bool | None = None
+    basis_changed_on_support_path: bool | None = None
+    decision_eligibility_changed_on_revision_path: bool | None = None
+    decision_eligibility_changed_on_support_path: bool | None = None
+    state_path_changed: bool | None = None
+
+
+class ChinaCycleBacktestAttributionOut(BaseModel):
+    observation_period: str
+    decision_as_of: datetime
+    attribution_methodology_version: str
+    a1_methodology_version: str
+    a2_methodology_version: str
+    a3_methodology_version: str
+    path_order: list[Literal[
+        "realtime_visible_information",
+        "final_values_on_realtime_support",
+        "full_final_information",
+    ]]
+    final_cutoff_at: datetime
+    status: Literal[
+        "available",
+        "hybrid_unavailable",
+        "not_comparable",
+        "additivity_failed",
+    ]
+    reasons: list[str]
+    realtime: CycleBacktestPhaseSnapshotOut | None = None
+    hybrid: CycleBacktestPhaseSnapshotOut | None = None
+    final: CycleBacktestPhaseSnapshotOut | None = None
+    support_audit: CycleBacktestAttributionSupportAuditOut | None = None
+    metrics: dict[str, CycleBacktestAttributionMetricOut]
+    phase_steps: CycleBacktestAttributionPhaseStepsOut
+    warnings: list[str]
 
 
 FinalReferenceStatus = Literal[

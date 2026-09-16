@@ -155,6 +155,7 @@ def _store_points(
     df: pd.DataFrame,
     *,
     commit: bool = True,
+    missing_only: bool = False,
 ) -> int:
     """Update current observations and append only meaningful vintage changes.
 
@@ -215,6 +216,12 @@ def _store_points(
             changed += 1
             continue
 
+        if missing_only:
+            # A caller that already validated a missing-only plan must never
+            # turn a same-key race into an update. The caller can compare the
+            # returned count with its plan and fail/rollback atomically.
+            continue
+
         metadata = _avoid_metadata_downgrade(point, value, metadata)
         if not _content_changed(point, value, metadata):
             continue
@@ -238,12 +245,31 @@ def _store_points(
     return changed
 
 
-def upsert_points(db: Session, code: str, df: pd.DataFrame) -> int:
-    """Quality-check and store one indicator outside a refresh run."""
+def upsert_points(
+    db: Session,
+    code: str,
+    df: pd.DataFrame,
+    *,
+    commit: bool = True,
+    missing_only: bool = False,
+) -> int:
+    """Quality-check and store one indicator outside a refresh run.
+
+    Callers coordinating several indicators may pass ``commit=False`` and
+    commit the enclosing transaction once all quality-checked writes succeed.
+    ``missing_only=True`` makes an existing key an immutable no-op, including
+    when it appears after the caller planned its batch.
+    """
 
     report = validate_indicator_frame(db, code, df)
     enforce_quality(report)
-    return _store_points(db, code, df)
+    return _store_points(
+        db,
+        code,
+        df,
+        commit=commit,
+        missing_only=missing_only,
+    )
 
 
 def _last_success(db: Session, code: str) -> RefreshResult | None:

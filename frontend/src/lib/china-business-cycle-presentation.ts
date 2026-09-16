@@ -1,6 +1,8 @@
 import type {
+  BusinessCycleDriverDecomposition,
   BusinessCyclePhase,
   BusinessCycleRegimePoint,
+  BusinessCycleStateChangeReason,
 } from "@/lib/api";
 
 const PHASE_NAMES: Record<BusinessCyclePhase, string> = {
@@ -152,7 +154,54 @@ export function previousComparableMonth(
   current: BusinessCycleRegimePoint,
 ): BusinessCycleRegimePoint | null {
   const earlier = months.filter((month) => month.period < current.period);
+  const backendPeriod = current.state_change.previous_decision_period;
+  if (backendPeriod) {
+    const backendMonth = earlier.find((month) => month.period === backendPeriod);
+    if (backendMonth) {
+      return backendMonth;
+    }
+  }
   return earlier.findLast((month) => month.decision_eligible && month.phase !== null) ?? null;
+}
+
+const STATE_CHANGE_LABELS: Record<BusinessCycleStateChangeReason, string> = {
+  first_decision: "这是首个满足条件的判断月",
+  level_axis_changed: "活动水平轴发生变化",
+  momentum_axis_changed: "三月动能方向发生变化",
+  raw_phase_changed: "四象限位置发生变化",
+  candidate_started: "形成了新的阶段候选",
+  candidate_progressed: "候选阶段又积累了一个连续月",
+  candidate_reset: "此前未确认候选中断并重置",
+  candidate_cleared: "此前候选已经消失",
+  phase_confirmed: "连续确认门槛已经满足",
+  phase_maintained: "当前坐标仍支持原有状态",
+  phase_carried_forward: "本月只沿用上次确认，不形成新判断",
+  basis_changed_hold: "共同指标篮子变化，本月暂停判定",
+  insufficient_hold: "共同成分或连续历史不足，本月暂停判定",
+  dead_zone_unclassified: "数据完整，但至少一个轴仍在判定死区，暂不能归入四象限",
+  level_dead_zone_inherited: "活动水平位于死区，沿用已确认方向",
+  momentum_dead_zone_inherited: "三月动能位于死区，沿用已确认方向",
+  leading_shortened_confirmation: "领先方向同向，把确认要求缩短为连续两个月",
+};
+
+export function stateChangeExplanation(point: BusinessCycleRegimePoint): string {
+  const reasons = point.state_change.reason_codes.map((reason) => STATE_CHANGE_LABELS[reason]);
+  if (reasons.length === 0) {
+    return "本月没有可识别的状态机变化。";
+  }
+  const prefix = point.state_change.previous_decision_period
+    ? `相对上一判断月 ${point.state_change.previous_decision_period}`
+    : "从状态机起点看";
+  return `${prefix}：${reasons.join("；")}。这些是模型规则的机械解释，不表示现实经济因果。`;
+}
+
+function strongestDriver(
+  decomposition: BusinessCycleDriverDecomposition,
+  field: "level_contribution" | "momentum_contribution",
+): string | null {
+  const item = [...decomposition.drivers]
+    .sort((left, right) => Math.abs(right[field]) - Math.abs(left[field]))[0];
+  return item ? `${item.name}（${item[field] > 0 ? "+" : ""}${item[field].toFixed(2)}点）` : null;
 }
 
 export function comparableMonthExplanation(
@@ -180,15 +229,12 @@ export function comparableMonthExplanation(
 }
 
 export function contributionExplanation(point: BusinessCycleRegimePoint): string {
-  const positive = point.positive_contributions[0]?.name;
-  const negative = point.negative_contributions[0]?.name;
-  const parts = [
-    positive ? `较大的模型内正贡献来自${positive}` : null,
-    negative ? `较大的模型内负贡献来自${negative}` : null,
-  ].filter((item): item is string => item !== null);
-
-  if (parts.length === 0) {
-    return "本月暂无可展示的同步指数贡献分解。贡献只解释指数构成，不代表现实因果。";
+  const decomposition = point.coincident_decomposition;
+  if (decomposition.status !== "available") {
+    return "本月六个月共同篮子不足，无法对水平与动能做严格的逐项加总分解。";
   }
-  return `本期同步指数相对 100 的构成中，${parts.join("；")}。这只解释模型内的当期指数构成，不代表现实因果，也不是三月动能的分解。`;
+  const level = strongestDriver(decomposition, "level_contribution");
+  const momentum = strongestDriver(decomposition, "momentum_contribution");
+  const audit = decomposition.additivity_passed ? "两组贡献均已通过加总校验" : "加总校验未通过";
+  return `三月水平相对中性的最大驱动是${level ?? "暂无"}；三月动能的最大驱动是${momentum ?? "暂无"}。${audit}。这是模型内分解，不表示经济因果。`;
 }

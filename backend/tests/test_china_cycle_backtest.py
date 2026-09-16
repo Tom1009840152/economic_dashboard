@@ -3,15 +3,22 @@ from datetime import UTC, date, datetime
 from unittest.mock import patch
 
 import pandas as pd
+from fastapi import HTTPException
 
 from app.main import app
-from app.schemas import ChinaCycleBacktestOut
+from app.routers.analysis import get_china_cycle_backtest_attribution
+from app.schemas import ChinaCycleBacktestAttributionOut, ChinaCycleBacktestOut
 from app.services.china_cycle_backtest import (
     FORMULA_VERSIONED_CYCLE_INPUTS,
     MAX_BACKTEST_MONTHS,
+    _attribution_metric,
+    _attribution_step,
     _authoritative_vintage_rows,
     _build_backtest_from_rows,
+    _build_counterfactual_attribution,
     _decision_as_of,
+    _fixed_survey_regime_from_matrix,
+    _hybrid_rows_on_realtime_support,
     _input_readiness,
     _latest_completed_period,
     _phase_snapshot,
@@ -19,6 +26,7 @@ from app.services.china_cycle_backtest import (
     _select_strict_vintages,
     _stability,
     _transition_summary,
+    build_china_cycle_backtest_attribution,
 )
 
 
@@ -52,6 +60,24 @@ class ChinaCycleBacktestTests(unittest.TestCase):
 
         self.assertEqual(utc_cutoff, datetime(2025, 3, 20, 18))
         self.assertEqual(display, "2025-03-20T18:00:00+08:00")
+
+    def test_attribution_rejects_period_with_second_level_historical_offset(self) -> None:
+        with self.assertRaisesRegex(ValueError, "minute-offset timezone history"):
+            build_china_cycle_backtest_attribution(
+                object(),
+                period="1680-01",
+                now=datetime(2026, 1, 1, tzinfo=UTC),
+            )
+
+    def test_attribution_route_returns_400_for_unsupported_historical_offset(self) -> None:
+        with self.assertRaises(HTTPException) as caught:
+            get_china_cycle_backtest_attribution(
+                period="1680-01",
+                db=object(),
+            )
+
+        self.assertEqual(caught.exception.status_code, 400)
+        self.assertIn("minute-offset timezone history", caught.exception.detail)
 
     def test_latest_visible_revision_is_selected_without_future_leakage(self) -> None:
         rows = [
@@ -445,6 +471,36 @@ class ChinaCycleBacktestTests(unittest.TestCase):
         self.assertEqual(build_a1.call_args.kwargs["end"], date(2025, 1, 31))
         self.assertEqual(build_a1.call_args.kwargs["months"], 240)
         self.assertEqual(build_a2.call_args.kwargs["output_months"], 240)
+        self.assertIs(build_a2.call_args.kwargs["include_explanations"], False)
+
+    def test_fixed_survey_replay_skips_payload_only_explanations(self) -> None:
+        fake_matrix = {"months": [], "warnings": [], "methodology_version": "1.0.0"}
+        fake_fixed_matrix = {**fake_matrix, "method": "diagnostic_fixed_survey_core_v1"}
+        fake_regime = {"months": [], "last_decision_period": None}
+        with (
+            patch(
+                "app.services.china_cycle_backtest._fixed_survey_matrix",
+                return_value=fake_fixed_matrix,
+            ),
+            patch(
+                "app.services.china_cycle_backtest._build_regime_from_matrix",
+                return_value=fake_regime,
+            ) as build_a2,
+        ):
+            regime, month = _fixed_survey_regime_from_matrix(
+                fake_matrix,
+                [],
+                pd.Period("2025-01", freq="M"),
+            )
+
+        self.assertIs(regime, fake_regime)
+        self.assertIsNone(month)
+        self.assertEqual(build_a2.call_args.kwargs["output_months"], 240)
+        self.assertEqual(
+            build_a2.call_args.kwargs["coincident_panel_mode"],
+            "fixed_survey_core_v1",
+        )
+        self.assertIs(build_a2.call_args.kwargs["include_explanations"], False)
 
     def test_limited_payload_does_not_invent_accuracy_or_lag(self) -> None:
         unknown = self.vintage(
@@ -770,6 +826,11 @@ class ChinaCycleBacktestTests(unittest.TestCase):
                 "last_decision_period": "2024-05",
                 "carry_forward_months": 3,
                 "decision_eligible": False,
+                "required_confirmation_months": None,
+                "level_gap": 1.23,
+                "_attribution_level_gap": 1.234567,
+                "momentum_3m": -0.12,
+                "_attribution_momentum_3m": -0.123456,
             },
             {"last_decision_period": "2099-12"},
         )
@@ -780,6 +841,545 @@ class ChinaCycleBacktestTests(unittest.TestCase):
         self.assertEqual(snapshot["confirmed_phase"], "contraction")
         self.assertEqual(snapshot["confirmed_since"], "2021-11")
         self.assertFalse(snapshot["decision_eligible"])
+        self.assertIsNone(snapshot["required_confirmation_months"])
+        self.assertEqual(snapshot["level_gap"], 1.234567)
+        self.assertEqual(snapshot["momentum_3m"], -0.123456)
+
+    def test_hybrid_rows_preserve_realtime_support_and_metadata(self) -> None:
+        current_formula = FORMULA_VERSIONED_CYCLE_INPUTS["CN_M1M2"]
+        strict_rows = [
+            self.vintage(
+                row_id=1,
+                observation_date=date(2025, 1, 31),
+                value=49.0,
+                available_at=datetime(2025, 2, 1, 9),
+                code="CN_NMI",
+            ),
+            self.vintage(
+                row_id=2,
+                observation_date=date(2025, 1, 31),
+                value=-4.0,
+                available_at=datetime(2025, 2, 14, 17),
+                code="CN_M1M2",
+                formula_version=current_formula,
+            ),
+        ]
+        strict_rows[0]["source_url"] = "https://example.test/realtime-nmi"
+        strict_rows[1]["source_url"] = "https://example.test/realtime-m1m2"
+        final_rows = [
+            {
+                **strict_rows[0],
+                "id": 101,
+                "value": 50.25,
+                "available_at": datetime(2026, 1, 1),
+                "version": 9,
+                "source_url": "https://example.test/final-nmi",
+            },
+            {
+                **strict_rows[1],
+                "id": 102,
+                "value": -3.5,
+                "available_at": datetime(2026, 1, 2),
+                "version": 8,
+                "source_url": "https://example.test/final-m1m2",
+            },
+            self.vintage(
+                row_id=103,
+                observation_date=date(2025, 1, 31),
+                value=6.0,
+                available_at=datetime(2025, 2, 20),
+                code="CN_IP",
+            ),
+        ]
+
+        hybrid_rows, audit = _hybrid_rows_on_realtime_support(
+            strict_rows,
+            final_rows,
+        )
+
+        self.assertEqual(
+            [
+                (row["indicator_code"], row["date"], row["formula_version"])
+                for row in hybrid_rows
+            ],
+            [
+                (row["indicator_code"], row["date"], row["formula_version"])
+                for row in strict_rows
+            ],
+        )
+        self.assertEqual([row["value"] for row in hybrid_rows], [50.25, -3.5])
+        for strict, hybrid in zip(strict_rows, hybrid_rows, strict=True):
+            self.assertEqual(
+                {key: value for key, value in hybrid.items() if key != "value"},
+                {key: value for key, value in strict.items() if key != "value"},
+            )
+        self.assertNotIn("CN_IP", {row["indicator_code"] for row in hybrid_rows})
+        self.assertEqual(audit["realtime_support_count"], 2)
+        self.assertEqual(audit["hybrid_support_count"], 2)
+        self.assertEqual(audit["final_support_count"], 3)
+        self.assertEqual(audit["matched_final_value_count"], 2)
+        self.assertEqual(audit["revised_input_count"], 2)
+        self.assertEqual(audit["expanded_input_count"], 1)
+        self.assertTrue(audit["input_support_preserved"])
+
+    def test_hybrid_rows_audit_missing_and_formula_mismatch_peers(self) -> None:
+        current_formula = FORMULA_VERSIONED_CYCLE_INPUTS["CN_M1M2"]
+        strict_rows = [
+            self.vintage(
+                row_id=1,
+                observation_date=date(2025, 1, 31),
+                value=-4.0,
+                available_at=datetime(2025, 2, 14, 17),
+                code="CN_M1M2",
+                formula_version=current_formula,
+            ),
+            self.vintage(
+                row_id=2,
+                observation_date=date(2025, 1, 31),
+                value=49.0,
+                available_at=datetime(2025, 2, 1, 9),
+                code="CN_NMI",
+            ),
+        ]
+        final_rows = [
+            {
+                **strict_rows[0],
+                "id": 101,
+                "value": -3.5,
+                "formula_version": "legacy-incompatible",
+            }
+        ]
+
+        hybrid_rows, audit = _hybrid_rows_on_realtime_support(
+            strict_rows,
+            final_rows,
+        )
+
+        self.assertEqual([row["value"] for row in hybrid_rows], [-4.0, 49.0])
+        self.assertEqual(audit["matched_final_value_count"], 0)
+        self.assertEqual(audit["missing_counterpart_count"], 1)
+        self.assertEqual(audit["formula_mismatch_count"], 1)
+        self.assertEqual(len(audit["missing_counterpart_keys"]), 1)
+        self.assertEqual(len(audit["formula_mismatch_keys"]), 1)
+
+    def test_hybrid_support_gate_ignores_context_and_validation_rows(self) -> None:
+        strict_rows = [
+            self.vintage(
+                row_id=1,
+                observation_date=date(2025, 1, 31),
+                value=0.8,
+                available_at=datetime(2025, 2, 10, 9),
+                code="CN_CORE_CPI",
+            ),
+            self.vintage(
+                row_id=2,
+                observation_date=date(2025, 1, 31),
+                value=102.0,
+                available_at=datetime(2025, 2, 10, 9),
+                code="CN_CLI",
+            ),
+        ]
+
+        hybrid_rows, audit = _hybrid_rows_on_realtime_support(strict_rows, [])
+
+        self.assertEqual(hybrid_rows, strict_rows)
+        self.assertEqual(audit["realtime_support_count"], 0)
+        self.assertEqual(audit["missing_counterpart_count"], 0)
+        self.assertEqual(audit["formula_mismatch_count"], 0)
+
+    def test_attribution_metric_is_additive_and_never_fills_missing_with_zero(self) -> None:
+        metric = _attribution_metric(
+            {"level_gap": -2.0},
+            {"level_gap": -1.25},
+            {"level_gap": 0.5},
+            "level_gap",
+        )
+
+        self.assertEqual(metric["status"], "available")
+        self.assertEqual(metric["revision_path_delta"], -0.75)
+        self.assertEqual(metric["support_expansion_path_delta"], -1.75)
+        self.assertEqual(metric["total_delta"], -2.5)
+        self.assertAlmostEqual(
+            metric["total_delta"],
+            metric["revision_path_delta"]
+            + metric["support_expansion_path_delta"],
+        )
+        self.assertEqual(metric["residual"], 0.0)
+        self.assertTrue(metric["additivity_passed"])
+
+        unavailable = _attribution_metric(
+            {"level_gap": -2.0},
+            {"level_gap": None},
+            {"level_gap": 0.5},
+            "level_gap",
+        )
+
+        self.assertEqual(unavailable["status"], "unavailable")
+        self.assertIsNone(unavailable["hybrid"])
+        self.assertIsNone(unavailable["revision_path_delta"])
+        self.assertIsNone(unavailable["support_expansion_path_delta"])
+        self.assertIsNone(unavailable["total_delta"])
+        self.assertIsNone(unavailable["residual"])
+        self.assertFalse(unavailable["additivity_passed"])
+
+    def test_attribution_step_distinguishes_changed_unchanged_and_not_comparable(self) -> None:
+        contraction = {"phase": "contraction"}
+        recovery = {"phase": "recovery"}
+
+        self.assertEqual(
+            _attribution_step(contraction, contraction, "phase"),
+            "unchanged",
+        )
+        self.assertEqual(
+            _attribution_step(contraction, recovery, "phase"),
+            "changed",
+        )
+        self.assertEqual(
+            _attribution_step(contraction, {"phase": None}, "phase"),
+            "not_comparable",
+        )
+        self.assertEqual(
+            _attribution_step(None, recovery, "phase"),
+            "not_comparable",
+        )
+
+    def test_counterfactual_attribution_runs_only_r_h_f_and_returns_four_coordinates(
+        self,
+    ) -> None:
+        period = pd.Period("2025-01", freq="M")
+        current_formula = FORMULA_VERSIONED_CYCLE_INPUTS["CN_M1M2"]
+        strict_rows = [
+            self.vintage(
+                row_id=1,
+                observation_date=date(2025, 1, 31),
+                value=-4.0,
+                available_at=datetime(2025, 2, 14, 17),
+                code="CN_M1M2",
+                formula_version=current_formula,
+            )
+        ]
+        final_rows = [
+            {**strict_rows[0], "id": 101, "value": -3.5},
+            self.vintage(
+                row_id=102,
+                observation_date=date(2025, 1, 31),
+                value=6.0,
+                available_at=datetime(2025, 2, 20),
+                code="CN_IP",
+            ),
+        ]
+
+        def month(
+            phase: str,
+            *,
+            level_gap: float,
+            momentum: float,
+            leading_gap: float,
+            leading_momentum: float,
+            coincident_signature: str,
+            leading_signature: str,
+        ) -> dict:
+            return {
+                "period": str(period),
+                "phase": phase,
+                "phase_label": phase,
+                "phase_status": "confirmed",
+                "phase_basis": "active_decision",
+                "raw_phase": phase,
+                "confirmed_phase": phase,
+                "confirmed_since": str(period),
+                "last_decision_period": str(period),
+                "decision_eligible": True,
+                "level_axis": "below" if level_gap < 0 else "above",
+                "momentum_axis": "falling" if momentum < 0 else "rising",
+                "level_3m": 100 + level_gap,
+                "level_gap": level_gap,
+                "momentum_3m": momentum,
+                "leading_level_3m": 100 + leading_gap,
+                "leading_gap": leading_gap,
+                "leading_momentum_3m": leading_momentum,
+                "leading_direction": (
+                    "down" if leading_momentum < 0 else "up"
+                ),
+                "coincident_index": 100 + level_gap,
+                "leading_index": 100 + leading_gap,
+                "coincident_basis_signature": coincident_signature,
+                "leading_basis_signature": leading_signature,
+                "confidence": "medium",
+            }
+
+        realtime_month = month(
+            "contraction",
+            level_gap=-2.0,
+            momentum=-1.0,
+            leading_gap=-1.5,
+            leading_momentum=-0.5,
+            coincident_signature="r-support",
+            leading_signature="r-leading",
+        )
+        final_month = month(
+            "expansion",
+            level_gap=1.0,
+            momentum=2.0,
+            leading_gap=2.0,
+            leading_momentum=1.5,
+            coincident_signature="f-support",
+            leading_signature="f-leading",
+        )
+        hybrid_month = month(
+            "recovery",
+            level_gap=-1.0,
+            momentum=0.5,
+            leading_gap=0.0,
+            leading_momentum=0.5,
+            coincident_signature="r-support",
+            leading_signature="r-leading",
+        )
+
+        with (
+            patch(
+                "app.services.china_cycle_backtest._has_minimum_coincident_inputs",
+                return_value=True,
+            ),
+            patch(
+                "app.services.china_cycle_backtest._regime_for_rows",
+                side_effect=[
+                    ({"last_decision_period": str(period)}, realtime_month),
+                    ({"last_decision_period": str(period)}, final_month),
+                    ({"last_decision_period": str(period)}, hybrid_month),
+                ],
+            ) as build_regime,
+        ):
+            payload = _build_counterfactual_attribution(
+                strict_rows,
+                final_rows,
+                period,
+                decision_as_of="2025-02-20T18:00:00+08:00",
+                final_cutoff_at=datetime(2026, 1, 1, tzinfo=UTC),
+            )
+
+        validated = ChinaCycleBacktestAttributionOut.model_validate(payload)
+        self.assertEqual(build_regime.call_count, 3)
+        self.assertEqual(build_regime.call_args_list[0].args[0], strict_rows)
+        self.assertEqual(build_regime.call_args_list[1].args[0], final_rows)
+        hybrid_call_rows = build_regime.call_args_list[2].args[0]
+        self.assertEqual(len(hybrid_call_rows), len(strict_rows))
+        self.assertEqual(hybrid_call_rows[0]["value"], -3.5)
+        self.assertEqual(validated.status, "available")
+        self.assertEqual(validated.path_order, [
+            "realtime_visible_information",
+            "final_values_on_realtime_support",
+            "full_final_information",
+        ])
+        self.assertEqual(
+            set(validated.metrics),
+            {
+                "level_gap",
+                "momentum_3m",
+                "leading_gap",
+                "leading_momentum_3m",
+            },
+        )
+        self.assertTrue(
+            all(item.additivity_passed for item in validated.metrics.values())
+        )
+        self.assertEqual(validated.phase_steps.display.revision_step, "changed")
+        self.assertEqual(validated.phase_steps.display.support_step, "changed")
+        self.assertFalse(validated.support_audit.basis_changed_on_revision_path)
+        self.assertTrue(validated.support_audit.basis_changed_on_support_path)
+
+    def test_fiscal_current_gap_repair_unblocks_exact_hybrid_attribution(
+        self,
+    ) -> None:
+        period = pd.Period("2026-07", freq="M")
+        fiscal_formula = FORMULA_VERSIONED_CYCLE_INPUTS[
+            "CN_FISCAL_IMPULSE_PROXY"
+        ]
+        fiscal_dates = (
+            date(2022, 12, 1),
+            date(2023, 6, 1),
+            date(2023, 9, 1),
+            date(2023, 12, 1),
+            date(2024, 12, 1),
+            date(2025, 12, 1),
+        )
+        control = self.vintage(
+            row_id=1,
+            observation_date=date(2026, 6, 1),
+            value=49.0,
+            available_at=datetime(2026, 7, 1, 9),
+            code="CN_NMI",
+        )
+        fiscal_realtime = [
+            self.vintage(
+                row_id=index + 2,
+                observation_date=observed,
+                value=float(index),
+                available_at=datetime(
+                    observed.year + (observed.month == 12),
+                    1 if observed.month == 12 else observed.month + 1,
+                    20,
+                    9,
+                ),
+                code="CN_FISCAL_IMPULSE_PROXY",
+                formula_version=fiscal_formula,
+            )
+            for index, observed in enumerate(fiscal_dates, start=1)
+        ]
+        strict_rows = [control, *fiscal_realtime]
+        final_control = {
+            **control,
+            "id": 101,
+            "value": 50.0,
+            "retrieved_at": datetime(2026, 8, 1, 12),
+            "version": 2,
+        }
+        final_only_expansion = self.vintage(
+            row_id=102,
+            observation_date=date(2026, 6, 1),
+            value=6.0,
+            available_at=datetime(2026, 7, 15, 9),
+            code="CN_IP",
+        )
+        final_before_repair = [final_control, final_only_expansion]
+
+        with (
+            patch(
+                "app.services.china_cycle_backtest._has_minimum_coincident_inputs",
+                return_value=True,
+            ),
+            patch(
+                "app.services.china_cycle_backtest._regime_for_rows",
+            ) as build_regime,
+        ):
+            before = _build_counterfactual_attribution(
+                strict_rows,
+                final_before_repair,
+                period,
+                decision_as_of="2026-08-20T18:00:00+08:00",
+                final_cutoff_at=datetime(2026, 9, 1, tzinfo=UTC),
+            )
+
+        self.assertEqual(before["status"], "hybrid_unavailable")
+        self.assertEqual(before["support_audit"]["realtime_support_count"], 7)
+        self.assertEqual(before["support_audit"]["matched_final_value_count"], 1)
+        self.assertEqual(before["support_audit"]["missing_counterpart_count"], 6)
+        self.assertEqual(
+            set(before["support_audit"]["missing_counterpart_keys"]),
+            {
+                f"CN_FISCAL_IMPULSE_PROXY:{observed.isoformat()}:{fiscal_formula}"
+                for observed in fiscal_dates
+            },
+        )
+        build_regime.assert_not_called()
+
+        repaired_values = {
+            observed: float(index) + 0.25
+            for index, observed in enumerate(fiscal_dates, start=1)
+        }
+        fiscal_current_peers = [
+            {
+                **row,
+                "id": 200 + index,
+                "value": repaired_values[row["date"]],
+                "release_date": None,
+                "available_at": None,
+                "retrieved_at": datetime(2026, 9, 1, 12),
+                "status": "derived",
+                "version": 1,
+            }
+            for index, row in enumerate(fiscal_realtime, start=1)
+        ]
+        final_after_repair = [
+            *final_before_repair,
+            *fiscal_current_peers,
+        ]
+
+        def endpoint_month(phase: str) -> dict:
+            return {
+                "period": str(period),
+                "phase": phase,
+                "phase_label": phase,
+                "phase_status": "confirmed",
+                "phase_basis": "active_decision",
+                "raw_phase": phase,
+                "confirmed_phase": phase,
+                "confirmed_since": str(period),
+                "last_decision_period": str(period),
+                "decision_eligible": True,
+                "level_gap": -1.0,
+                "momentum_3m": 0.5,
+                "leading_gap": -0.5,
+                "leading_momentum_3m": 0.25,
+            }
+
+        with (
+            patch(
+                "app.services.china_cycle_backtest._has_minimum_coincident_inputs",
+                return_value=True,
+            ),
+            patch(
+                "app.services.china_cycle_backtest._regime_for_rows",
+                side_effect=[
+                    ({"last_decision_period": str(period)}, endpoint_month("recovery")),
+                    ({"last_decision_period": str(period)}, endpoint_month("recovery")),
+                    ({"last_decision_period": str(period)}, endpoint_month("recovery")),
+                ],
+            ) as build_regime,
+        ):
+            after = _build_counterfactual_attribution(
+                strict_rows,
+                final_after_repair,
+                period,
+                decision_as_of="2026-08-20T18:00:00+08:00",
+                final_cutoff_at=datetime(2026, 9, 1, tzinfo=UTC),
+            )
+
+        audit = after["support_audit"]
+        self.assertEqual(after["status"], "available")
+        self.assertEqual(audit["realtime_support_count"], 7)
+        self.assertEqual(audit["hybrid_support_count"], 7)
+        self.assertEqual(audit["final_support_count"], 8)
+        self.assertEqual(audit["matched_final_value_count"], 7)
+        self.assertEqual(audit["missing_counterpart_count"], 0)
+        self.assertEqual(audit["ambiguous_counterpart_count"], 0)
+        self.assertEqual(audit["formula_mismatch_count"], 0)
+        self.assertEqual(build_regime.call_count, 3)
+        self.assertEqual(build_regime.call_args_list[0].args[0], strict_rows)
+        self.assertEqual(build_regime.call_args_list[1].args[0], final_after_repair)
+
+        hybrid_rows = build_regime.call_args_list[2].args[0]
+        self.assertEqual(
+            [
+                (row["indicator_code"], row["date"], row["formula_version"])
+                for row in hybrid_rows
+            ],
+            [
+                (row["indicator_code"], row["date"], row["formula_version"])
+                for row in strict_rows
+            ],
+        )
+        self.assertNotIn(
+            "CN_IP",
+            {row["indicator_code"] for row in hybrid_rows},
+        )
+        expected_final_values = {
+            (row["indicator_code"], row["date"], row["formula_version"]): row[
+                "value"
+            ]
+            for row in final_after_repair
+        }
+        for realtime, hybrid in zip(strict_rows, hybrid_rows, strict=True):
+            exact_key = (
+                realtime["indicator_code"],
+                realtime["date"],
+                realtime["formula_version"],
+            )
+            self.assertEqual(hybrid["value"], expected_final_values[exact_key])
+            self.assertEqual(
+                {key: value for key, value in hybrid.items() if key != "value"},
+                {key: value for key, value in realtime.items() if key != "value"},
+            )
 
     def test_latest_completed_period_waits_for_fixed_cutoff(self) -> None:
         before = datetime(2026, 9, 14, 12, tzinfo=UTC)
@@ -1117,6 +1717,14 @@ class ChinaCycleBacktestTests(unittest.TestCase):
 
         self.assertEqual(parameters["months"]["schema"]["default"], 120)
         self.assertEqual(parameters["months"]["schema"]["maximum"], MAX_BACKTEST_MONTHS)
+
+        attribution = app.openapi()["paths"][
+            "/api/analysis/cn/business-cycle/backtest/attribution"
+        ]["get"]
+        attribution_parameters = {
+            item["name"]: item for item in attribution["parameters"]
+        }
+        self.assertTrue(attribution_parameters["period"]["required"])
 
 
 if __name__ == "__main__":

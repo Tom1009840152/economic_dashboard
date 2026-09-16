@@ -36,9 +36,11 @@ FRED 是本项目第一个非 akshare 数据源，后续凡是 akshare 查不到
 - `backend/app/fetchers/china_cycle_data.py`（中国周期指标、国家统计局与财政部历史发布稿）
 - `backend/app/services/release_evidence.py`（独立、只追加的发布证据版本链及资格门）
 - `backend/app/services/china_fiscal_evidence.py`（名义 GDP 与财政叶子的校验和财政脉冲派生）
+- `backend/app/services/china_fiscal_current_gap.py`（固定白名单、三方核验的财政 current 缺口修复）
 - `backend/app/services/china_consumer_evidence.py`（CEI 消费者调查发布快照的来源校验与有序证据链）
 - `backend/app/services/china_credit_evidence.py`（人民银行信用、货币与信用脉冲的独立证据链）
 - `backend/scripts/backfill_china_fiscal_evidence.py`（默认只预检、显式 `--apply` 才写入的回填入口）
+- `backend/scripts/repair_china_fiscal_current_snapshot.py`（财政 current 修复入口；默认 dry-run，显式 `--apply` 原子写入）
 - `backend/scripts/backfill_china_consumer_evidence.py`（消费者证据默认预检、显式 `--apply` 写入）
 - `backend/scripts/backfill_china_credit_evidence.py`（信用证据默认预检、显式 `--apply` 原子写入）
 
@@ -47,7 +49,7 @@ FRED 是本项目第一个非 akshare 数据源，后续凡是 akshare 查不到
 周期回测需要回答“决策当天知道什么”，因此不能只依赖保存今天最终值的 `data_points`。
 D9 新增独立、只追加的 `release_evidence`：从国家统计局 `stats.gov.cn`、人民银行
 `pbc.gov.cn` 和财政部 `gks.mof.gov.cn` 原发布稿恢复首发值、来源链接与真实发布时间；同一证据重复运行不新增，
-官方若有后续不同版本则继续追加而不覆盖。A3 `1.3.4` 沿用 `1.3.3` 的证据门，只有在 `chain_verified=true`、证据类型
+官方若有后续不同版本则继续追加而不覆盖。A3 `1.4.0` 沿用 `1.3.3` 的证据门，只有在 `chain_verified=true`、证据类型
 和时间精度都受支持时才让这条证据链优先于通用版本；输入就绪率只统计 A1 当前要求的公式
 版本，旧公式历史保留审计但不进入覆盖分母。这样既避免最终值倒灌历史，也避免任意入表记录
 取得权威地位。当前 `CN_GDP` 展示用镜像的来源链接已纠正为
@@ -68,6 +70,14 @@ D9 新增独立、只追加的 `release_evidence`：从国家统计局 `stats.go
 由 1,843 条可还原、1,819 条按时可用、17/23 个代码，提升为 1,858、1,822、18/23。
 15 条财政脉冲都能重建，但只有 3 条在各自观察季的固定决策时点前公布；其余只从实际发布后的
 月份开始使用。2026-07 领先覆盖由 56.67% 升至 61.67%，仍低于 65% 门槛，阶段路径未改变。
+
+首发证据链之外，A5c 后续发现 current 财政链漏掉 2022-04—2022-12 与 2024-12。专用修复器把
+范围固化为这 10 个月，每次实时深扫财政部 10 页索引与详情页，并在 `strict_live` 模式下禁止
+缓存回退；新抓官方值、合格直接 `ReleaseEvidence` 与已有 current 必须三方无冲突。直接值来自
+本次官方实时抓取，证据仅作交叉校验；派生值使用 current 财政叶子与 current 名义 GDP 的统一
+公式，不复制派生证据。真实库新增 current 42 条及 vintage 42 条，按一般预算支出/基金预算支出/
+广义支出/支出强度/财政脉冲分布为 10/10/10/4/8，五项 current 合计 253→295；二次 dry-run 为
+0 写入。
 
 消费者调查采用另一条明确分级的来源链：[中国经济信息网发布页](https://www.cei.cn/defaultsite/s/article/2026/08/17/4b4ff607-9d914745-01a0-0e887f3e-4795_2026.html?columnId=4028c7ca-37115425-0137-115646c5-00ec&referCode=hgzsxf)标注“来源：国家统计局”，但它
 属于经验证分发镜像，不冒充国家统计局官网原稿。采集器同时读取 `www.cei.cn` 与 `ibe.cei.cn`
@@ -222,11 +232,11 @@ Statistics 的月度季调序列，并统一为15—64岁口径。除总体和�
 | CN_CREDIT_INTENSITY / CN_CREDIT_IMPULSE | 信用强度 / 标准信用脉冲 | 社融与名义 GDP 的首发叶子派生 | 分别45期和连续33期；`available_at` 取全部12/24个月社融叶子与GDP叶子的最晚时刻 |
 | CN_GDP | GDP累计同比 | `ak.macro_china_gdp`（[东方财富镜像](https://data.eastmoney.com/cjsj/gdp.html)） | 季度末定位的年内累计实际GDP同比，不是单季同比；镜像用于当前值展示，不作为首发证据；A3主验证需另构造单季同比或季调环比 |
 | CN_GDP_NOMINAL_YTD | 名义GDP年内累计 | 国家统计局季度原发布稿 | 19 季首发证据（2021Q4—2026Q2）；值、来源和发布时间写入 `release_evidence`，与当前最终值隔离 |
-| CN_FISCAL_GENERAL_SPEND_YTD | 一般公共预算支出年内累计 | 财政部月度财政收支发布稿 | 81 个月（2019-04—2026-07）的官方首发证据 |
-| CN_FISCAL_FUND_EXPENDITURE_YTD | 政府性基金预算支出年内累计 | 财政部月度财政收支发布稿 | 80 个月的官方首发证据 |
-| CN_FISCAL_BROAD_EXPENDITURE_YTD | 广义财政支出年内累计 | 上述两项官方叶子派生 | 两项之和，共 80 个月；可用时点取两条叶子的较晚者 |
-| CN_FISCAL_SPEND_INTENSITY | 财政支出强度 | 广义财政支出与名义 GDP 派生 | 季度末计算，`广义支出 / 同期名义GDP × 100`，共 19 季 |
-| CN_FISCAL_IMPULSE_PROXY | 财政脉冲代理 | 本季与上年同季财政支出强度派生 | 同比百分点变化，共 15 季（2022Q4—2026Q2）；保留六条叶子并取最晚发布时间 |
+| CN_FISCAL_GENERAL_SPEND_YTD | 一般公共预算支出年内累计 | 财政部月度财政收支发布稿 | 官方首发证据 81 个月；current 81 个月，其中 missing-only 修复新增 10 个键 |
+| CN_FISCAL_FUND_EXPENDITURE_YTD | 政府性基金预算支出年内累计 | 财政部月度财政收支发布稿 | 官方首发证据 80 个月；current 80 个月，其中修复新增 10 个键 |
+| CN_FISCAL_BROAD_EXPENDITURE_YTD | 广义财政支出年内累计 | 上述两项官方叶子派生 | 首发证据 80 个月；current 80 个月，其中修复新增 10 个键；可用时点取两条证据叶子的较晚者 |
+| CN_FISCAL_SPEND_INTENSITY | 财政支出强度 | 广义财政支出与名义 GDP 派生 | 季度末计算，`广义支出 / 同期名义GDP × 100`；首发证据 19 季，current 29 季，其中修复新增 4 个键 |
+| CN_FISCAL_IMPULSE_PROXY | 财政脉冲代理 | 本季与上年同季财政支出强度派生 | 同比百分点变化；首发证据 15 季（2022Q4—2026Q2），current 25 季，其中修复新增 8 个键；首发证据保留六条叶子并取最晚发布时间 |
 | CN_RETAIL | 社会消费品零售总额同比 | `ak.macro_china_consumer_goods_retail` | 月度 |
 | CN_FAI | 固定资产投资同比 | `ak.macro_china_gdzctz` | 月度 |
 | CN_EXPORTS | 出口同比 | `ak.macro_china_hgjck` 的“当月出口额-同比增长”；[海关总署英文初值目录](https://english.customs.gov.cn/Statistics/Statistics?ColumnId=1)与“China's Total Export & Import Values (in USD)”详情页用于历史发布证据 | 月度美元口径。归档解析只接受能唯一定位的“当月同比”列；1—2月合并初值不是2月单月值，整条跳过且不造1月。官方页只有日期而没有时分时保留 `release_date`、不生成 `available_at`；当前主机还受官方站证书链/网关异常影响，因此严格发布时间覆盖仍为0 |

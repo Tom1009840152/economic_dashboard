@@ -21,7 +21,7 @@ from app.services.china_business_cycle import (
 )
 
 
-METHODOLOGY_VERSION = "1.0.1"
+METHODOLOGY_VERSION = "1.1.0"
 LEVEL_NEUTRAL = 100.0
 LEVEL_BUFFER = 1.5
 MOMENTUM_BUFFER = 1.5
@@ -35,6 +35,7 @@ ROLE_HIGH_COVERAGE = 0.85
 BALANCED_PANEL_MONTHS = 6
 MIN_SIGNALS_PER_BLOCK = 2
 ROLE_REQUIRED_BLOCKS = {"coincident": 2, "leading": 2}
+DECOMPOSITION_TOLERANCE = 1e-8
 BLOCK_SPECS = {block.key: block for block in CHINA_CYCLE_BLOCKS}
 FIXED_SURVEY_CORE_CODES = (
     "CN_PMI_PRODUCTION",
@@ -102,6 +103,121 @@ def _signal_map(month: dict) -> dict[str, dict]:
     }
 
 
+def _unavailable_decomposition(
+    role: str,
+    reason: str,
+    *,
+    coverage: float = 0.0,
+    codes: list[str] | None = None,
+    signature: str | None = None,
+) -> dict:
+    """Return an explicit empty decomposition instead of implying zero impact."""
+
+    return {
+        "role": role,
+        "status": "unavailable",
+        "reason": reason,
+        "basis_signature": signature,
+        "basis_codes": codes or [],
+        "basis_coverage": round(coverage, 4),
+        "recent_window_start": None,
+        "recent_window_end": None,
+        "comparison_window_start": None,
+        "comparison_window_end": None,
+        "level_gap": None,
+        "momentum_3m": None,
+        "level_contribution_sum": None,
+        "momentum_contribution_sum": None,
+        "level_residual": None,
+        "momentum_residual": None,
+        "additivity_passed": False,
+        "drivers": [],
+    }
+
+
+def _unique_periods(values: list[str | None]) -> list[str]:
+    return list(dict.fromkeys(value for value in values if value))
+
+
+def _panel_decomposition(
+    *,
+    role: str,
+    window: list[dict],
+    components: list[dict],
+    coverage: float,
+    signature: str,
+    panel_values: list[float],
+) -> dict:
+    """Exactly decompose A2's balanced level and momentum coordinates.
+
+    The calculation deliberately reuses the panel's six observations and
+    effective weights.  It must never be reconstructed from A1's one-month
+    headline contributions, whose basket and time window are different.
+    """
+
+    recent_level = sum(panel_values[3:]) / 3
+    comparison_level = sum(panel_values[:3]) / 3
+    level_gap = recent_level - LEVEL_NEUTRAL
+    momentum = recent_level - comparison_level
+    drivers = []
+    raw_level_sum = 0.0
+    raw_momentum_sum = 0.0
+    for component in components:
+        scores = [float(value) for value in component["scores"]]
+        recent_score = sum(scores[3:]) / 3
+        comparison_score = sum(scores[:3]) / 3
+        level_contribution = (
+            INDEX_SCALE * component["effective_weight"] * recent_score
+        )
+        momentum_contribution = (
+            INDEX_SCALE
+            * component["effective_weight"]
+            * (recent_score - comparison_score)
+        )
+        raw_level_sum += level_contribution
+        raw_momentum_sum += momentum_contribution
+        source_periods = component["source_periods"]
+        drivers.append(
+            {
+                "code": component["code"],
+                "name": component["name"],
+                "block_key": component["block_key"],
+                "effective_weight": round(component["effective_weight"], 8),
+                "recent_score": round(recent_score, 6),
+                "comparison_score": round(comparison_score, 6),
+                "level_contribution": round(level_contribution, 6),
+                "momentum_contribution": round(momentum_contribution, 6),
+                "recent_source_periods": _unique_periods(source_periods[3:]),
+                "comparison_source_periods": _unique_periods(source_periods[:3]),
+            }
+        )
+    level_residual = level_gap - raw_level_sum
+    momentum_residual = momentum - raw_momentum_sum
+    return {
+        "role": role,
+        "status": "available",
+        "reason": None,
+        "basis_signature": signature,
+        "basis_codes": [component["code"] for component in components],
+        "basis_coverage": round(coverage, 4),
+        "recent_window_start": window[3]["period"],
+        "recent_window_end": window[-1]["period"],
+        "comparison_window_start": window[0]["period"],
+        "comparison_window_end": window[2]["period"],
+        "level_gap": round(level_gap, 6),
+        "momentum_3m": round(momentum, 6),
+        "level_contribution_sum": round(raw_level_sum, 6),
+        "momentum_contribution_sum": round(raw_momentum_sum, 6),
+        "level_residual": round(level_residual, 10),
+        "momentum_residual": round(momentum_residual, 10),
+        "additivity_passed": bool(
+            abs(level_residual) <= DECOMPOSITION_TOLERANCE
+            and abs(momentum_residual) <= DECOMPOSITION_TOLERANCE
+        ),
+        "drivers": drivers,
+    }
+
+
 def _decision_reasons(
     index: int,
     *,
@@ -132,7 +248,13 @@ def _decision_reasons(
     return reasons
 
 
-def _balanced_role_panel(months: list[dict], index: int, role: str) -> dict:
+def _balanced_role_panel(
+    months: list[dict],
+    index: int,
+    role: str,
+    *,
+    include_explanations: bool = True,
+) -> dict:
     """Recompute both three-month panels on one six-month common basket."""
 
     empty = {
@@ -143,6 +265,11 @@ def _balanced_role_panel(months: list[dict], index: int, role: str) -> dict:
         "level": None,
         "momentum": None,
         "changed": False,
+        "decomposition": (
+            _unavailable_decomposition(role, "insufficient_history")
+            if include_explanations
+            else None
+        ),
     }
     if index < BALANCED_PANEL_MONTHS - 1:
         return empty
@@ -153,7 +280,14 @@ def _balanced_role_panel(months: list[dict], index: int, role: str) -> dict:
         if block.get("role") == role
     }
     if not current_blocks:
-        return empty
+        return {
+            **empty,
+            "decomposition": (
+                _unavailable_decomposition(role, "insufficient_common_basis")
+                if include_explanations
+                else None
+            ),
+        }
 
     role_specs = [block for block in CHINA_CYCLE_BLOCKS if block.role == role]
     total_role_weight = sum(block.weight for block in role_specs)
@@ -218,10 +352,23 @@ def _balanced_role_panel(months: list[dict], index: int, role: str) -> dict:
     required_blocks = ROLE_REQUIRED_BLOCKS[role]
     valid = len(eligible_blocks) >= required_blocks and coverage >= ROLE_MIN_COVERAGE
     if not eligible_blocks:
-        return {**empty, "coverage": round(coverage, 4)}
+        return {
+            **empty,
+            "coverage": round(coverage, 4),
+            "decomposition": (
+                _unavailable_decomposition(
+                    role,
+                    "insufficient_common_basis",
+                    coverage=coverage,
+                )
+                if include_explanations
+                else None
+            ),
+        }
 
     active_block_weight = sum(block["weight"] for block in eligible_blocks)
     effective_signature = []
+    decomposition_components = []
     panel_values = []
     for offset in range(BALANCED_PANEL_MONTHS):
         role_z = 0.0
@@ -236,6 +383,25 @@ def _balanced_role_panel(months: list[dict], index: int, role: str) -> dict:
     for block in eligible_blocks:
         normalized_block_weight = block["weight"] / active_block_weight
         signal_weight = sum(block["signal_weights"].values())
+        for code, weight in block["signal_weights"].items():
+            effective_weight = normalized_block_weight * weight / signal_weight
+            if include_explanations:
+                decomposition_components.append(
+                    {
+                        "code": code,
+                        "name": block["signal_maps"][-1][code].get("name", code),
+                        "block_key": block["key"],
+                        "effective_weight": effective_weight,
+                        "scores": [
+                            signal_map[code]["standardized_score"]
+                            for signal_map in block["signal_maps"]
+                        ],
+                        "source_periods": [
+                            signal_map[code].get("source_period")
+                            for signal_map in block["signal_maps"]
+                        ],
+                    }
+                )
         effective_signature.append(
             (
                 block["key"],
@@ -259,6 +425,26 @@ def _balanced_role_panel(months: list[dict], index: int, role: str) -> dict:
     )
     recent = sum(panel_values[3:]) / 3
     previous = sum(panel_values[:3]) / 3
+    decomposition = None
+    if include_explanations:
+        decomposition = (
+            _panel_decomposition(
+                role=role,
+                window=window,
+                components=decomposition_components,
+                coverage=coverage,
+                signature=signature,
+                panel_values=panel_values,
+            )
+            if valid
+            else _unavailable_decomposition(
+                role,
+                "insufficient_common_basis",
+                coverage=coverage,
+                codes=codes,
+                signature=signature,
+            )
+        )
     return {
         "codes": codes,
         "signature": signature,
@@ -267,15 +453,26 @@ def _balanced_role_panel(months: list[dict], index: int, role: str) -> dict:
         "level": recent if valid else None,
         "momentum": recent - previous if valid else None,
         "changed": False,
+        "decomposition": decomposition,
     }
 
 
-def _balanced_role_panels(months: list[dict], role: str) -> list[dict]:
+def _balanced_role_panels(
+    months: list[dict],
+    role: str,
+    *,
+    include_explanations: bool = True,
+) -> list[dict]:
     panels = []
     last_valid_signature: str | None = None
     seen_valid = False
     for index in range(len(months)):
-        panel = _balanced_role_panel(months, index, role)
+        panel = _balanced_role_panel(
+            months,
+            index,
+            role,
+            include_explanations=include_explanations,
+        )
         signature = panel["signature"] if panel["valid"] else None
         panel["changed"] = bool(
             signature is not None
@@ -289,7 +486,12 @@ def _balanced_role_panels(months: list[dict], role: str) -> list[dict]:
     return panels
 
 
-def _fixed_survey_core_panel(months: list[dict], index: int) -> dict:
+def _fixed_survey_core_panel(
+    months: list[dict],
+    index: int,
+    *,
+    include_explanations: bool = True,
+) -> dict:
     """Build one strict six-month panel from four equally weighted surveys.
 
     This is a sensitivity diagnostic, not an alternative way to satisfy A1's
@@ -306,6 +508,11 @@ def _fixed_survey_core_panel(months: list[dict], index: int) -> dict:
         "level": None,
         "momentum": None,
         "changed": False,
+        "decomposition": (
+            _unavailable_decomposition("coincident", "insufficient_history")
+            if include_explanations
+            else None
+        ),
     }
     if index < BALANCED_PANEL_MONTHS - 1:
         return empty
@@ -326,6 +533,16 @@ def _fixed_survey_core_panel(months: list[dict], index: int) -> dict:
             **empty,
             "codes": common_codes,
             "coverage": round(coverage, 4),
+            "decomposition": (
+                _unavailable_decomposition(
+                    "coincident",
+                    "insufficient_common_basis",
+                    coverage=coverage,
+                    codes=common_codes,
+                )
+                if include_explanations
+                else None
+            ),
         }
 
     panel_values = [
@@ -340,6 +557,32 @@ def _fixed_survey_core_panel(months: list[dict], index: int) -> dict:
     ]
     recent = sum(panel_values[3:]) / 3
     previous = sum(panel_values[:3]) / 3
+    current_blocks = {
+        signal["code"]: block["key"]
+        for block in window[-1].get("blocks", [])
+        for signal in block.get("signals", [])
+    }
+    components = (
+        [
+            {
+                "code": code,
+                "name": signal_maps[-1][code].get("name", code),
+                "block_key": current_blocks.get(code, "fixed_survey_core"),
+                "effective_weight": 1 / len(FIXED_SURVEY_CORE_CODES),
+                "scores": [
+                    signal_maps[offset][code]["standardized_score"]
+                    for offset in range(BALANCED_PANEL_MONTHS)
+                ],
+                "source_periods": [
+                    signal_maps[offset][code].get("source_period")
+                    for offset in range(BALANCED_PANEL_MONTHS)
+                ],
+            }
+            for code in FIXED_SURVEY_CORE_CODES
+        ]
+        if include_explanations
+        else []
+    )
     return {
         "codes": list(FIXED_SURVEY_CORE_CODES),
         "signature": FIXED_SURVEY_CORE_SIGNATURE,
@@ -348,13 +591,36 @@ def _fixed_survey_core_panel(months: list[dict], index: int) -> dict:
         "level": recent,
         "momentum": recent - previous,
         "changed": False,
+        "decomposition": (
+            _panel_decomposition(
+                role="coincident",
+                window=window,
+                components=components,
+                coverage=1.0,
+                signature=FIXED_SURVEY_CORE_SIGNATURE,
+                panel_values=panel_values,
+            )
+            if include_explanations
+            else None
+        ),
     }
 
 
-def _fixed_survey_core_panels(months: list[dict]) -> list[dict]:
+def _fixed_survey_core_panels(
+    months: list[dict],
+    *,
+    include_explanations: bool = True,
+) -> list[dict]:
     """Return the fixed-survey diagnostic panel for every matrix month."""
 
-    return [_fixed_survey_core_panel(months, index) for index in range(len(months))]
+    return [
+        _fixed_survey_core_panel(
+            months,
+            index,
+            include_explanations=include_explanations,
+        )
+        for index in range(len(months))
+    ]
 
 
 def _axis(value: float | None, *, kind: str, fallback_phase: Phase | None) -> str:
@@ -521,6 +787,93 @@ def _advance_tracker(
             else 0
         ),
         "leading_confirmation": leading_confirmation,
+    }
+
+
+def _state_change_context(
+    *,
+    previous_decision: dict | None,
+    tracker_before: dict,
+    state: dict,
+    decision_eligible: bool,
+    basis_changed: bool,
+    level_gap: float | None,
+    momentum: float | None,
+    level_axis: str,
+    momentum_axis: str,
+    raw_phase: Phase | None,
+) -> dict:
+    """Expose the state machine's mechanical reasons without claiming causality."""
+
+    reasons: list[str] = []
+    if not decision_eligible:
+        if basis_changed:
+            reasons.append("basis_changed_hold")
+        elif level_gap is not None and momentum is not None and raw_phase is None:
+            reasons.append("dead_zone_unclassified")
+        else:
+            reasons.append("insufficient_hold")
+        if tracker_before["candidate_phase"] is not None:
+            reasons.append("candidate_reset")
+        if state["phase_basis"] == "carried_forward":
+            reasons.append("phase_carried_forward")
+    else:
+        if previous_decision is None:
+            reasons.append("first_decision")
+        else:
+            if previous_decision["level_axis"] != level_axis:
+                reasons.append("level_axis_changed")
+            if previous_decision["momentum_axis"] != momentum_axis:
+                reasons.append("momentum_axis_changed")
+            if previous_decision["raw_phase"] != raw_phase:
+                reasons.append("raw_phase_changed")
+
+        if state["confirmed_phase"] != tracker_before["confirmed_phase"]:
+            reasons.append("phase_confirmed")
+        elif state["candidate_phase"] is not None:
+            reasons.append(
+                "candidate_progressed"
+                if state["candidate_phase"] == tracker_before["candidate_phase"]
+                else "candidate_started"
+            )
+        elif tracker_before["candidate_phase"] is not None:
+            reasons.append("candidate_cleared")
+        else:
+            reasons.append("phase_maintained")
+
+        if state["required_confirmation_months"] == CONFIRMATION_WITH_LEADING:
+            reasons.append("leading_shortened_confirmation")
+
+    if (
+        level_gap is not None
+        and abs(level_gap) < LEVEL_BUFFER
+        and tracker_before["confirmed_phase"] is not None
+    ):
+        reasons.append("level_dead_zone_inherited")
+    if (
+        momentum is not None
+        and abs(momentum) < MOMENTUM_BUFFER
+        and tracker_before["confirmed_phase"] is not None
+    ):
+        reasons.append("momentum_dead_zone_inherited")
+
+    return {
+        "previous_decision_period": (
+            previous_decision["period"] if previous_decision else None
+        ),
+        "previous_level_axis": (
+            previous_decision["level_axis"] if previous_decision else None
+        ),
+        "previous_momentum_axis": (
+            previous_decision["momentum_axis"] if previous_decision else None
+        ),
+        "previous_raw_phase": (
+            previous_decision["raw_phase"] if previous_decision else None
+        ),
+        "previous_confirmed_phase": (
+            previous_decision["confirmed_phase"] if previous_decision else None
+        ),
+        "reason_codes": list(dict.fromkeys(reasons)),
     }
 
 
@@ -898,7 +1251,10 @@ def _build_regime_from_matrix(
     output_start: pd.Period | None = None,
     output_months: int = DEFAULT_OUTPUT_MONTHS,
     coincident_panel_mode: Literal["production", "fixed_survey_core_v1"] = "production",
+    include_explanations: bool = True,
 ) -> dict:
+    # A3 may request an internal projection without payload-only explanations.
+    # That projection is not intended for ChinaCycleRegimeOut validation.
     source_months = matrix.get("months", [])
     if not source_months:
         return _empty_response(matrix, "A1活动矩阵为空，无法识别相对增长周期。")
@@ -922,15 +1278,27 @@ def _build_regime_from_matrix(
         MOMENTUM_COMPARISON_MONTHS
     )
     coincident_panels = (
-        _fixed_survey_core_panels(source_months)
+        _fixed_survey_core_panels(
+            source_months,
+            include_explanations=include_explanations,
+        )
         if coincident_panel_mode == "fixed_survey_core_v1"
-        else _balanced_role_panels(source_months, "coincident")
+        else _balanced_role_panels(
+            source_months,
+            "coincident",
+            include_explanations=include_explanations,
+        )
     )
-    leading_panels = _balanced_role_panels(source_months, "leading")
+    leading_panels = _balanced_role_panels(
+        source_months,
+        "leading",
+        include_explanations=include_explanations,
+    )
     inflation = _inflation_by_month(inflation_rows, calendar)
     tracker = RegimeTracker()
     computed = []
     last_decision_period: str | None = None
+    previous_decision: dict | None = None
 
     for index, (period, a1_month) in enumerate(zip(calendar, source_months)):
         coincident_basis = coincident_panels[index]
@@ -973,12 +1341,32 @@ def _build_regime_from_matrix(
         )
         if decision_eligible:
             last_decision_period = str(period)
+        tracker_before = {
+            "confirmed_phase": tracker.confirmed_phase,
+            "candidate_phase": tracker.candidate_phase,
+        }
         state = _advance_tracker(
             tracker,
             period=str(period),
             raw_phase=raw,
             decision_eligible=decision_eligible,
             leading_direction=lead_direction,
+        )
+        state_change = (
+            _state_change_context(
+                previous_decision=previous_decision,
+                tracker_before=tracker_before,
+                state=state,
+                decision_eligible=decision_eligible,
+                basis_changed=coincident_basis["changed"],
+                level_gap=level_gap,
+                momentum=safe_momentum,
+                level_axis=level_axis,
+                momentum_axis=momentum_axis,
+                raw_phase=raw,
+            )
+            if include_explanations
+            else None
         )
         anchor = _absolute_anchor(source_months, index, state["phase"])
         recent_two = bool(
@@ -1041,11 +1429,25 @@ def _build_regime_from_matrix(
                 "leading_basis_coverage": _round(leading_basis["coverage"], 4),
                 "coincident_basis_changed": coincident_basis["changed"],
                 "leading_basis_changed": leading_basis["changed"],
+                **(
+                    {
+                        "coincident_decomposition": coincident_basis["decomposition"],
+                        "leading_decomposition": leading_basis["decomposition"],
+                    }
+                    if include_explanations
+                    else {}
+                ),
                 "coincident_index": _round(_number(a1_month.get("coincident_index"))),
                 "leading_index": _round(_number(a1_month.get("leading_index"))),
                 "level_3m": _round(level_value),
                 "level_gap": _round(level_gap),
                 "momentum_3m": _round(safe_momentum),
+                # A3/A5c consumes these private audit coordinates before the
+                # public response model strips them.  Phase rules use the
+                # unrounded values, so a two-decimal counterfactual could look
+                # unchanged at a ±1.5 boundary even when the label differs.
+                "_attribution_level_gap": _round(level_gap, 6),
+                "_attribution_momentum_3m": _round(safe_momentum, 6),
                 "diagnostic_level_3m": _round(diagnostic_level_value),
                 "diagnostic_momentum_3m": _round(diagnostic),
                 "level_axis": level_axis,
@@ -1053,6 +1455,8 @@ def _build_regime_from_matrix(
                 "leading_level_3m": _round(leading_value),
                 "leading_gap": _round(leading_gap),
                 "leading_momentum_3m": _round(leading_safe),
+                "_attribution_leading_gap": _round(leading_gap, 6),
+                "_attribution_leading_momentum_3m": _round(leading_safe, 6),
                 "leading_diagnostic_level_3m": _round(
                     leading_diagnostic_level_value
                 ),
@@ -1074,10 +1478,13 @@ def _build_regime_from_matrix(
                     level_gap=level_gap,
                     momentum=safe_momentum,
                 ),
+                **({"state_change": state_change} if include_explanations else {}),
                 "positive_contributions": _drivers(a1_month, True),
                 "negative_contributions": _drivers(a1_month, False),
             }
         )
+        if decision_eligible:
+            previous_decision = computed[-1]
 
     if output_start is not None:
         output = [row for row in computed if pd.Period(row["period"], freq="M") >= output_start]
@@ -1110,7 +1517,8 @@ def _build_regime_from_matrix(
         "A2沿用A1最终值/current快照；历史实时可见性必须在A3用vintage/as_of检验。",
         "同步与领先均在滚动六个月共同成分、同一归一权重下重算两个三月面板；篮子变化月立即重置未确认候选。",
         "diagnostic字段保留原A1指数直接计算值，只作对照，不参与阶段切换。",
-        "支撑与拖累按同步角色内有效权重重算，只解释当月同步指数相对100的水平偏离，不是三月动能分解。",
+        "A5b水平与动能驱动严格复用六个月共同篮子和有效权重；贡献加总分别还原三月水平相对100的缺口与三月动能。",
+        "positive/negative_contributions为兼容保留的A1单月构成；解释A2坐标应使用coincident_decomposition或leading_decomposition。",
         "通胀状态独立于四阶段，不参与相对增长周期分类。",
     ]
     if latest and latest["absolute_anchor"]["conflict"]:
@@ -1132,6 +1540,7 @@ def _build_regime_from_matrix(
             "阶段由六个月共同同步成分重算的两个三月面板确定；水平和动能均设±1.5点缓冲。"
             "相邻象限可双向切换，领先同向需连续2个可决策月；对角跨越或领先未确认需3个月，且不回填。"
             "领先方向只按共同面板LM3判断；共同篮子变化会立即清空未确认候选。"
+            "A5b按同一有效权重逐项分解水平缺口和动能，并执行严格加总校验。"
         ),
         "methodology": _methodology(),
         "change_conditions": _change_conditions(),
@@ -1197,6 +1606,11 @@ def _methodology() -> dict:
         "absolute_breadth_expansionary": 0.6,
         "absolute_breadth_contractionary": 0.4,
         "inflation_direction_buffer_pp": INFLATION_MOMENTUM_BUFFER,
+        "driver_decomposition": (
+            "level_gap=sum(10*effective_weight*recent_3m_avg_z); "
+            "momentum=sum(10*effective_weight*(recent_3m_avg_z-prior_3m_avg_z))"
+        ),
+        "decomposition_tolerance": DECOMPOSITION_TOLERANCE,
     }
 
 

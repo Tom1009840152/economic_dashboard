@@ -16,6 +16,10 @@ import {
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import {
+  ChinaCycleBacktestAttributionDetail,
+  ChinaCycleBacktestAttributionLegend,
+} from "@/components/china-cycle-backtest-attribution";
+import {
   Card,
   CardContent,
   CardDescription,
@@ -261,6 +265,9 @@ export function ChinaCycleBacktestDetail({ data }: { data: BusinessCycleBacktest
     .reverse();
   const hiddenAuditPeriods = new Set(hiddenAuditMonths.map((month) => month.observation_period));
   const displayedMonths = [...recentMonths, ...hiddenAuditMonths];
+  const hasDisplayedPhaseChanges = displayedMonths.some(
+    (month) => month.comparison_type === "phase_changed",
+  );
   const reasons = Object.entries(coverage.reason_counts).sort((left, right) => right[1] - left[1]);
   const maxReasonCount = Math.max(1, ...reasons.map(([, count]) => count));
   const readiness = [...data.input_readiness]
@@ -497,6 +504,7 @@ export function ChinaCycleBacktestDetail({ data }: { data: BusinessCycleBacktest
           <CardDescription>横向比较同一观察月的“当时判断”和同端点“事后参考”；另附最近的主动隐藏月份，便于核验不再用完整终点路径填充不可比月份。</CardDescription>
         </CardHeader>
         <CardContent>
+          {hasDisplayedPhaseChanges && <ChinaCycleBacktestAttributionLegend />}
           {displayedMonths.length > 0 ? (
             <div className="space-y-2">
               <div className="hidden grid-cols-[7rem_1fr_1.5rem_1fr_8rem] gap-3 px-3 text-[11px] font-medium text-muted-foreground sm:grid">
@@ -528,6 +536,13 @@ export function ChinaCycleBacktestDetail({ data }: { data: BusinessCycleBacktest
                     </div>
                     <div className={`text-xs font-medium ${comparisonClass(month)}`}>{comparisonLabel(month)}</div>
                   </div>
+                  {month.comparison_type === "phase_changed" && (
+                    <ChinaCycleBacktestAttributionDetail
+                      period={month.observation_period}
+                      realtime={month.realtime}
+                      final={month.final}
+                    />
+                  )}
                   {!month.comparable && month.exclusion_reasons.length > 0 && (
                     <div className="mt-2 border-t pt-2 text-[11px] leading-5 text-muted-foreground">
                       未纳入比较：{month.exclusion_reasons.map(reasonName).join("；")}

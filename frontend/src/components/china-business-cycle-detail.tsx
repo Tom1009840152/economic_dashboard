@@ -31,9 +31,10 @@ import {
   phasePlainHeadline,
   previousComparableMonth,
   regimeHeadline,
+  stateChangeExplanation,
 } from "@/lib/china-business-cycle-presentation";
 import type {
-  BusinessCycleDriver,
+  BusinessCycleDriverDecomposition,
   BusinessCyclePhase,
   BusinessCyclePhaseStatus,
   BusinessCycleRegimeDashboard,
@@ -289,50 +290,108 @@ function CycleCompass({
   );
 }
 
-function DriverList({
+function AxisDriverList({
   title,
-  direction,
-  items,
+  description,
+  decomposition,
+  metric,
+  limit = 7,
+  advisory,
 }: {
   title: string;
-  direction: "positive" | "negative";
-  items: BusinessCycleDriver[];
+  description: string;
+  decomposition: BusinessCycleDriverDecomposition;
+  metric: "level" | "momentum";
+  limit?: number;
+  advisory?: string;
 }) {
-  const Icon = direction === "positive" ? ArrowUpRight : ArrowDownRight;
-  const maximum = Math.max(...items.map((item) => Math.abs(item.contribution)), 0.01);
+  const field = metric === "level" ? "level_contribution" : "momentum_contribution";
+  const items = [...decomposition.drivers]
+    .sort((left, right) => Math.abs(right[field]) - Math.abs(left[field]));
+  const maximum = Math.max(...items.map((item) => Math.abs(item[field])), 0.01);
+  const visibleItems = items.slice(0, limit);
+  const target = metric === "level" ? decomposition.level_gap : decomposition.momentum_3m;
+  const sum = metric === "level"
+    ? decomposition.level_contribution_sum
+    : decomposition.momentum_contribution_sum;
+  const residual = metric === "level"
+    ? decomposition.level_residual
+    : decomposition.momentum_residual;
 
   return (
     <Card className="h-full">
       <CardHeader>
         <div className="flex items-center gap-2">
-          <Icon className="size-4" aria-hidden="true" />
+          {metric === "level"
+            ? <ArrowRight className="size-4" aria-hidden="true" />
+            : <GitCompareArrows className="size-4" aria-hidden="true" />}
           <CardTitle>{title}</CardTitle>
         </div>
-        <CardDescription>解释当月原始同步指数的水平构成，不是三月动能分解，也不代表经济因果关系。</CardDescription>
+        <CardDescription>{description}</CardDescription>
       </CardHeader>
       <CardContent>
-        {items.length > 0 ? (
+        {decomposition.status === "available" && items.length > 0 ? (
+          <div className="space-y-4">
+            {advisory && (
+              <div className="rounded-lg bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-950 dark:bg-amber-950/45 dark:text-amber-200">{advisory}</div>
+            )}
+            <div className="grid grid-cols-2 gap-2 text-xs">
+              <div className="rounded-lg bg-muted/55 p-3">
+                <div className="text-muted-foreground">模型坐标</div>
+                <div className="mt-1 text-xl font-semibold tabular-nums">{signed(target, 2)}</div>
+              </div>
+              <div className="rounded-lg bg-muted/55 p-3">
+                <div className="text-muted-foreground">逐项加总</div>
+                <div className="mt-1 text-xl font-semibold tabular-nums">{signed(sum, 2)}</div>
+              </div>
+            </div>
           <ol className="space-y-3">
-            {items.slice(0, 5).map((item) => (
+            {visibleItems.map((item) => {
+              const contribution = item[field];
+              const positive = contribution >= 0;
+              const Icon = positive ? ArrowUpRight : ArrowDownRight;
+              return (
               <li key={item.code}>
                 <div className="flex items-baseline justify-between gap-3 text-xs">
                   <div className="min-w-0">
-                    <span className="font-medium">{item.name}</span>
-                    <span className="ml-1.5 text-muted-foreground">{item.source_period ?? "--"}</span>
+                    <span className="inline-flex items-center gap-1 font-medium">
+                      <Icon className={`size-3 ${positive ? "text-sky-600" : "text-amber-600"}`} aria-hidden="true" />
+                      {item.name}
+                    </span>
+                    <span className="ml-1.5 text-muted-foreground">权重 {(item.effective_weight * 100).toFixed(1)}%</span>
                   </div>
-                  <span className="shrink-0 font-mono tabular-nums">{signed(item.contribution, 2)}</span>
+                  <span className="shrink-0 font-mono tabular-nums">{signed(contribution, 2)}</span>
                 </div>
                 <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-muted">
                   <div
-                    className={direction === "positive" ? "h-full rounded-full bg-sky-600" : "h-full rounded-full bg-amber-600"}
-                    style={{ width: `${Math.max(5, Math.abs(item.contribution) / maximum * 100)}%` }}
+                    className={positive ? "h-full rounded-full bg-sky-600" : "h-full rounded-full bg-amber-600"}
+                    style={{ width: `${Math.max(5, Math.abs(contribution) / maximum * 100)}%` }}
                   />
                 </div>
+                <div className="mt-1 text-[11px] text-muted-foreground">
+                  {metric === "level"
+                    ? `近3月标准分 ${signed(item.recent_score, 2)}`
+                    : `近3月 ${signed(item.recent_score, 2)}，此前3月 ${signed(item.comparison_score, 2)}`}
+                </div>
+                <div className="mt-0.5 text-[10px] leading-4 text-muted-foreground">
+                  {metric === "level"
+                    ? `采用期：${item.recent_source_periods.join(" / ") || "--"}`
+                    : `近端采用期：${item.recent_source_periods.join(" / ") || "--"}；对照期：${item.comparison_source_periods.join(" / ") || "--"}`}
+                </div>
               </li>
-            ))}
+              );
+            })}
           </ol>
+            {items.length > visibleItems.length && (
+              <div className="text-[11px] text-muted-foreground">这里只展示影响绝对值最大的 {visibleItems.length} 项；加总校验仍包含全部 {items.length} 项。</div>
+            )}
+            <div className={`rounded-lg px-3 py-2 text-xs leading-5 ${decomposition.additivity_passed ? "bg-emerald-50 text-emerald-900 dark:bg-emerald-950/45 dark:text-emerald-200" : "bg-red-50 text-red-900 dark:bg-red-950/45 dark:text-red-200"}`}>
+              {decomposition.additivity_passed ? "加总校验通过" : "加总校验未通过"}：残差 {signed(residual, 6)} 点。
+              窗口为 {decomposition.comparison_window_start}—{decomposition.comparison_window_end} 对比 {decomposition.recent_window_start}—{decomposition.recent_window_end}。
+            </div>
+          </div>
         ) : (
-          <p className="text-sm text-muted-foreground">本月没有可计算的{title}。</p>
+          <p className="text-sm leading-6 text-muted-foreground">六个月共同指标篮子不足，暂不能对这一坐标做严格分解；空值不表示贡献为零。</p>
         )}
       </CardContent>
     </Card>
@@ -446,6 +505,9 @@ export function ChinaBusinessCycleDetail({ data }: { data: BusinessCycleRegimeDa
               <div className="text-xs font-medium">与上一可比月相比</div>
               <p className="mt-1 text-xs leading-5 text-muted-foreground">
                 {comparableMonthExplanation(latest, previousComparable)}
+              </p>
+              <p className="mt-2 border-t pt-2 text-xs leading-5 text-muted-foreground">
+                {stateChangeExplanation(latest)}
               </p>
             </div>
             <div className="rounded-xl border bg-background/75 p-4">
@@ -580,9 +642,52 @@ export function ChinaBusinessCycleDetail({ data }: { data: BusinessCycleRegimeDa
         )}
       </section>
 
-      <section className="grid gap-4 lg:grid-cols-2">
-        <DriverList title="同步指数模型内主要正贡献" direction="positive" items={latest.positive_contributions} />
-        <DriverList title="同步指数模型内主要负贡献" direction="negative" items={latest.negative_contributions} />
+      <section>
+        <div className="mb-4 flex items-start gap-2">
+          <GitCompareArrows className="mt-0.5 size-5 shrink-0" aria-hidden="true" />
+          <div>
+            <h2 className="text-lg font-semibold">指标如何推动周期坐标</h2>
+            <p className="mt-1 text-sm leading-6 text-muted-foreground">
+              每项贡献使用与周期判断完全相同的六个月共同篮子和有效权重；同步坐标决定四象限，领先坐标只影响确认速度。贡献是模型内算术分解，不表示现实经济因果。
+            </p>
+          </div>
+        </div>
+        <div className="mb-4 grid gap-2 text-xs text-muted-foreground sm:grid-cols-2">
+          <div className="rounded-lg border bg-muted/35 px-3 py-2 font-mono">水平缺口 = Σ（有效权重 × 近3月平均标准分 × 10）</div>
+          <div className="rounded-lg border bg-muted/35 px-3 py-2 font-mono">动能 = Σ（有效权重 ×〔近3月 − 前3月〕平均标准分 × 10）</div>
+        </div>
+        <div className="grid gap-4 lg:grid-cols-2">
+          <AxisDriverList
+            title="同步水平由什么构成"
+            description="水平贡献加总后，严格还原近三月同步活动相对历史中性 100 的缺口。"
+            decomposition={latest.coincident_decomposition}
+            metric="level"
+            advisory={latest.coincident_basis_changed ? "本月同步共同篮子发生变化：分解算术仍成立，但本月暂停阶段判定。" : undefined}
+          />
+          <AxisDriverList
+            title="同步动能为何改善或走弱"
+            description="动能贡献比较同一批指标的近三月与此前三月，并严格还原纵轴读数。"
+            decomposition={latest.coincident_decomposition}
+            metric="momentum"
+            advisory={latest.coincident_basis_changed ? "本月同步共同篮子发生变化：分解算术仍成立，但本月暂停阶段判定。" : undefined}
+          />
+          <AxisDriverList
+            title="领先水平由什么构成"
+            description="领先水平不直接决定阶段，只用于观察风险位于偏强还是偏弱一侧。"
+            decomposition={latest.leading_decomposition}
+            metric="level"
+            limit={5}
+            advisory={latest.leading_basis_changed ? "本月领先共同篮子发生变化：分解算术仍成立，但该方向不用于缩短确认期。" : undefined}
+          />
+          <AxisDriverList
+            title="领先动能为何转向"
+            description="领先动能只改变候选阶段的确认要求，不会单独生成阶段标签。"
+            decomposition={latest.leading_decomposition}
+            metric="momentum"
+            limit={5}
+            advisory={latest.leading_basis_changed ? "本月领先共同篮子发生变化：分解算术仍成立，但该方向不用于缩短确认期。" : undefined}
+          />
+        </div>
       </section>
 
       <section className="grid gap-4 xl:grid-cols-[1.25fr_0.75fr]">
