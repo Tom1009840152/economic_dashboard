@@ -127,6 +127,32 @@ def _request_text(url: str) -> str:
     return response.text
 
 
+def _request_gacc_text(url: str) -> str:
+    """Fetch GACC HTML without ever following an untrusted redirect hop."""
+
+    current = url
+    for _ in range(6):
+        if not _is_gacc_https_url(current):
+            raise ValueError(f"refusing Customs redirect outside official HTTPS: {current}")
+        response = requests.get(
+            current,
+            headers=_HEADERS,
+            timeout=30,
+            allow_redirects=False,
+            verify=True,
+        )
+        if response.status_code in {301, 302, 303, 307, 308}:
+            location = response.headers.get("Location")
+            if not location:
+                raise RuntimeError("Customs redirect is missing a Location header")
+            current = urljoin(current, location)
+            continue
+        response.raise_for_status()
+        response.encoding = response.apparent_encoding or "utf-8"
+        return response.text
+    raise RuntimeError("Customs archive exceeded the redirect limit")
+
+
 def _request_bytes(url: str) -> bytes:
     response = requests.get(url, headers=_HEADERS, timeout=30)
     response.raise_for_status()
@@ -449,7 +475,7 @@ def _get_gacc_archive_text(url: str, *, cache: bool = True) -> str:
     if wait_for > 0:
         time.sleep(wait_for)
     try:
-        source = _request_text(url)
+        source = _request_gacc_text(url)
     finally:
         _last_gacc_archive_request = time.monotonic()
     if cache:
@@ -1118,7 +1144,7 @@ def _gacc_publication_metadata(source: str, source_url: str) -> dict:
     # A CMS ``createDate`` may describe a draft or migration rather than the
     # public release, so an exact clock value is trusted only when its date
     # agrees with the page's PubDate/byline date.
-    visible_date_match = re.search(
+    metadata_date_match = re.search(
         r"PubDate[^>]*content=[\"']"
         r"(20\d{2})[/-](\d{1,2})[/-](\d{1,2})",
         source,
@@ -1137,11 +1163,14 @@ def _gacc_publication_metadata(source: str, source_url: str) -> dict:
         )
     except (TypeError, ValueError):
         header_dates = ""
-    if visible_date_match is None:
-        visible_date_match = re.search(
-            r"(20\d{2})[/-](\d{1,2})[/-](\d{1,2})",
-            header_dates,
-        )
+    rendered_date_match = re.search(
+        r"(20\d{2})[/-](\d{1,2})[/-](\d{1,2})",
+        header_dates,
+    )
+    # The rendered byline/date is the public-facing statement.  Prefer it
+    # over a conflicting CMS attribute so a stale metadata date can never
+    # move an availability upper bound earlier.
+    visible_date_match = rendered_date_match or metadata_date_match
     visible_date = (
         dt.date(
             *(int(visible_date_match.group(index)) for index in range(1, 4))
@@ -1149,15 +1178,32 @@ def _gacc_publication_metadata(source: str, source_url: str) -> dict:
         if visible_date_match is not None
         else None
     )
+    rendered_date = (
+        dt.date(
+            *(int(rendered_date_match.group(index)) for index in range(1, 4))
+        )
+        if rendered_date_match is not None
+        else None
+    )
 
     metadata = _publication_metadata(source, source_url)
     if metadata["available_at"] is not None:
+        # A CMS clock is not, by itself, proof of a public release minute.
+        # Promote it only when the page also renders an independent calendar
+        # date and both dates agree.  Otherwise retain the calendar date and
+        # let the source-specific evidence collector apply a conservative
+        # next-day upper bound.
+        if rendered_date is None:
+            return {
+                "release_date": metadata["release_date"],
+                "available_at": None,
+                "source_url": source_url,
+            }
         if (
-            visible_date is not None
-            and metadata["available_at"].date() != visible_date
+            metadata["available_at"].date() != rendered_date
         ):
             return {
-                "release_date": visible_date,
+                "release_date": rendered_date,
                 "available_at": None,
                 "source_url": source_url,
             }
@@ -1176,9 +1222,15 @@ def _gacc_publication_metadata(source: str, source_url: str) -> dict:
             int(exact.group(index)) for index in range(1, 6)
         )
         published = dt.datetime(year, month, day, hour, minute)
-        if visible_date is not None and published.date() != visible_date:
+        if rendered_date is None:
             return {
-                "release_date": visible_date,
+                "release_date": published.date(),
+                "available_at": None,
+                "source_url": source_url,
+            }
+        if published.date() != rendered_date:
+            return {
+                "release_date": rendered_date,
                 "available_at": None,
                 "source_url": source_url,
             }

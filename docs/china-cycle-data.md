@@ -33,10 +33,10 @@
 
 ## 当前已接入的周期输入
 
-- 国家统计局：制造业和非制造业 PMI 分项、规上工业增加值、工业企业利润/收入/库存、房地产投资/销售/新开工/施工、70 城新房价格扩散、名义 GDP。
+- 国家统计局：制造业和非制造业 PMI 分项、规上工业增加值、核心 CPI/PPI 月度解读、工业企业利润/收入/库存、房地产投资/销售/新开工/施工、70 城新房价格扩散、名义 GDP。
 - 人民银行：社融存量增速、社融口径人民币贷款余额增速、政府债券净融资。
 - 财政部：一般公共预算支出、政府性基金预算支出、广义财政支出、新增地方专项债。
-- 海关总署：出口同比的英文初值发布目录与全国美元总值详情页；当前只建立了严格归档能力，尚未取得可入库的分钟级历史证据。
+- 海关总署：出口同比的英文初值发布目录与全国美元总值详情页；已实现允许日期级保守上界的独立证据链，但当前主机无法验证官方站 TLS 证书链，生产证据仍为 0。
 - 中国经济信息网（CEI）：消费者预期、满意和信心的历史发布快照；页面标注数据来源为国家统计局，但 CEI 是分发镜像而非国家统计局官网。三项完整保存用于交叉审计，只有消费者预期进入 A1。
 - 历史镜像：社融人民币贷款和企业债券分项、消费者调查当前最终值、企业景气，以及 70 城房价扩散的更早期最终值；消费者调查严格历史证据已改由 CEI 发布页提供，70 城 2021-09 以来的严格发布时间由国家统计局原发布页提供。
 
@@ -220,15 +220,68 @@ CEI 页面只有日期，没有可证明的时分，因此统一使用
 .\.venv\Scripts\python.exe -m scripts.backfill_china_cycle --group property --archive --archive-start-page 0 --archive-pages 20
 ```
 
-海关总署英文初值归档现支持 `trade` 组、小批分页和 `check-only`：
+### 核心 CPI/PPI 严格证据与 current 修复
+
+国家统计局月度解读稿现在由两个相互隔离的解析器读取。核心 CPI 只接受单个 HTML 段落内明确
+写出的“核心 CPI 同比”，不会把标题与下一段整体 CPI 数字跨段拼接；PPI 只接受工业生产者
+出厂价格同比，排除购进价格、环比、累计和全年值。该改造发现 2025-06 的旧 current `0.1%`
+实际来自整体 CPI，官方核心 CPI 是 `0.7%`；2025-02 的 `-0.1%` 则首次由 2025-03 解读稿在
+2025-04-10 09:30 回溯明确。
+
+固定修复器只允许上述两条键，并把官方 URL、规范化正文 SHA-256、文章观察月、证据语义、
+可用时间、允许的旧值和匹配旧 vintage 全部写成硬门。2026-09-16 实际执行后，核心 CPI current
+由 22 条增至 23 条，vintage 由 22 条增至 24 条；2025-06 的 `0.1%` 旧版继续保留，二次 dry-run
+计划变更为 0：
+
+```powershell
+.\.venv\Scripts\python.exe -m scripts.repair_china_core_cpi_current
+.\.venv\Scripts\python.exe -m scripts.repair_china_core_cpi_current --apply
+```
+
+独立 `ReleaseEvidence` 采集只接受 `stats.gov.cn` 的 HTTPS 官方页、逐跳官方重定向和标题区可见
+分钟；CMS `createDate` 不能单独成为 `exact_minute`。详情页使用全新的
+`backend/.cache/nbs-inflation-evidence-v2`，HTML 与审计元数据分别原子落盘，记录请求 URL、最终
+URL、完整重定向链和正文 SHA-256；缓存命中仍会复核全部字段和文章主题，索引页永不缓存，
+真实请求至少间隔 0.45 秒。只有明确的编号归档 404 空洞可以跳过；任一其他索引或详情抓取/解析
+失败都会使整批扫描失败，不能用其余重复页面凑齐月份后写入。生产完整性门固定要求核心 CPI 自 2017-01、PPI 自 2016-08 连续至
+当前应发布月，命令行不能回退截止日期：
+
+```powershell
+.\.venv\Scripts\python.exe -m scripts.backfill_china_inflation_evidence
+.\.venv\Scripts\python.exe -m scripts.backfill_china_inflation_evidence --apply
+```
+
+2026-09-16 的 140 页 dry-run 得到核心 CPI 79 期（2017-01—2026-08）和 PPI 113 期
+（2016-09—2026-08），但生产窗口仍分别缺 37 期和 8 期，`ready=false`，因此没有打开写入流程。
+修复 current 后固定 120 个月回放共有 4,583 个最终观测、2,038 个可还原发布时间、1,947 个
+按时可用和 21/23 个有严格历史的代码；核心 CPI 在窗口内为 22 个最终观测、2 个可还原、1 个
+按时。阶段稳定性仍为 48/93 与 13/25，匹配转换仍为 2 次，说明这次纠错改善的是数据真实性，
+没有人为改变增长周期阶段。
+
+### 海关出口初值证据
+
+旧的通用 vintage 归档仍支持 `trade` 组、小批分页和 `check-only`：
 
 ```powershell
 .\.venv\Scripts\python.exe -m scripts.backfill_china_cycle --group trade --archive --gacc-archive-start-page 1 --gacc-archive-pages 2 --check-only
 ```
 
-采集器只认 [GACC Preliminary Release](https://english.customs.gov.cn/Statistics/Statistics?ColumnId=1) 中全国 `in USD` 总值表，排除人民币表、贸易方式/国别表和非官方或 HTTP 链接。[官方发布日历](https://english.customs.gov.cn/Statics/fc662cee-21c3-474e-a7fb-4768bb1e295a.html)明确1月、2月初值合并发布；该合并同比不是2月单月值，整条拒绝，标题只写2月但表头只有 `1-to-2` 也拒绝。月度同比必须能从多层表头唯一定位。页面只有日期时只保留 `release_date`，不生成伪造的 `available_at`；CMS 精确时间与可见发布日期冲突时也拒绝。详情页只有全部请求失败时明确报错，不把上游失败伪装成0条成功。
+两条链都只认 [GACC Preliminary Release](https://english.customs.gov.cn/Statistics/Statistics?ColumnId=1) 中全国 `in USD` 总值表，排除人民币表、贸易方式/国别表和非官方或 HTTP 链接。[官方发布日历](https://english.customs.gov.cn/Statics/fc662cee-21c3-474e-a7fb-4768bb1e295a.html)明确1月、2月初值合并发布；该合并同比不是2月单月值，整条拒绝，标题只写2月但表头只有 `1-to-2` 也拒绝。月度同比必须能从多层表头唯一定位。旧通用 vintage 路径仍要求与 current 完全一致且有真实分钟，日期级页面不会取得资格。
 
-2026-09-15 单页预检因 `english.customs.gov.cn` 证书链无法验证而明确返回 `CN_EXPORTS: FAILED`；TLS 校验没有关闭，数据库0写入。公开可核验详情至少覆盖2020—2026，但常只显示日期，不能据此宣称获得分钟级首次发布时间。`CN_EXPORTS_ABS` 当前由千美元表生成，而官方初值总值页仅精确到亿美元，二者不做精确值拼接。固定调查篮子、1月评价窗口敏感性、70城价格扩散归档、名义 GDP 首发、财政脉冲、消费者预期和完整信用块的有序证据已经完成；D9 仍须继续扩历史基准与出口等严格证据。
+新的 `backfill_china_trade_evidence` 专门写独立 `ReleaseEvidence`，允许初值与今天最终值不同；只有
+日期的页面采用“发布日次日 00:00”保守上界并明确标为 `date_upper_bound`。生产门固定从 2020-03
+检查所有可形成单月值的月份，并按当天计算最新应发布月；CLI 不提供缩短起点、提前截止或部分
+写入旁路。所有重定向逐跳验证官方 HTTPS，TLS 校验绝不关闭：
+
+```powershell
+.\.venv\Scripts\python.exe -m scripts.backfill_china_trade_evidence
+.\.venv\Scripts\python.exe -m scripts.backfill_china_trade_evidence --apply
+```
+
+2026-09-16 单页 dry-run 因 `english.customs.gov.cn` 返回无法验证的自签名证书链而明确失败；
+数据库没有打开，证据表 0 写入。`CN_EXPORTS_ABS` 当前由千美元表生成，而官方初值页只到亿美元，
+二者不做精确值拼接。固定调查篮子、1月敏感性、70城价格扩散、名义 GDP—财政脉冲、消费者
+预期和完整信用块已经完成；D9 下一步仍是补齐通胀历史缺稿并解决可验证的海关官方传输路径。
 
 写入 `data_point_vintages` 的旧归档安全门只接受 `stats.gov.cn`、`pbc.gov.cn`、`mof.gov.cn`、`customs.gov.cn` 的 HTTPS 官方页面和真实分钟级时间，并要求与当前值在六位小数精度下完全一致。状态通常必须是 `published`；派生白名单按“指标代码 + 公式版本 + 官方发布机构”绑定，目前仅包括人民银行累计差分 `pboc_ytd_diff_v1`，以及上述两项国家统计局70城聚合公式。归档模式缺少专用帧时直接跳过，不会回退普通抓取器或把镜像最终值伪装为历史证据。允许首发值与当前修订值不同的记录则必须进入独立 `release_evidence`，不借此门禁覆盖 `data_points`。
 
@@ -272,7 +325,8 @@ CEI 页面只有日期，没有可证明的时分，因此统一使用
 .\.venv\Scripts\python.exe -m scripts.backfill_china_credit_evidence --apply
 ```
 
-写入后固定 120 个月回放的当前公式就绪率为：4,574 个最终观测中 2,036 个可还原发布时间
+信用证据写入当时的历史快照（后续财政 current 与核心 CPI 修复前）为：固定 120 个月回放的
+4,574 个最终观测中 2,036 个可还原发布时间
 （44.51%），1,946 个按模型目标月可用（42.54%），20/23 个必需代码具有严格历史。
 `CN_CREDIT_IMPULSE` 在回测截止内为 32 期可还原、31 期按时；`CN_M1M2` 为 31/31 期可还原、
 19 期按时。信用块需要 24 个月既往观测做单边标准化，因此从 2026-01 起才由两项信号共同工作；

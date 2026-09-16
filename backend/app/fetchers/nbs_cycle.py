@@ -11,10 +11,11 @@ import datetime as dt
 import html
 import re
 import time
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import pandas as pd
 import requests
+from lxml import html as lxml_html
 
 NBS_BASE = "https://www.stats.gov.cn/sj/"
 _HEADERS = {
@@ -30,18 +31,255 @@ _PAGE_COUNT = 14
 _cache: dict[str, dict] = {}
 
 
+_INFLATION_TITLE_RE = re.compile(
+    r"(?P<year>20\d{2})年(?P<month>\d{1,2})月份CPI(?:和|、)PPI数据"
+)
+
+
+def inflation_title_observation(title: str) -> dt.date | None:
+    """Return the month named by an NBS monthly CPI/PPI commentary title."""
+
+    match = _INFLATION_TITLE_RE.search(" ".join(str(title).split()))
+    if match is None:
+        return None
+    year, month = int(match.group("year")), int(match.group("month"))
+    if not 1 <= month <= 12:
+        return None
+    return dt.date(year, month, 1)
+
+
+def _article_blocks(source: str) -> list[str]:
+    """Return bounded visible blocks; never concatenate neighbouring nodes."""
+
+    try:
+        document = lxml_html.fromstring(source)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid NBS inflation article HTML") from exc
+    blocks: list[str] = []
+    for node in document.xpath("//p|//li|//h1|//h2|//h3|//h4"):
+        text = " ".join(node.text_content().split())
+        if text:
+            blocks.append(text)
+    return blocks
+
+
+def _signed(direction: str, number: str) -> float:
+    value = float(number)
+    return -value if direction == "下降" else value
+
+
+def _previous_month(observed: dt.date) -> dt.date:
+    period = pd.Period(observed, freq="M") - 1
+    return dt.date(period.year, period.month, 1)
+
+
+def parse_core_cpi_values(source: str, observed: dt.date) -> dict[dt.date, float]:
+    """Parse only explicit core-CPI statements from one monthly commentary.
+
+    Every expression must be fully contained in one HTML paragraph/list item.
+    The patterns name ``核心CPI`` again immediately before their values, so a
+    section heading can never be joined to a later headline-CPI percentage.
+    A small set of explicit retrospective forms is retained because NBS
+    sometimes publishes a prior month's core value only in the next release.
+    """
+
+    values: dict[dt.date, set[float]] = {}
+
+    def add(date: dt.date, value: float) -> None:
+        values.setdefault(date, set()).add(round(value, 6))
+
+    transition = re.compile(
+        r"(?:扣除食品和能源价格的)?核心\s*CPI"
+        r"[^。；;！？]{0,28}?同比\s*由上月\s*"
+        r"(?P<previous_direction>上涨|下降)\s*(?P<previous>\d+(?:\.\d+)?)%"
+        r"\s*转为\s*(?P<current_direction>上涨|下降)\s*"
+        r"(?P<current>\d+(?:\.\d+)?)%"
+    )
+    paired_months = re.compile(
+        r"(?P<first_month>\d{1,2})月份和(?P<second_month>\d{1,2})月份"
+        r"(?:扣除食品和能源价格的)?核心\s*CPI\s*同比\s*分别\s*"
+        r"(?P<first_direction>上涨|下降)\s*(?P<first>\d+(?:\.\d+)?)%"
+        r"\s*和\s*(?P<second_direction>上涨|下降)?\s*"
+        r"(?P<second>\d+(?:\.\d+)?)%"
+    )
+    direct = re.compile(
+        r"(?:扣除食品和能源价格的)?核心\s*CPI"
+        r"(?P<middle>[^。；;！？%]{0,28}?)同比\s*"
+        r"(?P<tail>[^。；;！？%]{0,18}?)(?P<direction>上涨|下降)\s*"
+        r"(?P<number>\d+(?:\.\d+)?)%"
+    )
+    reaches = re.compile(
+        r"(?:扣除食品和能源价格的)?核心\s*CPI"
+        r"\s*同比\s*(?P<rate_word>涨幅|降幅)[^。；;！？%]{0,20}?"
+        r"(?:升至|回升至|扩大至|收窄至|为)\s*"
+        r"(?P<number>\d+(?:\.\d+)?)%"
+    )
+    after_mom = re.compile(
+        r"(?:扣除食品和能源价格的)?核心\s*CPI"
+        r"[^。！？]{0,45}?环比[^。；;！？%]{0,20}?%\s*[；;]\s*"
+        r"同比\s*(?P<direction>上涨|下降)\s*"
+        r"(?P<number>\d+(?:\.\d+)?)%"
+    )
+
+    for block in _article_blocks(source):
+        has_transition = False
+        for match in paired_months.finditer(block):
+            first_month = int(match.group("first_month"))
+            second_month = int(match.group("second_month"))
+            if not (1 <= first_month <= 12 and 1 <= second_month <= 12):
+                continue
+            first_year = observed.year - (first_month > observed.month)
+            second_year = observed.year - (second_month > observed.month)
+            add(
+                dt.date(first_year, first_month, 1),
+                _signed(match.group("first_direction"), match.group("first")),
+            )
+            second_direction = (
+                match.group("second_direction") or match.group("first_direction")
+            )
+            add(
+                dt.date(second_year, second_month, 1),
+                _signed(second_direction, match.group("second")),
+            )
+
+        for match in transition.finditer(block):
+            has_transition = True
+            add(
+                _previous_month(observed),
+                _signed(
+                    match.group("previous_direction"), match.group("previous")
+                ),
+            )
+            add(
+                observed,
+                _signed(match.group("current_direction"), match.group("current")),
+            )
+
+        for match in after_mom.finditer(block):
+            add(
+                observed,
+                _signed(match.group("direction"), match.group("number")),
+            )
+
+        for match in (() if has_transition else direct.finditer(block)):
+            bridge = match.group("middle") + match.group("tail")
+            if re.search(r"(?:CPI|环比|服务|工业消费品|食品|能源)", bridge, re.I):
+                continue
+            add(
+                observed,
+                _signed(match.group("direction"), match.group("number")),
+            )
+        for match in (() if has_transition else reaches.finditer(block)):
+            number = float(match.group("number"))
+            add(observed, -number if match.group("rate_word") == "降幅" else number)
+
+    conflicts = {date: found for date, found in values.items() if len(found) > 1}
+    if conflicts:
+        rendered = ", ".join(
+            f"{date:%Y-%m}={sorted(found)}"
+            for date, found in sorted(conflicts.items())
+        )
+        raise ValueError(f"conflicting core CPI statements in one NBS article: {rendered}")
+    return {date: next(iter(found)) for date, found in sorted(values.items())}
+
+
+def parse_ppi_value(source: str) -> float | None:
+    """Parse the headline PPI year-on-year rate, never purchase prices."""
+
+    marker = (
+        r"(?:全国\s*)?(?:工业生产者出厂价格指数\s*[（(]?PPI[）)]?|"
+        r"工业生产者出厂价格|(?<!购进价格)PPI)"
+    )
+    direct = re.compile(
+        marker + r"(?P<middle>[^。！？]{0,100}?)同比\s*"
+        r"(?P<direction>上涨|下降|持平)\s*(?P<number>\d+(?:\.\d+)?)%",
+        re.I,
+    )
+    reaches = re.compile(
+        marker + r"(?P<middle>[^。！？]{0,100}?)同比\s*"
+        r"(?P<rate_word>涨幅|降幅)[^。；;！？%]{0,20}?"
+        r"(?:升至|回升至|扩大至|收窄至|为)\s*"
+        r"(?P<number>\d+(?:\.\d+)?)%",
+        re.I,
+    )
+    transition = re.compile(
+        marker + r"(?P<middle>[^。！？]{0,100}?)同比\s*由上月\s*"
+        r"(?P<previous_direction>上涨|下降)\s*\d+(?:\.\d+)?%\s*转为\s*"
+        r"(?P<direction>上涨|下降)\s*(?P<number>\d+(?:\.\d+)?)%",
+        re.I,
+    )
+    from_yoy = re.compile(
+        r"从同比看[，,]\s*(?:全国\s*)?PPI\s*"
+        r"(?P<direction>上涨|下降|持平)\s*(?P<number>\d+(?:\.\d+)?)%",
+        re.I,
+    )
+    found: set[float] = set()
+    for block in _article_blocks(source):
+        transition_matches = list(transition.finditer(block))
+        patterns = (transition,) if transition_matches else (direct, reaches, from_yoy)
+        for pattern in patterns:
+            for match in pattern.finditer(block):
+                middle = match.groupdict().get("middle", "") or ""
+                # The long official phrase can be followed by headline CPI
+                # before the page reaches PPI. Never cross that second token.
+                if "购进价格" in middle or re.search(
+                    r"(?:CPI|PPI)", middle, re.I
+                ):
+                    continue
+                prefix = block[max(0, match.start() - 24) : match.start()]
+                if re.search(r"(?:全年|季度|平均|累计)", prefix):
+                    continue
+                if pattern in (direct, transition, from_yoy):
+                    value = (
+                        0.0
+                        if match.group("direction") == "持平"
+                        else _signed(
+                            match.group("direction"), match.group("number")
+                        )
+                    )
+                else:
+                    number = float(match.group("number"))
+                    value = (
+                        -number if match.group("rate_word") == "降幅" else number
+                    )
+                found.add(round(value, 6))
+    if len(found) > 1:
+        raise ValueError(f"conflicting PPI statements in one NBS article: {sorted(found)}")
+    return next(iter(found)) if found else None
+
+
 def _page_url(section: str, page: int) -> str:
     suffix = "" if page == 0 else f"index_{page}.html"
     return urljoin(NBS_BASE, f"{section}/{suffix}")
 
 
 def _get_text(url: str) -> str:
-    response = requests.get(url, headers=_HEADERS, timeout=30)
-    response.raise_for_status()
-    response.encoding = response.apparent_encoding or "utf-8"
-    if "Please enable JavaScript and refresh the page" in response.text:
-        raise RuntimeError("NBS website returned a JavaScript verification page")
-    return response.text
+    current = url
+    for _ in range(6):
+        parsed = urlparse(current)
+        hostname = (parsed.hostname or "").lower().rstrip(".")
+        if parsed.scheme.lower() != "https" or not (
+            hostname == "stats.gov.cn" or hostname.endswith(".stats.gov.cn")
+        ):
+            raise ValueError(f"refusing NBS redirect outside official HTTPS: {current}")
+        response = requests.get(
+            current,
+            headers=_HEADERS,
+            timeout=30,
+            allow_redirects=False,
+        )
+        if response.status_code in {301, 302, 303, 307, 308}:
+            location = response.headers.get("Location")
+            if not location:
+                raise RuntimeError("NBS redirect is missing a Location header")
+            current = urljoin(current, location)
+            continue
+        response.raise_for_status()
+        response.encoding = response.apparent_encoding or "utf-8"
+        if "Please enable JavaScript and refresh the page" in response.text:
+            raise RuntimeError("NBS website returned a JavaScript verification page")
+        return response.text
+    raise RuntimeError("NBS request exceeded the redirect limit")
 
 
 def _plain_text(source: str) -> str:
@@ -116,21 +354,15 @@ def _load_industrial() -> pd.DataFrame:
 
 def _load_core_cpi() -> pd.DataFrame:
     rows: list[tuple[dt.date, float]] = []
-    date_re = re.compile(r"(20\d{2})年(\d{1,2})月份CPI和PPI数据")
-    value_re = re.compile(
-        r"(?:扣除食品和能源价格的)?核心\s*CPI.{0,30}?同比(?:涨幅[^\d-]{0,8})?(上涨|下降|回升至|扩大至|为)?\s*(-?\d+(?:\.\d+)?)%"
-    )
-    for url, title in _links("sjjd", r"解读20\d{2}年\d{1,2}月份CPI和PPI数据"):
-        date_match = date_re.search(title)
-        if not date_match:
+    for url, title in _links(
+        "sjjd", r"解读20\d{2}年\d{1,2}月份CPI(?:和|、)PPI数据"
+    ):
+        observed = inflation_title_observation(title)
+        if observed is None:
             continue
-        text = _plain_text(_get_text(url))
-        value_match = value_re.search(text)
-        if value_match:
-            value = float(value_match.group(2))
-            if value_match.group(1) == "下降" and value > 0:
-                value = -value
-            rows.append((dt.date(int(date_match.group(1)), int(date_match.group(2)), 1), value))
+        values = parse_core_cpi_values(_get_text(url), observed)
+        if observed in values:
+            rows.append((observed, values[observed]))
     return pd.DataFrame(rows, columns=["date", "value"]).drop_duplicates("date").sort_values("date")
 
 

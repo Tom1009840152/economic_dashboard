@@ -1,6 +1,6 @@
 import datetime as dt
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from app.fetchers.china_cycle_data import (
     _gacc_catalog_entries,
@@ -10,6 +10,7 @@ from app.fetchers.china_cycle_data import (
     _gacc_release_catalog,
     _is_gacc_total_usd_title,
     _load_gacc_exports,
+    _request_gacc_text,
     _valid_gacc_index_source,
     _valid_gacc_release_source,
 )
@@ -43,6 +44,70 @@ NOVEMBER_2024_PAGE = """
 
 
 class GaccExportsArchiveTests(unittest.TestCase):
+    def test_transport_refuses_insecure_or_foreign_redirect_before_following(self) -> None:
+        for location in (
+            "http://english.customs.gov.cn/insecure.html",
+            "https://customs.gov.cn.evil.example/foreign.html",
+        ):
+            with self.subTest(location=location):
+                redirect = Mock(
+                    status_code=302,
+                    headers={"Location": location},
+                )
+                with patch(
+                    "app.fetchers.china_cycle_data.requests.get",
+                    return_value=redirect,
+                ) as request:
+                    with self.assertRaisesRegex(ValueError, "outside official HTTPS"):
+                        _request_gacc_text(
+                            "https://english.customs.gov.cn/Statistics/Statistics"
+                        )
+
+                request.assert_called_once()
+                self.assertFalse(request.call_args.kwargs["allow_redirects"])
+
+    def test_transport_rechecks_every_redirect_hop(self) -> None:
+        first = Mock(
+            status_code=302,
+            headers={"Location": "/Statistics/next"},
+        )
+        second = Mock(
+            status_code=302,
+            headers={"Location": "https://evil.example/release.html"},
+        )
+        with patch(
+            "app.fetchers.china_cycle_data.requests.get",
+            side_effect=[first, second],
+        ) as request:
+            with self.assertRaisesRegex(ValueError, "outside official HTTPS"):
+                _request_gacc_text(
+                    "https://english.customs.gov.cn/Statistics/Statistics"
+                )
+
+        self.assertEqual(request.call_count, 2)
+        for call in request.call_args_list:
+            self.assertFalse(call.kwargs["allow_redirects"])
+            self.assertIs(call.kwargs["verify"], True)
+
+    def test_transport_enforces_redirect_limit_and_tls_verification(self) -> None:
+        redirect = Mock(
+            status_code=302,
+            headers={"Location": "/Statistics/loop"},
+        )
+        with patch(
+            "app.fetchers.china_cycle_data.requests.get",
+            return_value=redirect,
+        ) as request:
+            with self.assertRaisesRegex(RuntimeError, "redirect limit"):
+                _request_gacc_text(
+                    "https://english.customs.gov.cn/Statistics/Statistics"
+                )
+
+        self.assertEqual(request.call_count, 6)
+        self.assertTrue(
+            all(call.kwargs.get("verify") is True for call in request.call_args_list)
+        )
+
     def test_real_november_page_extracts_monthly_export_yoy(self) -> None:
         title = "(1) China's Total Export & Import Values, November 2024 (in USD)"
 
