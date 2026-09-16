@@ -53,7 +53,7 @@ const REASON_LABELS: Record<string, string> = {
   "A2无可展示阶段": "当时无法形成可展示的阶段标签",
   "A2无confirmed phase": "当时尚无已确认阶段",
   "A2当月不可决策": "当月未达到正式判定条件",
-  "final同月缺失": "事后参考缺少同月结果",
+  "final同月缺失": "同端点重跑未形成同月结果",
   "公式版本不合格": "当时可见数据的公式版本不合格",
   no_known_available_at: "缺少可追溯发布时间",
   a1_coverage_insufficient: "当时指标覆盖不足，无法计算活动矩阵",
@@ -61,7 +61,8 @@ const REASON_LABELS: Record<string, string> = {
   a2_display_phase_unavailable: "当时无法形成可展示的阶段标签",
   a2_confirmed_phase_unavailable: "当时尚无已确认阶段",
   a2_decision_ineligible: "当月未达到正式判定条件",
-  final_same_month_unavailable: "事后参考缺少同月结果",
+  final_reference_hidden_noncomparable: "当时未形成可比较标签，事后参考按规则隐藏",
+  final_same_month_unavailable: "同端点重跑未形成同月结果",
   formula_version_ineligible: "当时可见数据的公式版本不合格",
 };
 
@@ -135,9 +136,15 @@ function phaseClass(phase: BusinessCyclePhase | null | undefined): string {
   return "border-border bg-muted/60 text-muted-foreground";
 }
 
-function SnapshotCell({ snapshot }: { snapshot: BusinessCycleBacktestRegimeSnapshot | null }) {
+function SnapshotCell({
+  snapshot,
+  emptyLabel = "无可用结果",
+}: {
+  snapshot: BusinessCycleBacktestRegimeSnapshot | null;
+  emptyLabel?: string;
+}) {
   if (!snapshot) {
-    return <span className="text-xs text-muted-foreground">无可用结果</span>;
+    return <span className="text-xs leading-5 text-muted-foreground">{emptyLabel}</span>;
   }
 
   const displayPhase = snapshot.confirmed_phase ?? snapshot.phase;
@@ -168,6 +175,12 @@ function SnapshotCell({ snapshot }: { snapshot: BusinessCycleBacktestRegimeSnaps
 }
 
 function comparisonLabel(month: BusinessCycleBacktestMonth): string {
+  if (month.final_reference_status === "hidden_no_realtime_label") {
+    return "不可比较 · 事后参考已隐藏";
+  }
+  if (month.final_reference_status === "same_endpoint_unavailable") {
+    return "不可比较 · 同端点参考不可用";
+  }
   const realtimeBasis = month.realtime?.phase_basis;
   const finalBasis = month.final?.phase_basis;
   const bothActive = realtimeBasis === "active_decision" && finalBasis === "active_decision";
@@ -238,6 +251,16 @@ export function ChinaCycleBacktestDetail({ data }: { data: BusinessCycleBacktest
   const enoughCarriedSample = stability.carried_forward_comparable_months >= stability.minimum_rate_sample;
   const enoughTransitions = data.transitions.matched_count >= data.transitions.minimum_lag_sample;
   const recentMonths = data.months.slice(-18).reverse();
+  const recentPeriods = new Set(recentMonths.map((month) => month.observation_period));
+  const hiddenAuditMonths = data.months
+    .filter((month) => (
+      month.final_reference_status === "hidden_no_realtime_label"
+      && !recentPeriods.has(month.observation_period)
+    ))
+    .slice(-3)
+    .reverse();
+  const hiddenAuditPeriods = new Set(hiddenAuditMonths.map((month) => month.observation_period));
+  const displayedMonths = [...recentMonths, ...hiddenAuditMonths];
   const reasons = Object.entries(coverage.reason_counts).sort((left, right) => right[1] - left[1]);
   const maxReasonCount = Math.max(1, ...reasons.map(([, count]) => count));
   const readiness = [...data.input_readiness]
@@ -361,8 +384,8 @@ export function ChinaCycleBacktestDetail({ data }: { data: BusinessCycleBacktest
         <div className="hidden items-center justify-center text-muted-foreground md:flex">
           <ArrowRight className="size-5" aria-hidden="true" />
         </div>
-        <DefinitionCard icon={<Database className="size-4" aria-hidden="true" />} eyebrow="事后参考" title="用今天完整快照重算同一个月">
-          两边比较的是同一观察月。事后参考也不是真实经济的标准答案，更不是官方周期认定。
+        <DefinitionCard icon={<Database className="size-4" aria-hidden="true" />} eyebrow="事后参考" title="用今天最新值按同一观察端点重算">
+          只有同端点精确重跑的结果才会展示；当时未形成标签且无需比较的月份明确隐藏。事后参考也不是真实经济的标准答案。
         </DefinitionCard>
       </section>
 
@@ -467,22 +490,27 @@ export function ChinaCycleBacktestDetail({ data }: { data: BusinessCycleBacktest
               <History className="size-5" aria-hidden="true" />
               <CardTitle>逐月对照</CardTitle>
             </div>
-            <Badge variant="outline">最近 {recentMonths.length} 期</Badge>
+            <Badge variant="outline">
+              最近 {recentMonths.length} 期{hiddenAuditMonths.length > 0 ? ` + ${hiddenAuditMonths.length} 个隐藏样例` : ""}
+            </Badge>
           </div>
-          <CardDescription>横向比较同一观察月的“当时判断”和“事后参考”，并明确区分本月主动判断与历史状态沿用。</CardDescription>
+          <CardDescription>横向比较同一观察月的“当时判断”和同端点“事后参考”；另附最近的主动隐藏月份，便于核验不再用完整终点路径填充不可比月份。</CardDescription>
         </CardHeader>
         <CardContent>
-          {recentMonths.length > 0 ? (
+          {displayedMonths.length > 0 ? (
             <div className="space-y-2">
               <div className="hidden grid-cols-[7rem_1fr_1.5rem_1fr_8rem] gap-3 px-3 text-[11px] font-medium text-muted-foreground sm:grid">
-                <span>观察月</span><span>当时判断</span><span /><span>事后参考</span><span>比较结果</span>
+                <span>观察月</span><span>当时判断</span><span /><span>事后参考（同端点）</span><span>比较结果</span>
               </div>
-              {recentMonths.map((month) => (
+              {displayedMonths.map((month) => (
                 <div key={`${month.observation_period}-${month.decision_as_of}`} className="rounded-xl border px-3 py-3">
                   <div className="grid gap-2 sm:grid-cols-[7rem_1fr_1.5rem_1fr_8rem] sm:items-center sm:gap-3">
                     <div>
                       <div className="text-xs font-medium tabular-nums">{month.observation_period}</div>
                       <div className="mt-0.5 text-[10px] text-muted-foreground">决策时点 {decisionTime(month.decision_as_of)}</div>
+                      {hiddenAuditPeriods.has(month.observation_period) && (
+                        <div className="mt-1 text-[10px] font-medium text-amber-700 dark:text-amber-300">历史隐藏样例</div>
+                      )}
                     </div>
                     <div className="grid min-w-0 grid-cols-[3rem_minmax(0,1fr)] items-start gap-2 sm:block">
                       <span className="text-[11px] text-muted-foreground sm:hidden">当时</span>
@@ -491,7 +519,12 @@ export function ChinaCycleBacktestDetail({ data }: { data: BusinessCycleBacktest
                     <ArrowRight className="hidden size-3.5 text-muted-foreground sm:block" aria-hidden="true" />
                     <div className="grid min-w-0 grid-cols-[3rem_minmax(0,1fr)] items-start gap-2 sm:block">
                       <span className="text-[11px] text-muted-foreground sm:hidden">事后</span>
-                      <SnapshotCell snapshot={month.final} />
+                      <SnapshotCell
+                        snapshot={month.final}
+                        emptyLabel={month.final_reference_status === "hidden_no_realtime_label"
+                          ? "未展示：当时未形成可比较标签"
+                          : "同端点参考不可用"}
+                      />
                     </div>
                     <div className={`text-xs font-medium ${comparisonClass(month)}`}>{comparisonLabel(month)}</div>
                   </div>
@@ -503,7 +536,7 @@ export function ChinaCycleBacktestDetail({ data }: { data: BusinessCycleBacktest
                 </div>
               ))}
               {data.months.length > recentMonths.length && (
-                <p className="pt-2 text-center text-xs text-muted-foreground">本页聚焦最近时期；统计仍使用完整回测区间。</p>
+                <p className="pt-2 text-center text-xs text-muted-foreground">本页聚焦最近时期，并附最多3个主动隐藏样例；统计仍使用完整回测区间。</p>
               )}
             </div>
           ) : (
@@ -591,7 +624,7 @@ export function ChinaCycleBacktestDetail({ data }: { data: BusinessCycleBacktest
           <div className="rounded-lg bg-muted/55 p-3"><div className="font-medium">观察与决策时间</div><p className="mt-1 leading-5 text-muted-foreground">观察月的判断时点固定为次月20日18:00（北京时间），且只允许使用观察月末以前的数据。</p></div>
           <div className="rounded-lg bg-muted/55 p-3"><div className="font-medium">严格可见性</div><p className="mt-1 leading-5 text-muted-foreground">只有发布时间明确且不晚于判断时点的版本才会进入；发布时间未知的数据不会用抓取时间替代。</p></div>
           <div className="rounded-lg bg-muted/55 p-3"><div className="font-medium">历史版本选择</div><p className="mt-1 leading-5 text-muted-foreground">同一观察期采用当时已经公开的最新安全版本；无法定位数值或公式修订时间时，整组隔离而不猜测。</p></div>
-          <div className="rounded-lg bg-muted/55 p-3"><div className="font-medium">事后参考</div><p className="mt-1 leading-5 text-muted-foreground">用今天数据库的最新值重算同一观察月，只衡量标签对数据修订的稳定性，不作为真实周期答案。</p></div>
+          <div className="rounded-lg bg-muted/55 p-3"><div className="font-medium">事后参考</div><p className="mt-1 leading-5 text-muted-foreground">用今天数据库的最新值按同一观察端点重算；未精确重跑的月份不展示标签，也不借用完整终点路径。</p></div>
         </CardContent>
       </Card>
 

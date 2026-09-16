@@ -46,7 +46,7 @@ from app.services.china_cycle_regime import (
 )
 
 
-METHODOLOGY_VERSION = "1.3.3"
+METHODOLOGY_VERSION = "1.3.4"
 DEFAULT_BACKTEST_MONTHS = 120
 MAX_BACKTEST_MONTHS = 120
 MIN_RATE_SAMPLE = 24
@@ -791,6 +791,7 @@ def _exclusion_reasons(
     final_month: dict | None,
     strict_rows: list[dict],
     *,
+    final_reference_status: str,
     formula_ineligible: bool,
 ) -> list[str]:
     reasons: list[str] = []
@@ -808,7 +809,9 @@ def _exclusion_reasons(
             reasons.append("a2_confirmed_phase_unavailable")
         if not realtime_month.get("decision_eligible"):
             reasons.append("a2_decision_ineligible")
-    if final_month is None:
+    if final_reference_status == "hidden_no_realtime_label":
+        reasons.append("final_reference_hidden_noncomparable")
+    elif final_month is None:
         reasons.append("final_same_month_unavailable")
     if formula_ineligible:
         reasons.append("formula_version_ineligible")
@@ -1230,22 +1233,6 @@ def _comparison_row(
     }
 
 
-def _regime_view_at_period(regime: dict, period: pd.Period) -> dict:
-    """Keep a full one-sided path while making last-decision metadata point-in-time."""
-
-    return {
-        **regime,
-        "last_decision_period": next(
-            (
-                row["period"]
-                for row in reversed(regime.get("months", []))
-                if row["period"] <= str(period) and row.get("decision_eligible")
-            ),
-            None,
-        ),
-    }
-
-
 def _build_robustness(
     baseline_rows: list[dict],
     fixed_survey_rows: list[dict],
@@ -1356,42 +1343,6 @@ def _build_backtest_from_rows(
     fixed_survey_months = []
     reason_counts: Counter[str] = Counter()
 
-    # A1 scores and A2 panels are one-sided, so future observation months do
-    # not rewrite earlier coordinates.  Build the final reference path once.
-    # If a strict snapshot actually produces a comparable phase, we still
-    # rerun its final peer with the exact same endpoint below, preserving the
-    # production 240-month warm-start semantics for reported accuracy.
-    full_final_regime: dict = {}
-    final_months_by_period: dict[str, dict] = {}
-    full_fixed_final_regime: dict = {}
-    fixed_final_months_by_period: dict[str, dict] = {}
-    if plain_finals and len(periods):
-        final_model_rows = [
-            row
-            for row in plain_finals
-            if row["indicator_code"] in MODEL_CODES
-            and row["date"] <= periods[-1].end_time.date()
-        ]
-        final_matrix_capture: dict = {}
-        full_final_regime, _ = _regime_for_rows(
-            final_model_rows,
-            periods[-1],
-            matrix_out=final_matrix_capture,
-        )
-        final_months_by_period = {
-            row["period"]: row for row in full_final_regime.get("months", [])
-        }
-        if final_matrix_capture.get("matrix"):
-            full_fixed_final_regime, _ = _fixed_survey_regime_from_matrix(
-                final_matrix_capture["matrix"],
-                final_model_rows,
-                periods[-1],
-            )
-            fixed_final_months_by_period = {
-                row["period"]: row
-                for row in full_fixed_final_regime.get("months", [])
-            }
-
     for period in periods:
         cutoff_utc, cutoff_display = _decision_as_of(period)
         observation_end = period.end_time.date()
@@ -1434,53 +1385,37 @@ def _build_backtest_from_rows(
             fixed_realtime_regime,
         )
 
-        final_regime = full_final_regime
-        final_month = final_months_by_period.get(str(period))
-        fixed_final_regime = full_fixed_final_regime
-        fixed_final_month = fixed_final_months_by_period.get(str(period))
+        final_regime: dict = {}
+        final_month: dict | None = None
+        fixed_final_regime: dict = {}
+        fixed_final_month: dict | None = None
         baseline_needs_exact_peer = bool(realtime and realtime["phase"])
         fixed_needs_exact_peer = bool(fixed_realtime and fixed_realtime["phase"])
-        if (
-            (baseline_needs_exact_peer or fixed_needs_exact_peer)
-            and target_final_rows
-        ):
+        exact_peer_required = baseline_needs_exact_peer or fixed_needs_exact_peer
+        if exact_peer_required and target_final_rows:
             # Exact peer evaluation: same observation endpoint, model window,
             # and state-machine warmup; only the vintage basis differs.
             target_final_matrix_capture: dict = {}
-            exact_final_regime, exact_final_month = _regime_for_rows(
+            final_regime, final_month = _regime_for_rows(
                 target_final_rows,
                 period,
                 matrix_out=target_final_matrix_capture,
             )
-            if baseline_needs_exact_peer:
-                final_regime, final_month = exact_final_regime, exact_final_month
-            elif final_month is not None:
-                final_regime = _regime_view_at_period(full_final_regime, period)
             if target_final_matrix_capture.get("matrix"):
-                exact_fixed_regime, exact_fixed_month = (
+                fixed_final_regime, fixed_final_month = (
                     _fixed_survey_regime_from_matrix(
                         target_final_matrix_capture["matrix"],
                         target_final_rows,
                         period,
                     )
                 )
-                if fixed_needs_exact_peer:
-                    fixed_final_regime, fixed_final_month = (
-                        exact_fixed_regime,
-                        exact_fixed_month,
-                    )
-                elif fixed_final_month is not None:
-                    fixed_final_regime = _regime_view_at_period(
-                        full_fixed_final_regime,
-                        period,
-                    )
-        elif final_month is not None:
-            final_regime = _regime_view_at_period(full_final_regime, period)
-            if fixed_final_month is not None:
-                fixed_final_regime = _regime_view_at_period(
-                    full_fixed_final_regime,
-                    period,
-                )
+        final_reference_status = (
+            "hidden_no_realtime_label"
+            if not exact_peer_required
+            else "same_endpoint_rerun"
+            if final_month is not None
+            else "same_endpoint_unavailable"
+        )
         final = _phase_snapshot(final_month, final_regime)
         fixed_final = _phase_snapshot(fixed_final_month, fixed_final_regime)
         fixed_survey_months.append(
@@ -1508,6 +1443,7 @@ def _build_backtest_from_rows(
             realtime_month,
             final_month,
             strict_rows,
+            final_reference_status=final_reference_status,
             formula_ineligible=formula_ineligible,
         )
         reason_counts.update(reasons)
@@ -1574,6 +1510,7 @@ def _build_backtest_from_rows(
                 },
                 "realtime": realtime,
                 "final": final,
+                "final_reference_status": final_reference_status,
                 "comparable": comparable,
                 "phase_agreement": phase_agreement,
                 "phase_changed": (not phase_agreement) if phase_agreement is not None else None,
@@ -1635,7 +1572,7 @@ def _build_backtest_from_rows(
                 "only chain-verified release evidence with a supported evidence kind and availability precision is authoritative per indicator/date and excludes generic vintages for that key; "
                 "latest safe release by available_at is selected; a value/formula revision without a strictly later timestamp quarantines the whole observation"
             ),
-            "final_reference": "latest stored values with the same observation_end and identical model code; ex-post reference, not ground truth",
+            "final_reference": "latest stored values are rerun with the exact same observation endpoint and identical model code whenever either baseline or fixed diagnostic has a realtime label; otherwise the ex-post label is hidden; never falls back to the full-endpoint state path; not ground truth",
             "final_cutoff_at": final_cutoff_at.astimezone(UTC).isoformat(),
             "a1_methodology_version": A1_METHODOLOGY_VERSION,
             "a2_methodology_version": A2_METHODOLOGY_VERSION,
@@ -1662,6 +1599,7 @@ def _build_backtest_from_rows(
         "months": months,
         "warnings": [
             "事后最终值只是同模型的稳定性参照，不是GDP真值、官方衰退认定或预测准确率。",
+            "逐月事后参考只展示同观察端点精确重跑结果；当时与固定诊断都未形成标签时明确隐藏，不借用完整终点路径。",
             "发布时间未知的观测严格排除；不会用系统首次抓取时间或经验发布日期回填。",
             "改值或公式变更若没有严格递增的公开时间，该观察期全部版本均不可还原；不会继续沿用可能已失效的旧值。",
             "中国来源的存量发布时间是无时区的本地钟面时间，本页按北京时间解释；跨来源的小时级时区尚未完成独立认证。",

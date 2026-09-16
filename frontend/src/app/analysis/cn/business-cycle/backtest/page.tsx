@@ -19,7 +19,7 @@ export default async function ChinaBusinessCycleBacktestPage() {
           <p className="mb-2 text-xs font-medium tracking-[0.18em] text-muted-foreground">模型检验</p>
           <h1 className="text-2xl font-semibold">中国经济周期伪实时回测</h1>
           <p className="mt-1 max-w-3xl text-sm leading-6 text-muted-foreground">
-            把时间拨回当时，只使用决策日之前已经发布的数据重算阶段，再与今天的完整快照比较
+            把时间拨回当时，只使用决策日之前已经发布的数据重算阶段，再与今天最新值按同一观察端点重算的结果比较
           </p>
         </div>
         <div className="text-left text-xs text-muted-foreground sm:text-right">

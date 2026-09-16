@@ -853,6 +853,13 @@ class CycleBacktestPhaseSnapshotOut(BaseModel):
     confidence: Literal["high", "medium", "low", "insufficient"]
 
 
+FinalReferenceStatus = Literal[
+    "same_endpoint_rerun",
+    "hidden_no_realtime_label",
+    "same_endpoint_unavailable",
+]
+
+
 class CycleBacktestMonthOut(BaseModel):
     observation_period: str
     decision_as_of: datetime
@@ -861,6 +868,7 @@ class CycleBacktestMonthOut(BaseModel):
     availability: CycleBacktestAvailabilityOut
     realtime: CycleBacktestPhaseSnapshotOut | None = None
     final: CycleBacktestPhaseSnapshotOut | None = None
+    final_reference_status: FinalReferenceStatus
     comparable: bool
     phase_agreement: bool | None = None
     phase_changed: bool | None = None

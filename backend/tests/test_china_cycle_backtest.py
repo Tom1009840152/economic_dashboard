@@ -473,7 +473,7 @@ class ChinaCycleBacktestTests(unittest.TestCase):
         with patch(
             "app.services.china_cycle_backtest._regime_for_rows",
             return_value=({"last_decision_period": "2025-01"}, final_month),
-        ):
+        ) as build_regime:
             payload = _build_backtest_from_rows(
                 [unknown],
                 [final],
@@ -490,6 +490,273 @@ class ChinaCycleBacktestTests(unittest.TestCase):
         self.assertIsNone(validated.transitions.lag_median_months)
         self.assertEqual(validated.months[0].status, "unavailable")
         self.assertIn("no_known_available_at", validated.months[0].exclusion_reasons)
+        self.assertEqual(
+            validated.months[0].final_reference_status,
+            "hidden_no_realtime_label",
+        )
+        self.assertIsNone(validated.months[0].final)
+        self.assertIn(
+            "final_reference_hidden_noncomparable",
+            validated.months[0].exclusion_reasons,
+        )
+        self.assertNotIn(
+            "final_same_month_unavailable",
+            validated.months[0].exclusion_reasons,
+        )
+        self.assertIsNone(validated.months[0].coincident_revision_delta)
+        self.assertIsNone(validated.months[0].leading_revision_delta)
+        self.assertEqual(validated.latest, validated.months[0])
+        build_regime.assert_not_called()
+
+    def test_final_reference_is_rerun_at_the_same_observation_endpoint(self) -> None:
+        vintage = self.vintage(
+            row_id=1,
+            observation_date=date(2025, 1, 31),
+            value=49,
+            available_at=datetime(2025, 2, 1, 9),
+        )
+        final = {**vintage, "value": 50}
+
+        def month(phase: str) -> dict:
+            return {
+                "period": "2025-01",
+                "phase": phase,
+                "phase_label": "收缩" if phase == "contraction" else "复苏",
+                "phase_status": "confirmed",
+                "phase_basis": "active_decision",
+                "confirmed_phase": phase,
+                "confirmed_since": "2025-01",
+                "last_decision_period": "2025-01",
+                "carry_forward_months": 0,
+                "decision_eligible": True,
+                "level_axis": "below",
+                "momentum_axis": "rising",
+                "level_3m": 98,
+                "momentum_3m": 2,
+                "coincident_index": 98,
+                "leading_index": 99,
+                "confidence": "medium",
+            }
+
+        with (
+            patch(
+                "app.services.china_cycle_backtest._has_minimum_coincident_inputs",
+                return_value=True,
+            ),
+            patch(
+                "app.services.china_cycle_backtest._regime_for_rows",
+                side_effect=[
+                    ({"last_decision_period": "2025-01"}, month("contraction")),
+                    ({"last_decision_period": "2025-01"}, month("recovery")),
+                ],
+            ) as build_regime,
+        ):
+            payload = _build_backtest_from_rows(
+                [vintage],
+                [final],
+                periods=pd.period_range("2025-01", periods=1, freq="M"),
+                final_cutoff_at=datetime(2026, 1, 1, tzinfo=UTC),
+            )
+
+        validated = ChinaCycleBacktestOut.model_validate(payload)
+        result = validated.months[0]
+        self.assertEqual(build_regime.call_count, 2)
+        self.assertTrue(
+            all(
+                call.args[1] == pd.Period("2025-01", freq="M")
+                for call in build_regime.call_args_list
+            )
+        )
+        self.assertEqual(result.final_reference_status, "same_endpoint_rerun")
+        self.assertEqual(result.realtime.phase, "contraction")
+        self.assertEqual(result.final.phase, "recovery")
+        self.assertTrue(result.comparable)
+        self.assertEqual(result.comparison_type, "phase_changed")
+
+    def test_unclassified_realtime_hides_final_reference_without_losing_month(self) -> None:
+        vintage = self.vintage(
+            row_id=1,
+            observation_date=date(2025, 1, 31),
+            value=49,
+            available_at=datetime(2025, 2, 1, 9),
+        )
+        final = {**vintage, "value": 50}
+        realtime_month = {
+            "period": "2025-01",
+            "phase": None,
+            "phase_label": "待判定",
+            "phase_status": "candidate",
+            "phase_basis": "pending_confirmation",
+            "confirmed_phase": None,
+            "confirmed_since": None,
+            "last_decision_period": "2025-01",
+            "carry_forward_months": 0,
+            "decision_eligible": True,
+            "level_axis": "below",
+            "momentum_axis": "rising",
+            "level_3m": 98,
+            "momentum_3m": 2,
+            "coincident_index": 98,
+            "leading_index": 99,
+            "confidence": "low",
+        }
+
+        with (
+            patch(
+                "app.services.china_cycle_backtest._has_minimum_coincident_inputs",
+                return_value=True,
+            ),
+            patch(
+                "app.services.china_cycle_backtest._regime_for_rows",
+                return_value=({"last_decision_period": "2025-01"}, realtime_month),
+            ) as build_regime,
+        ):
+            payload = _build_backtest_from_rows(
+                [vintage],
+                [final],
+                periods=pd.period_range("2025-01", periods=1, freq="M"),
+                final_cutoff_at=datetime(2026, 1, 1, tzinfo=UTC),
+            )
+
+        validated = ChinaCycleBacktestOut.model_validate(payload)
+        result = validated.months[0]
+        self.assertEqual(build_regime.call_count, 1)
+        self.assertEqual(result.status, "limited")
+        self.assertEqual(result.final_reference_status, "hidden_no_realtime_label")
+        self.assertIsNone(result.final)
+        self.assertFalse(result.comparable)
+        self.assertIsNone(result.coincident_revision_delta)
+        self.assertIsNone(result.leading_revision_delta)
+        self.assertIn(
+            "final_reference_hidden_noncomparable",
+            result.exclusion_reasons,
+        )
+
+    def test_exact_peer_without_same_month_result_is_reported_unavailable(self) -> None:
+        vintage = self.vintage(
+            row_id=1,
+            observation_date=date(2025, 1, 31),
+            value=49,
+            available_at=datetime(2025, 2, 1, 9),
+        )
+        active_month = {
+            "period": "2025-01",
+            "phase": "contraction",
+            "phase_label": "收缩",
+            "phase_status": "confirmed",
+            "phase_basis": "active_decision",
+            "confirmed_phase": "contraction",
+            "confirmed_since": "2025-01",
+            "decision_eligible": True,
+        }
+
+        with (
+            patch(
+                "app.services.china_cycle_backtest._has_minimum_coincident_inputs",
+                return_value=True,
+            ),
+            patch(
+                "app.services.china_cycle_backtest._regime_for_rows",
+                side_effect=[({"months": []}, active_month), ({"months": []}, None)],
+            ) as build_regime,
+        ):
+            payload = _build_backtest_from_rows(
+                [vintage],
+                [{**vintage, "value": 50}],
+                periods=pd.period_range("2025-01", periods=1, freq="M"),
+                final_cutoff_at=datetime(2026, 1, 1, tzinfo=UTC),
+            )
+
+        result = ChinaCycleBacktestOut.model_validate(payload).months[0]
+        self.assertEqual(build_regime.call_count, 2)
+        self.assertEqual(result.final_reference_status, "same_endpoint_unavailable")
+        self.assertIsNone(result.final)
+        self.assertIn("final_same_month_unavailable", result.exclusion_reasons)
+        self.assertNotIn(
+            "final_reference_hidden_noncomparable",
+            result.exclusion_reasons,
+        )
+
+    def test_fixed_only_label_still_triggers_exact_endpoint_rerun(self) -> None:
+        vintage = self.vintage(
+            row_id=1,
+            observation_date=date(2025, 1, 31),
+            value=49,
+            available_at=datetime(2025, 2, 1, 9),
+        )
+
+        def active_month(phase: str) -> dict:
+            return {
+                "period": "2025-01",
+                "phase": phase,
+                "phase_label": "收缩" if phase == "contraction" else "复苏",
+                "phase_status": "confirmed",
+                "phase_basis": "active_decision",
+                "confirmed_phase": phase,
+                "confirmed_since": "2025-01",
+                "decision_eligible": True,
+            }
+
+        baseline_unclassified = {
+            "period": "2025-01",
+            "phase": None,
+            "phase_label": "待判定",
+            "phase_status": "candidate",
+            "phase_basis": "pending_confirmation",
+            "confirmed_phase": None,
+            "confirmed_since": None,
+            "decision_eligible": True,
+        }
+        baseline_final = active_month("recovery")
+        regime_calls = 0
+
+        def build_regime(rows, period, *, matrix_out=None):
+            nonlocal regime_calls
+            regime_calls += 1
+            if matrix_out is not None:
+                matrix_out["matrix"] = {"months": []}
+            return (
+                ({"months": [baseline_unclassified]}, baseline_unclassified)
+                if regime_calls == 1
+                else ({"months": [baseline_final]}, baseline_final)
+            )
+
+        with (
+            patch(
+                "app.services.china_cycle_backtest._has_minimum_coincident_inputs",
+                return_value=True,
+            ),
+            patch(
+                "app.services.china_cycle_backtest._regime_for_rows",
+                side_effect=build_regime,
+            ),
+            patch(
+                "app.services.china_cycle_backtest._fixed_survey_regime_from_matrix",
+                side_effect=[
+                    ({"months": [active_month("contraction")]}, active_month("contraction")),
+                    ({"months": [active_month("recovery")]}, active_month("recovery")),
+                ],
+            ) as build_fixed,
+        ):
+            payload = _build_backtest_from_rows(
+                [vintage],
+                [{**vintage, "value": 50}],
+                periods=pd.period_range("2025-01", periods=1, freq="M"),
+                final_cutoff_at=datetime(2026, 1, 1, tzinfo=UTC),
+            )
+
+        validated = ChinaCycleBacktestOut.model_validate(payload)
+        result = validated.months[0]
+        self.assertEqual(regime_calls, 2)
+        self.assertEqual(build_fixed.call_count, 2)
+        self.assertEqual(result.final_reference_status, "same_endpoint_rerun")
+        self.assertIsNone(result.realtime.phase)
+        self.assertEqual(result.final.phase, "recovery")
+        self.assertFalse(result.comparable)
+        self.assertEqual(
+            validated.robustness.fixed_survey_core.stability.comparable_months,
+            1,
+        )
 
     def test_phase_snapshot_preserves_carry_forward_explanation(self) -> None:
         snapshot = _phase_snapshot(

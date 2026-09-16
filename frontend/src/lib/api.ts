@@ -615,6 +615,10 @@ export function getChinaBusinessCycleRegime(months = 120): Promise<BusinessCycle
 
 export type BusinessCycleBacktestStatus = "ok" | "limited" | "unavailable";
 export type BusinessCycleBacktestMonthStatus = "evaluable" | "limited" | "unavailable";
+export type BusinessCycleFinalReferenceStatus =
+  | "same_endpoint_rerun"
+  | "hidden_no_realtime_label"
+  | "same_endpoint_unavailable";
 export type BusinessCycleBacktestComparison =
   | "same"
   | "phase_changed"
@@ -764,6 +768,7 @@ export interface BusinessCycleBacktestMonth {
   availability: BusinessCycleBacktestAvailability;
   realtime: BusinessCycleBacktestRegimeSnapshot | null;
   final: BusinessCycleBacktestRegimeSnapshot | null;
+  final_reference_status: BusinessCycleFinalReferenceStatus;
   comparable: boolean;
   phase_agreement: boolean | null;
   phase_changed: boolean | null;
