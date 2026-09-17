@@ -230,9 +230,14 @@ def fetch_china_monetary_transmission(db: Session) -> dict[str, Any]:
         "status": status,
         "tone": tone,
         "summary": summary,
-        "as_of": min(
-            pd.Timestamp(fdr_last_day).date(), PBOC_7D_REVERSE_REPO.verified_through
-        ).isoformat(),
+        # Compatibility alias: this field historically collapsed unrelated
+        # watermarks. New clients should use the explicit freshness object.
+        "as_of": fdr_last_day,
+        "freshness": {
+            "market_observation_date": fdr_last_day,
+            "policy_rate_verified_through": PBOC_7D_REVERSE_REPO.verified_through.isoformat(),
+            "credit_observation_period": str(credit_impulse.index[-1]),
+        },
         "signals": [
             {
                 "key": "real_policy_rate",
@@ -274,7 +279,10 @@ def fetch_china_monetary_transmission(db: Session) -> dict[str, Any]:
                 "unit": "%",
                 "points": _points(policy_rate_for_periods(real_periods), 2),
                 "maintenance": PBOC_7D_REVERSE_REPO.maintenance,
+                "current_value": PBOC_7D_REVERSE_REPO.changes[-1].rate,
+                "effective_date": PBOC_7D_REVERSE_REPO.changes[-1].effective_date.isoformat(),
                 "verified_through": PBOC_7D_REVERSE_REPO.verified_through.isoformat(),
+                "catalog_updated_at": PBOC_7D_REVERSE_REPO.catalog_updated_at.isoformat(),
                 "source": PBOC_7D_REVERSE_REPO.source_name,
                 "source_url": PBOC_7D_REVERSE_REPO.source_url,
             },

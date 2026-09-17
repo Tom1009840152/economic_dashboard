@@ -1,7 +1,7 @@
 from datetime import date, datetime
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class IndicatorSummary(BaseModel):
@@ -224,6 +224,341 @@ class InternationalEmploymentDashboardOut(BaseModel):
     warnings: list[str]
 
 
+USMacroTone = Literal["positive", "neutral", "caution", "negative", "unavailable"]
+USMacroTrend = Literal["up", "down", "flat", "unavailable"]
+USMacroConfidence = Literal["high", "medium", "low", "unavailable"]
+
+
+class USMacroMetricOut(BaseModel):
+    key: str
+    label: str
+    value: float | None = None
+    unit: str
+    period: str | None = None
+    frequency: Literal["daily", "monthly", "quarterly", "event", "mixed"]
+    freshness: Literal["current", "stale", "missing"]
+    trend: USMacroTrend
+    reference_value: float | None = None
+    reference_period: str | None = None
+    interpretation: str
+    formula: str
+    source_codes: list[str]
+
+
+class USMacroPillarOut(BaseModel):
+    key: Literal[
+        "growth",
+        "labour",
+        "inflation",
+        "financial_conditions",
+        "monetary_policy",
+    ]
+    title: str
+    state_key: str
+    state_label: str
+    tone: USMacroTone
+    summary: str
+    confidence: USMacroConfidence
+    metrics: list[USMacroMetricOut]
+
+
+class USRecessionBreadthOut(BaseModel):
+    state_key: Literal["limited", "elevated", "broad", "unavailable"]
+    state_label: str
+    tone: USMacroTone
+    active_signals: int
+    total_signals: int
+    triggers: list[str]
+    offsets: list[str]
+    summary: str
+    methodology: str
+
+
+class USTransmissionStepOut(BaseModel):
+    key: str
+    title: str
+    state_label: str
+    tone: USMacroTone
+    detail: str
+    periods: list[str]
+
+
+class USMacroFreshnessOut(BaseModel):
+    market_observation_date: str | None = None
+    monthly_observation_period: str | None = None
+    quarterly_observation_period: str | None = None
+    employment_observation_period: str | None = None
+
+
+class USMacroOverviewOut(BaseModel):
+    region: Literal["US"]
+    country: str
+    title: str
+    status: Literal["ok", "partial", "unavailable"]
+    confidence: USMacroConfidence
+    coverage: float
+    realtime_ready: Literal[False]
+    tone: USMacroTone
+    headline: str
+    as_of: str | None = None
+    freshness: USMacroFreshnessOut
+    methodology_version: str
+    methodology_note: str
+    pillars: list[USMacroPillarOut]
+    recession_breadth: USRecessionBreadthOut
+    transmission: list[USTransmissionStepOut]
+    watch_items: list[str]
+    data_source_path: Literal["/data-sources/us"]
+    warnings: list[str]
+
+
+EUMacroTone = USMacroTone
+EUMacroConfidence = USMacroConfidence
+
+
+class EUMacroMetricOut(USMacroMetricOut):
+    """One auditable euro-area observation with its own period and rule."""
+
+
+class EUMacroPillarOut(BaseModel):
+    key: Literal[
+        "growth",
+        "labour",
+        "inflation",
+        "financial_conditions",
+        "monetary_policy",
+    ]
+    title: str
+    state_key: str
+    state_label: str
+    tone: EUMacroTone
+    summary: str
+    confidence: EUMacroConfidence
+    metrics: list[EUMacroMetricOut]
+
+
+class EUDownturnBreadthOut(BaseModel):
+    state_key: Literal["limited", "elevated", "broad", "unavailable"]
+    state_label: str
+    tone: EUMacroTone
+    active_signals: int
+    total_signals: int
+    triggers: list[str]
+    offsets: list[str]
+    summary: str
+    methodology: str
+
+
+class EUTransmissionStepOut(BaseModel):
+    key: str
+    title: str
+    state_label: str
+    tone: EUMacroTone
+    detail: str
+    periods: list[str]
+
+
+class EUMacroFreshnessOut(BaseModel):
+    market_observation_date: str | None = None
+    monthly_observation_period: str | None = None
+    quarterly_observation_period: str | None = None
+    employment_observation_period: str | None = None
+
+
+class EUMacroOverviewOut(BaseModel):
+    region: Literal["EU"]
+    country: str
+    title: str
+    status: Literal["ok", "partial", "unavailable"]
+    confidence: EUMacroConfidence
+    coverage: float
+    realtime_ready: Literal[False]
+    tone: EUMacroTone
+    headline: str
+    as_of: str | None = None
+    freshness: EUMacroFreshnessOut
+    methodology_version: str
+    methodology_note: str
+    pillars: list[EUMacroPillarOut]
+    downturn_breadth: EUDownturnBreadthOut
+    transmission: list[EUTransmissionStepOut]
+    watch_items: list[str]
+    data_source_path: Literal["/data-sources/eu"]
+    warnings: list[str]
+
+
+UKMacroTone = USMacroTone
+UKMacroConfidence = USMacroConfidence
+
+
+class UKMacroMetricOut(USMacroMetricOut):
+    """One auditable UK observation with its own period and rule."""
+
+
+class UKMacroPillarOut(BaseModel):
+    key: Literal[
+        "growth",
+        "labour",
+        "inflation",
+        "financial_conditions",
+        "monetary_policy",
+    ]
+    title: str
+    state_key: str
+    state_label: str
+    tone: UKMacroTone
+    summary: str
+    confidence: UKMacroConfidence
+    metrics: list[UKMacroMetricOut]
+
+
+class UKDownturnBreadthOut(BaseModel):
+    state_key: Literal["limited", "elevated", "broad", "unavailable"]
+    state_label: str
+    tone: UKMacroTone
+    active_signals: int
+    total_signals: int
+    triggers: list[str]
+    offsets: list[str]
+    summary: str
+    methodology: str
+
+
+class UKTransmissionStepOut(BaseModel):
+    key: str
+    title: str
+    state_label: str
+    tone: UKMacroTone
+    detail: str
+    periods: list[str]
+
+
+class UKMacroFreshnessOut(BaseModel):
+    market_observation_date: str | None = None
+    monthly_observation_period: str | None = None
+    quarterly_observation_period: str | None = None
+    employment_observation_period: str | None = None
+
+
+class UKMacroOverviewOut(BaseModel):
+    region: Literal["GB"]
+    country: str
+    title: str
+    status: Literal["ok", "partial", "unavailable"]
+    confidence: UKMacroConfidence
+    coverage: float
+    realtime_ready: Literal[False]
+    tone: UKMacroTone
+    headline: str
+    as_of: str | None = None
+    freshness: UKMacroFreshnessOut
+    methodology_version: str
+    methodology_note: str
+    pillars: list[UKMacroPillarOut]
+    downturn_breadth: UKDownturnBreadthOut
+    transmission: list[UKTransmissionStepOut]
+    watch_items: list[str]
+    data_source_path: Literal["/data-sources/uk"]
+    warnings: list[str]
+
+
+EastAsiaMacroTone = USMacroTone
+EastAsiaMacroConfidence = USMacroConfidence
+
+
+class EastAsiaMacroMetricOut(USMacroMetricOut):
+    """One auditable Japan or Korea observation with its own period."""
+
+
+class EastAsiaMacroPillarOut(BaseModel):
+    key: Literal[
+        "growth",
+        "labour",
+        "inflation",
+        "financial_conditions",
+        "monetary_policy",
+    ]
+    title: str
+    state_key: str
+    state_label: str
+    tone: EastAsiaMacroTone
+    summary: str
+    confidence: EastAsiaMacroConfidence
+    metrics: list[EastAsiaMacroMetricOut]
+
+
+class EastAsiaDownturnBreadthOut(BaseModel):
+    state_key: Literal["limited", "elevated", "broad", "unavailable"]
+    state_label: str
+    tone: EastAsiaMacroTone
+    active_signals: int
+    total_signals: int
+    triggers: list[str]
+    offsets: list[str]
+    summary: str
+    methodology: str
+
+
+class EastAsiaTransmissionStepOut(BaseModel):
+    key: str
+    title: str
+    state_label: str
+    tone: EastAsiaMacroTone
+    detail: str
+    periods: list[str]
+
+
+class EastAsiaMacroFreshnessOut(BaseModel):
+    market_observation_date: str | None = None
+    monthly_observation_period: str | None = None
+    quarterly_observation_period: str | None = None
+    employment_observation_period: str | None = None
+
+
+class JPMacroOverviewOut(BaseModel):
+    region: Literal["JP"]
+    country: str
+    title: str
+    status: Literal["ok", "partial", "unavailable"]
+    confidence: EastAsiaMacroConfidence
+    coverage: float
+    realtime_ready: Literal[False]
+    tone: EastAsiaMacroTone
+    headline: str
+    as_of: str | None = None
+    freshness: EastAsiaMacroFreshnessOut
+    methodology_version: str
+    methodology_note: str
+    pillars: list[EastAsiaMacroPillarOut]
+    downturn_breadth: EastAsiaDownturnBreadthOut
+    transmission: list[EastAsiaTransmissionStepOut]
+    watch_items: list[str]
+    data_source_path: Literal["/data-sources/jp"]
+    warnings: list[str]
+
+
+class KRMacroOverviewOut(BaseModel):
+    region: Literal["KR"]
+    country: str
+    title: str
+    status: Literal["ok", "partial", "unavailable"]
+    confidence: EastAsiaMacroConfidence
+    coverage: float
+    realtime_ready: Literal[False]
+    tone: EastAsiaMacroTone
+    headline: str
+    as_of: str | None = None
+    freshness: EastAsiaMacroFreshnessOut
+    methodology_version: str
+    methodology_note: str
+    pillars: list[EastAsiaMacroPillarOut]
+    downturn_breadth: EastAsiaDownturnBreadthOut
+    transmission: list[EastAsiaTransmissionStepOut]
+    watch_items: list[str]
+    data_source_path: Literal["/data-sources/kr"]
+    warnings: list[str]
+
+
 class AnalysisPointOut(BaseModel):
     period: str
     value: float
@@ -235,7 +570,10 @@ class AnalysisSeriesOut(BaseModel):
     unit: str
     points: list[AnalysisPointOut]
     maintenance: str | None = None
+    current_value: float | None = None
+    effective_date: str | None = None
     verified_through: str | None = None
+    catalog_updated_at: str | None = None
     source: str | None = None
     source_url: str | None = None
 
@@ -253,6 +591,12 @@ class MonetaryTransmissionSignalOut(BaseModel):
     data_origin: str | None = None
 
 
+class MonetaryTransmissionFreshnessOut(BaseModel):
+    market_observation_date: str
+    policy_rate_verified_through: str
+    credit_observation_period: str
+
+
 class MonetaryTransmissionDashboardOut(BaseModel):
     region: str
     country: str
@@ -260,7 +604,11 @@ class MonetaryTransmissionDashboardOut(BaseModel):
     status: str
     tone: str
     summary: str
-    as_of: str
+    as_of: str = Field(
+        description="Deprecated compatibility alias for freshness.market_observation_date",
+        deprecated=True,
+    )
+    freshness: MonetaryTransmissionFreshnessOut
     signals: list[MonetaryTransmissionSignalOut]
     series: list[AnalysisSeriesOut]
     sources: list[EmploymentSourceOut]
@@ -463,6 +811,7 @@ class RegimeMethodologyOut(BaseModel):
     momentum_buffer: float
     confirmation_months_with_leading: int
     confirmation_months_without_leading: int
+    current_phase_max_carry_months: int
     phase_order: list[RelativeCyclePhase]
     role_comparability: str
     balanced_panel_months: int
@@ -590,6 +939,7 @@ class RegimeInflationOut(BaseModel):
 class RegimeMonthOut(BaseModel):
     period: str
     phase: RelativeCyclePhase | None = None
+    current_phase: RelativeCyclePhase | None = None
     phase_label: str
     raw_phase: RelativeCyclePhase | None = None
     phase_status: RegimeStatus

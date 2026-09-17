@@ -273,6 +273,24 @@ class RefreshQualityTests(unittest.TestCase):
         self.assertGreaterEqual(failed.last_success_at, previous_success)
         self.assertIn("upstream unavailable", failed.error)
 
+    def test_refresh_ledger_keeps_source_verification_separate_from_fetch_time(self) -> None:
+        frame = self.frame(values=(49.0, 50.0))
+        frame.attrs["verified_through"] = dt.date.today()
+
+        refresh_all_indicators(
+            self.db,
+            trigger="test",
+            fetchers={"CN_PMI": lambda: frame},
+        )
+
+        result = self.db.scalar(select(RefreshResult))
+        self.assertEqual(result.source_verified_through, dt.date.today())
+        self.assertIsNotNone(result.last_success_at)
+        self.assertNotEqual(
+            result.last_success_at.date(),
+            dt.date(2020, 2, 1),
+        )
+
     def test_indicator_write_and_ledger_are_atomic(self) -> None:
         with (
             patch(

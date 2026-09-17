@@ -36,7 +36,11 @@ export function MonetaryTransmissionSummaryCard({
   const credit = signalByKey(data, "credit_impulse");
 
   return (
-    <Link href="/analysis/cn/monetary-transmission" className="block">
+    <Link
+      href="/analysis/cn/monetary-transmission"
+      className="block rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+      aria-label="查看中国货币政策与信用传导详情"
+    >
       <Card className="group overflow-hidden border-foreground/15 bg-gradient-to-br from-background via-background to-muted/55 transition-all hover:border-foreground/30 hover:shadow-md">
         <CardHeader className="gap-4 pb-3 sm:flex-row sm:items-start sm:justify-between">
           <div>
@@ -73,12 +77,17 @@ export function MonetaryTransmissionSummaryCard({
                   <span className="text-muted-foreground">{signal?.name ?? "--"}</span>
                   <span className="font-medium">{signal?.state ?? "--"}</span>
                 </div>
+                <div className="mt-2 text-[11px] text-muted-foreground">
+                  观察期 {signal?.period ?? "--"}
+                </div>
               </div>
             ))}
           </div>
 
-          <div className="mt-4 flex items-center justify-between gap-4 border-t pt-4 text-xs text-muted-foreground">
-            <span>数据截至 {data.as_of}，各信号保留自己的发布日期</span>
+          <div className="mt-4 flex flex-col gap-2 border-t pt-4 text-xs text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
+            <span>
+              市场观察 {data.freshness?.market_observation_date ?? data.as_of} · 政策核验 {data.freshness?.policy_rate_verified_through ?? "--"} · 信用观察 {data.freshness?.credit_observation_period ?? credit?.period ?? "--"}
+            </span>
             <span className="inline-flex items-center gap-1 font-medium text-foreground">
               展开分析与等式
               <ArrowRight className="size-3.5 transition-transform group-hover:translate-x-0.5" />

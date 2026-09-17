@@ -37,6 +37,15 @@ export function phasePlainLabel(phase: BusinessCyclePhase | null): string {
   return phase ? PHASE_PLAIN_LABELS[phase] : "强弱和方向暂时无法判断";
 }
 
+export function currentPhaseForDisplay(point: BusinessCycleRegimePoint): BusinessCyclePhase | null {
+  if (point.current_phase !== undefined) return point.current_phase;
+  if (point.phase_status === "stale") return null;
+  if (point.phase_basis === "active_decision" || point.phase_status === "held_uncomparable") {
+    return point.confirmed_phase;
+  }
+  return null;
+}
+
 export interface BusinessCycleHeadline {
   title: string;
   secondary: string;
@@ -47,14 +56,18 @@ export function regimeHeadline(
   point: BusinessCycleRegimePoint,
   fallbackLastDecisionPeriod: string | null = null,
 ): BusinessCycleHeadline {
-  const confirmedPhase = point.confirmed_phase ?? point.phase;
+  const currentPhase = currentPhaseForDisplay(point);
+  const confirmedPhase = currentPhase ?? point.confirmed_phase ?? point.phase;
   const confirmedLabel = confirmedPhase ? PHASE_NAMES[confirmedPhase] : null;
   const lastDecisionPeriod = point.last_decision_period ?? fallbackLastDecisionPeriod;
 
   if (point.phase_basis === "carried_forward") {
+    const expired = currentPhase === null;
     return {
       title: "本月暂不可判",
-      secondary: confirmedLabel ? `上次确认：${confirmedLabel}` : "尚无已确认阶段",
+      secondary: confirmedLabel
+        ? `${expired ? "最近确认" : "暂时沿用"}：${confirmedLabel}${expired ? "（仅作历史参考）" : ""}`
+        : "尚无已确认阶段",
       timing: [
         point.confirmed_since ? `确认于 ${point.confirmed_since}` : null,
         lastDecisionPeriod ? `最近可判 ${lastDecisionPeriod}` : "暂无可判定月",
@@ -113,14 +126,19 @@ export function regimeHeadline(
 }
 
 export function phasePlainHeadline(point: BusinessCycleRegimePoint): string {
+  const currentPhase = currentPhaseForDisplay(point);
+  if (point.phase_basis === "pending_confirmation") {
+    return `当前候选方向：${phasePlainLabel(point.candidate_phase ?? point.phase)}`;
+  }
+  if (currentPhase === null) {
+    return "当前状态：强弱和方向暂时无法判断";
+  }
   const prefix = point.phase_basis === "carried_forward"
-    ? "上次确认阶段的含义："
-    : point.phase_basis === "pending_confirmation"
-      ? "当前候选方向："
-      : point.phase_status === "transition"
-        ? "当前有效阶段："
-        : "";
-  return `${prefix}${phasePlainLabel(point.phase)}`;
+    ? "暂时沿用阶段的含义："
+    : point.phase_status === "transition"
+      ? "当前有效阶段："
+      : "";
+  return `${prefix}${phasePlainLabel(currentPhase)}`;
 }
 
 export function phaseAxisSummary(point: BusinessCycleRegimePoint): string {

@@ -75,16 +75,66 @@ def _fred_abs(series_id: str) -> pd.DataFrame:
     return _cached_fred_raw(series_id)[["date", "value"]].reset_index(drop=True)
 
 
+def _calendar_month_change(
+    frame: pd.DataFrame,
+    *,
+    months: int,
+    percent: bool,
+) -> pd.DataFrame:
+    """Calculate a change only when the exact reference month is present.
+
+    Row-position changes silently compare the wrong months when an upstream
+    monthly series has a gap.  Matching on calendar periods makes a missing
+    prior month/year remain missing instead of turning an older observation
+    into a false comparison base.
+    """
+    if months < 1:
+        raise ValueError("months must be a positive integer")
+
+    current = frame[["date", "value"]].copy()
+    current["_month"] = pd.to_datetime(current["date"], errors="coerce").dt.to_period("M")
+    current = current.dropna(subset=["_month", "value"])
+
+    reference = current[["_month", "value"]].rename(
+        columns={"value": "_reference_value"}
+    )
+    reference["_month"] = reference["_month"] + months
+
+    compared = current.merge(
+        reference,
+        on="_month",
+        how="left",
+        sort=False,
+        validate="one_to_one",
+    )
+    if percent:
+        compared["value"] = (
+            compared["value"] / compared["_reference_value"] - 1
+        ) * 100
+    else:
+        compared["value"] = compared["value"] - compared["_reference_value"]
+
+    return (
+        compared.dropna(subset=["value"])[["date", "value"]]
+        .sort_values("date")
+        .reset_index(drop=True)
+    )
+
+
 def _fred_yoy(series_id: str) -> pd.DataFrame:
-    df = _cached_fred_raw(series_id).copy()
-    df["value"] = df["value"].pct_change(12) * 100  # 月度数据，12期前=去年同月
-    return df.dropna(subset=["value"])[["date", "value"]].reset_index(drop=True)
+    return _calendar_month_change(
+        _cached_fred_raw(series_id),
+        months=12,
+        percent=True,
+    )
 
 
 def _fred_mom(series_id: str) -> pd.DataFrame:
-    df = _cached_fred_raw(series_id).copy()
-    df["value"] = df["value"].pct_change(1) * 100
-    return df.dropna(subset=["value"])[["date", "value"]].reset_index(drop=True)
+    return _calendar_month_change(
+        _cached_fred_raw(series_id),
+        months=1,
+        percent=True,
+    )
 
 
 def _fred_monthly_last(series_id: str) -> pd.DataFrame:
@@ -98,9 +148,13 @@ def _fred_monthly_last(series_id: str) -> pd.DataFrame:
 
 def _fetch_us_nfp_change() -> pd.DataFrame:
     """美国非农就业月增量；PAYEMS 原始单位为千人，这里换算为万人。"""
-    df = _cached_fred_raw("PAYEMS").copy()
-    df["value"] = df["value"].diff() / 10
-    return df.dropna(subset=["value"])[["date", "value"]].reset_index(drop=True)
+    df = _calendar_month_change(
+        _cached_fred_raw("PAYEMS"),
+        months=1,
+        percent=False,
+    )
+    df["value"] = df["value"] / 10
+    return df
 
 
 def _make_fetcher(series_id: str, view: str):

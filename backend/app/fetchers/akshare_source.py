@@ -154,6 +154,7 @@ def _all_fetchers() -> dict:
     from app.fetchers.macro_source import MACRO_FETCHERS
     from app.fetchers.fred_source import FRED_FETCHERS
     from app.fetchers.china_cycle_data import CHINA_CYCLE_FETCHERS
+    from app.fetchers.bok_source import BOK_FETCHERS
     from app.fetchers.nbs_cycle import NBS_CYCLE_FETCHERS
     from app.fetchers.oecd_cycle import CYCLE_FETCHERS
     from app.fetchers.uk_source import UK_MACRO_FETCHERS
@@ -177,6 +178,7 @@ def _all_fetchers() -> dict:
         **NBS_CYCLE_FETCHERS,
         **CYCLE_FETCHERS,
         **UK_MACRO_FETCHERS,
+        **BOK_FETCHERS,
     }
 
 

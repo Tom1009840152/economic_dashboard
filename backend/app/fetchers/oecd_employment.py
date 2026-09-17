@@ -89,47 +89,56 @@ def _points(frame) -> list[dict[str, Any]]:
 
 
 def _derived_series(frames: dict[str, Any]) -> list[dict[str, Any]]:
-    female = frames["female_participation"][["date", "value"]].rename(columns={"value": "female"})
-    male = frames["male_participation"][["date", "value"]].rename(columns={"value": "male"})
-    gender_gap = male.merge(female, on="date", how="inner")
-    gender_gap["value"] = gender_gap["male"] - gender_gap["female"]
+    derived: list[dict[str, Any]] = []
 
-    participation = frames["labor_participation"][["date", "value"]].rename(columns={"value": "participation"})
-    employment = frames["employment_ratio"][["date", "value"]].rename(columns={"value": "employment"})
-    implied = participation.merge(employment, on="date", how="inner")
-    implied = implied[implied["participation"] > 0].copy()
-    implied["value"] = (1 - implied["employment"] / implied["participation"]) * 100
+    if {"female_participation", "male_participation"} <= frames.keys():
+        female = frames["female_participation"][["date", "value"]].rename(
+            columns={"value": "female"}
+        )
+        male = frames["male_participation"][["date", "value"]].rename(
+            columns={"value": "male"}
+        )
+        gender_gap = male.merge(female, on="date", how="inner")
+        gender_gap["value"] = gender_gap["male"] - gender_gap["female"]
+        points = _points(gender_gap[["date", "value"]])
+        if points:
+            derived.append(
+                {
+                    "key": "gender_participation_gap",
+                    "name": "男女劳动参与率差",
+                    "unit": "百分点",
+                    "frequency": "月度",
+                    "source_type": "派生指标",
+                    "scope": "男性减女性；差距缩小意味着更多女性劳动供给被动员",
+                    "points": points,
+                }
+            )
 
-    definitions = [
-        (
-            "gender_participation_gap",
-            "男女劳动参与率差",
-            "百分点",
-            "派生指标",
-            "男性减女性；差距缩小意味着更多女性劳动供给被动员",
-            gender_gap[["date", "value"]],
-        ),
-        (
-            "implied_unemployment",
-            "恒等式隐含失业率",
-            "%",
-            "派生指标",
-            "1－就业率/劳动参与率；用于核对同年龄口径下的失业率",
-            implied[["date", "value"]],
-        ),
-    ]
-    return [
-        {
-            "key": key,
-            "name": name,
-            "unit": unit,
-            "frequency": "月度",
-            "source_type": source_type,
-            "scope": scope,
-            "points": _points(frame),
-        }
-        for key, name, unit, source_type, scope, frame in definitions
-    ]
+    if {"labor_participation", "employment_ratio"} <= frames.keys():
+        participation = frames["labor_participation"][["date", "value"]].rename(
+            columns={"value": "participation"}
+        )
+        employment = frames["employment_ratio"][["date", "value"]].rename(
+            columns={"value": "employment"}
+        )
+        implied = participation.merge(employment, on="date", how="inner")
+        implied = implied[implied["participation"] > 0].copy()
+        implied["value"] = (1 - implied["employment"] / implied["participation"]) * 100
+        points = _points(implied[["date", "value"]])
+        if points:
+            derived.append(
+                {
+                    "key": "implied_unemployment",
+                    "name": "恒等式隐含失业率",
+                    "unit": "%",
+                    "frequency": "月度",
+                    "source_type": "派生指标",
+                    "scope": "1－就业率/劳动参与率；用于核对同年龄口径下的失业率",
+                    "points": points,
+                }
+            )
+
+    return derived
 
 
 def fetch_oecd_employment_dashboard(region: str) -> dict[str, Any]:
@@ -149,7 +158,22 @@ def fetch_oecd_employment_dashboard(region: str) -> dict[str, Any]:
             key: executor.submit(_cached_fred_raw, item[0])
             for key, item in metadata.items()
         }
-        frames = {key: future.result() for key, future in futures.items()}
+        frames: dict[str, Any] = {}
+        point_sets: dict[str, list[dict[str, Any]]] = {}
+        failures: dict[str, str] = {}
+        for key, future in futures.items():
+            try:
+                frame = future.result()
+                points = _points(frame)
+                if not points:
+                    raise ValueError("FRED returned no observations from 1990 onward")
+                frames[key] = frame
+                point_sets[key] = points
+            except Exception as exc:  # Isolate failures from independent remote series.
+                failures[key] = type(exc).__name__
+
+    if not point_sets:
+        raise ValueError(f"FRED returned no usable employment series for {normalized}")
 
     series = [
         {
@@ -159,13 +183,21 @@ def fetch_oecd_employment_dashboard(region: str) -> dict[str, Any]:
             "frequency": "月度",
             "source_type": source_type,
             "scope": scope,
-            "points": _points(frames[key]),
+            "points": point_sets[key],
         }
         for key, (_, name, unit, source_type, scope) in metadata.items()
+        if key in point_sets
     ]
     series.extend(_derived_series(frames))
 
-    unemployment = next(item["points"] for item in series if item["key"] == "unemployment")
+    unemployment = point_sets.get("unemployment", [])
+    warnings = [
+        (
+            f"FRED本次未返回{metadata[key][1]}（{metadata[key][0]}；{error_type}）。"
+            "该序列未展示；依赖它的派生指标（如有）也不生成，缺失值未按0处理。"
+        )
+        for key, error_type in failures.items()
+    ]
     result = {
         "region": normalized,
         "country": region_meta["country"],
@@ -183,7 +215,8 @@ def fetch_oecd_employment_dashboard(region: str) -> dict[str, Any]:
                 "description": "页面采用15—64岁月度季调序列，便于跨国比较；最新月份可能因发布日不同而错位。",
             },
         ],
-        "warnings": [],
+        "warnings": warnings,
     }
-    _cache[normalized] = (now, result)
+    if not failures:
+        _cache[normalized] = (now, result)
     return result

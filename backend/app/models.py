@@ -196,6 +196,7 @@ class RefreshResult(Base):
     started_at: Mapped[datetime] = mapped_column(DateTime)
     finished_at: Mapped[datetime] = mapped_column(DateTime)
     last_success_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    source_verified_through: Mapped[date | None] = mapped_column(Date, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     quality_issues: Mapped[str | None] = mapped_column(Text, nullable=True)
 

@@ -5,16 +5,26 @@ import {
   getChinaActivityMatrix,
   getChinaBusinessCycleRegime,
   getChinaMonetaryTransmission,
+  getEUMacroOverview,
   getIndicators,
   getInternationalEmployment,
+  getJPMacroOverview,
+  getKRMacroOverview,
   getPopulation,
+  getUKMacroOverview,
+  getUSMacroOverview,
   type ActivityMatrixDashboard,
   type BusinessCycleRegimeDashboard,
   type EmploymentDashboard,
+  type EUMacroOverviewDashboard,
   type IndicatorSummary,
   type InternationalEmploymentDashboard,
+  type JPMacroOverviewDashboard,
+  type KRMacroOverviewDashboard,
   type MonetaryTransmissionDashboard,
   type PopulationDashboard,
+  type UKMacroOverviewDashboard,
+  type USMacroOverviewDashboard,
 } from "@/lib/api";
 import { IndicatorCard } from "@/components/indicator-card";
 import { BondSummaryCard } from "@/components/bond-summary-card";
@@ -28,6 +38,12 @@ import { InternationalEmploymentSummaryCard } from "@/components/international-e
 import { MonetaryTransmissionSummaryCard } from "@/components/monetary-transmission-summary-card";
 import { ChinaActivityMatrixSummaryCard } from "@/components/china-activity-matrix-summary-card";
 import { ChinaBusinessCycleSummaryCard } from "@/components/china-business-cycle-summary-card";
+import { ChinaMacroOverview } from "@/components/china-macro-overview";
+import { USMacroOverview } from "@/components/us-macro-overview";
+import { EuroAreaMacroOverview } from "@/components/euro-area-macro-overview";
+import { UKMacroOverview } from "@/components/uk-macro-overview";
+import { JapanMacroOverview } from "@/components/japan-macro-overview";
+import { KoreaMacroOverview } from "@/components/korea-macro-overview";
 import {
   COUNTRY_SECTIONS,
   defaultSectionForRegion,
@@ -63,6 +79,19 @@ type CardItem =
   | { kind: "population"; data: PopulationDashboard }
   | { kind: "employment"; data: EmploymentDashboard }
   | { kind: "international-employment"; data: InternationalEmploymentDashboard };
+
+type AnalysisLoad<T> = {
+  data: T | null;
+  failed: boolean;
+};
+
+async function loadAnalysis<T>(request: Promise<T>): Promise<AnalysisLoad<T>> {
+  try {
+    return { data: await request, failed: false };
+  } catch {
+    return { data: null, failed: true };
+  }
+}
 
 type GroupId = "cycle" | "prices" | "people" | "liquidity" | "markets";
 
@@ -114,6 +143,7 @@ const LIQUIDITY_INDICATORS = new Set([
   "EU_ECB_ASSETS",
   "GB_BOE",
   "GB_M3",
+  "KR_BOK",
 ]);
 
 function indicatorGroup(indicator: IndicatorSummary): GroupId {
@@ -186,25 +216,69 @@ export default async function CountryPage(props: PageProps<"/country/[region]">)
     : undefined;
   const needsIndicators = countrySection !== "analysis";
   const needsPeople = countrySection === "people";
-  const needsAnalysis = region === "cn" && countrySection === "analysis";
+  const needsChinaAnalysis = region === "cn" && countrySection === "analysis";
+  const needsUSAnalysis = region === "us" && countrySection === "analysis";
+  const needsEUAnalysis = region === "eu" && countrySection === "analysis";
+  const needsUKAnalysis = region === "uk" && countrySection === "analysis";
+  const needsJPAnalysis = region === "jp" && countrySection === "analysis";
+  const needsKRAnalysis = region === "kr" && countrySection === "analysis";
 
   const [
     indicators,
     population,
     employment,
     internationalEmployment,
-    businessCycle,
-    monetaryTransmission,
-    activityMatrix,
+    businessCycleResult,
+    monetaryTransmissionResult,
+    activityMatrixResult,
+    usMacroResult,
+    euMacroResult,
+    ukMacroResult,
+    jpMacroResult,
+    krMacroResult,
   ] = await Promise.all([
     needsIndicators ? getIndicators(meta.code) : Promise.resolve([]),
     needsPeople ? getPopulation(meta.code).catch(() => null) : Promise.resolve(null),
     needsPeople && region === "cn" ? getEmployment("CN").catch(() => null) : Promise.resolve(null),
     needsPeople && region !== "cn" ? getInternationalEmployment(meta.code).catch(() => null) : Promise.resolve(null),
-    needsAnalysis ? getChinaBusinessCycleRegime(24).catch(() => null) : Promise.resolve(null),
-    needsAnalysis ? getChinaMonetaryTransmission().catch(() => null) : Promise.resolve(null),
-    needsAnalysis ? getChinaActivityMatrix(24).catch(() => null) : Promise.resolve(null),
+    needsChinaAnalysis
+      ? loadAnalysis(getChinaBusinessCycleRegime(24))
+      : Promise.resolve<AnalysisLoad<BusinessCycleRegimeDashboard>>({ data: null, failed: false }),
+    needsChinaAnalysis
+      ? loadAnalysis(getChinaMonetaryTransmission())
+      : Promise.resolve<AnalysisLoad<MonetaryTransmissionDashboard>>({ data: null, failed: false }),
+    needsChinaAnalysis
+      ? loadAnalysis(getChinaActivityMatrix(24))
+      : Promise.resolve<AnalysisLoad<ActivityMatrixDashboard>>({ data: null, failed: false }),
+    needsUSAnalysis
+      ? loadAnalysis(getUSMacroOverview())
+      : Promise.resolve<AnalysisLoad<USMacroOverviewDashboard>>({ data: null, failed: false }),
+    needsEUAnalysis
+      ? loadAnalysis(getEUMacroOverview())
+      : Promise.resolve<AnalysisLoad<EUMacroOverviewDashboard>>({ data: null, failed: false }),
+    needsUKAnalysis
+      ? loadAnalysis(getUKMacroOverview())
+      : Promise.resolve<AnalysisLoad<UKMacroOverviewDashboard>>({ data: null, failed: false }),
+    needsJPAnalysis
+      ? loadAnalysis(getJPMacroOverview())
+      : Promise.resolve<AnalysisLoad<JPMacroOverviewDashboard>>({ data: null, failed: false }),
+    needsKRAnalysis
+      ? loadAnalysis(getKRMacroOverview())
+      : Promise.resolve<AnalysisLoad<KRMacroOverviewDashboard>>({ data: null, failed: false }),
   ]);
+  const businessCycle = businessCycleResult.data;
+  const monetaryTransmission = monetaryTransmissionResult.data;
+  const activityMatrix = activityMatrixResult.data;
+  const usMacro = usMacroResult.data;
+  const euMacro = euMacroResult.data;
+  const ukMacro = ukMacroResult.data;
+  const jpMacro = jpMacroResult.data;
+  const krMacro = krMacroResult.data;
+  const unavailableAnalysisModules = [
+    businessCycleResult.failed ? "经济周期定位" : null,
+    activityMatrixResult.failed ? "活动矩阵" : null,
+    monetaryTransmissionResult.failed ? "货币与信用传导" : null,
+  ].filter((item): item is string => item !== null);
 
   // 国债收益率、货币供给这两类，一个国家会有好几个细分指标，不逐个铺卡片，
   // 各自合并成一张汇总卡，点进去再切换具体看哪个（国债看期限，货币供给看M0/M1/M2/口径）
@@ -266,7 +340,17 @@ export default async function CountryPage(props: PageProps<"/country/[region]">)
     ? sections.filter((group) => group.id === selectedGroup)
     : sections;
   const entryCount = countrySection === "analysis"
-    ? Number(Boolean(businessCycle)) + Number(Boolean(activityMatrix)) + Number(Boolean(monetaryTransmission))
+    ? region === "us"
+      ? usMacro?.pillars.length ?? 5
+      : region === "eu"
+        ? euMacro?.pillars.length ?? 5
+        : region === "uk"
+          ? ukMacro?.pillars.length ?? 5
+          : region === "jp"
+            ? jpMacro?.pillars.length ?? 5
+            : region === "kr"
+              ? krMacro?.pillars.length ?? 5
+              : 3
     : visibleSections.reduce((total, current) => total + current.cards.length, 0);
 
   return (
@@ -330,7 +414,7 @@ export default async function CountryPage(props: PageProps<"/country/[region]">)
       )}
 
       <div className="space-y-12 pb-8">
-        {(businessCycle || activityMatrix || monetaryTransmission) && countrySection === "analysis" && (
+        {countrySection === "analysis" && (
           <section id="analysis" className="scroll-mt-24 pt-10">
             {!countrySection && (
               <div className="mb-4 flex items-start gap-3">
@@ -345,29 +429,51 @@ export default async function CountryPage(props: PageProps<"/country/[region]">)
                 </div>
               </div>
             )}
-            <div className="space-y-4">
-              {businessCycle && (
-                <FadeIn>
-                  <ChinaBusinessCycleSummaryCard
-                    data={businessCycle as BusinessCycleRegimeDashboard}
-                  />
-                </FadeIn>
-              )}
-              {activityMatrix && (
-                <FadeIn delay={0.04}>
-                  <ChinaActivityMatrixSummaryCard
-                    data={activityMatrix as ActivityMatrixDashboard}
-                  />
-                </FadeIn>
-              )}
-              {monetaryTransmission && (
-                <FadeIn delay={0.08}>
-                  <MonetaryTransmissionSummaryCard
-                    data={monetaryTransmission as MonetaryTransmissionDashboard}
-                  />
-                </FadeIn>
-              )}
-            </div>
+            {region === "cn" && (
+              <>
+                <ChinaMacroOverview
+                  businessCycle={businessCycle}
+                  businessCycleFailed={businessCycleResult.failed}
+                  activityMatrix={activityMatrix}
+                  activityMatrixFailed={activityMatrixResult.failed}
+                  monetaryTransmission={monetaryTransmission}
+                  monetaryTransmissionFailed={monetaryTransmissionResult.failed}
+                  unavailableModules={unavailableAnalysisModules}
+                />
+                <div className="mt-4 space-y-4">
+                  {businessCycle && (
+                    <FadeIn>
+                      <ChinaBusinessCycleSummaryCard data={businessCycle} />
+                    </FadeIn>
+                  )}
+                  {activityMatrix && (
+                    <FadeIn delay={0.04}>
+                      <ChinaActivityMatrixSummaryCard data={activityMatrix} />
+                    </FadeIn>
+                  )}
+                  {monetaryTransmission && (
+                    <FadeIn delay={0.08}>
+                      <MonetaryTransmissionSummaryCard data={monetaryTransmission} />
+                    </FadeIn>
+                  )}
+                </div>
+              </>
+            )}
+            {region === "us" && (
+              <USMacroOverview data={usMacro} failed={usMacroResult.failed} />
+            )}
+            {region === "eu" && (
+              <EuroAreaMacroOverview data={euMacro} failed={euMacroResult.failed} />
+            )}
+            {region === "uk" && (
+              <UKMacroOverview data={ukMacro} failed={ukMacroResult.failed} />
+            )}
+            {region === "jp" && (
+              <JapanMacroOverview data={jpMacro} failed={jpMacroResult.failed} />
+            )}
+            {region === "kr" && (
+              <KoreaMacroOverview data={krMacro} failed={krMacroResult.failed} />
+            )}
           </section>
         )}
 

@@ -83,6 +83,6 @@ final/known/on-schedule 均为 115，PPI strict/on-schedule 均为 120；重跑�
 ## 接口与后续阶段
 
 - A1 接口：`GET /api/analysis/cn/business-cycle/matrix`
-- A2 接口：`GET /api/analysis/cn/business-cycle/regime`；方法版本 `1.1.0`，基于同步指数的水平和动能识别四阶段，并增加阶段稳定规则。A5b 的 `coincident_decomposition` / `leading_decomposition` 直接复用六个月共同篮子和有效权重，逐项还原水平缺口与三月动能并校验残差；`state_change` 单列状态机原因，不宣称经济因果。
+- A2 接口：`GET /api/analysis/cn/business-cycle/regime`；方法版本 `1.1.1`，基于同步指数的水平和动能识别四阶段，并增加阶段稳定规则。`current_phase` 最多只跨一个不可判月，连续至少两个月不可判时置空；旧 `phase` 保留为历史展示与回测兼容口径。A5b 的 `coincident_decomposition` / `leading_decomposition` 直接复用六个月共同篮子和有效权重，逐项还原水平缺口与三月动能并校验残差；`state_change` 单列状态机原因，不宣称经济因果。
 - A3 接口：`GET /api/analysis/cn/business-cycle/backtest`；方法版本 `1.4.0`，用同一特征注册表与 A2 状态机重建严格伪实时路径，并将最终值按同一观察端点重跑后的标签作为修订稳定性参照；就绪率按每项信号的模型实际使用月份及当前公式版本统计，主动判断、历史阶段沿用、待确认与混合基础分别报告。单月解释接口 `GET /api/analysis/cn/business-cycle/backtest/attribution?period=YYYY-MM` 惰性构造 R/H/F，并对四项分类坐标执行加总校验；它是顺序依赖的模型审计，不是经济因果。核心 CPI/PPI 来源链已完成；`CN_EXPORTS` 因真实美元初值域 TLS 主机名和信任链均失败仍为 0，证书有效的 online 域没有数据，人民币 ChinaPort 页面也不能混入口径。下一步是出口官方传输 canary、A3 strict-only 审计、阶段敏感性及 D8/R5，而不是继续补通胀缺稿。
 - A4：在回测合格后输出未来 3、6、12 个月阶段转换概率。

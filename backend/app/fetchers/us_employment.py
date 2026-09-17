@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 import time
 from typing import Any
 
-from app.fetchers.fred_source import _cached_fred_raw
+from app.fetchers.fred_source import _cached_fred_raw, _calendar_month_change
 
 
 _CACHE_TTL = 6 * 60 * 60
@@ -95,11 +95,17 @@ def _points(frame) -> list[dict[str, Any]]:
 
 
 def _derived_series(frames: dict[str, Any]) -> list[dict[str, Any]]:
-    payrolls = frames["nonfarm_payrolls"].copy()
-    payrolls["value"] = payrolls["value"].diff()
+    payrolls = _calendar_month_change(
+        frames["nonfarm_payrolls"],
+        months=1,
+        percent=False,
+    )
 
-    earnings = frames["hourly_earnings"].copy()
-    earnings["value"] = earnings["value"].pct_change(12) * 100
+    earnings = _calendar_month_change(
+        frames["hourly_earnings"],
+        months=12,
+        percent=True,
+    )
 
     openings = frames["job_openings"][["date", "value"]].rename(columns={"value": "openings"})
     unemployed = frames["unemployed_people"][["date", "value"]].rename(columns={"value": "unemployed"})

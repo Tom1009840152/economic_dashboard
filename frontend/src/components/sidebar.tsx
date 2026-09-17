@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState } from "react";
-import { ChevronDown } from "lucide-react";
+import { ChevronDown, Database } from "lucide-react";
 import {
   COUNTRY_REGIONS,
   countrySectionForPath,
@@ -11,10 +11,20 @@ import {
   sectionsForRegion,
   type CountryRegion,
 } from "@/lib/country-sections";
+import { DATA_SOURCE_REGION_BY_SLUG, type DataSourceRegion } from "@/lib/data-source-registry";
 
 export function Sidebar() {
   const pathname = usePathname();
+  const sourceRegionMatch = pathname.match(/^\/data-sources\/(cn|us|jp|eu|uk|kr|global)$/);
+  const sourceRegion = sourceRegionMatch?.[1] as DataSourceRegion | undefined;
+  const sourcesActive = sourceRegion !== undefined || pathname === "/data-sources";
   const activeContext = countrySectionForPath(pathname);
+  const sourceHrefRegion = sourceRegion
+    ?? activeContext?.region
+    ?? (pathname === "/" ? "global" : "cn");
+  const sourceHref = DATA_SOURCE_REGION_BY_SLUG.has(sourceHrefRegion)
+    ? `/data-sources/${sourceHrefRegion}`
+    : "/data-sources/cn";
   const [expansion, setExpansion] = useState<{
     pathname: string;
     region: CountryRegion | null;
@@ -50,8 +60,8 @@ export function Sidebar() {
 
   return (
     <nav
-      aria-label="地区导航"
-      className="sticky top-0 z-40 flex w-full shrink-0 flex-col gap-2 border-b border-border bg-background px-4 py-3 sm:static sm:block sm:w-56 sm:border-r sm:border-b-0 sm:px-3 sm:py-10"
+      aria-label="主导航"
+      className="sticky top-0 z-40 flex w-full shrink-0 flex-col gap-2 border-b border-border bg-background px-4 py-3 sm:h-screen sm:w-56 sm:self-start sm:overflow-y-auto sm:border-r sm:border-b-0 sm:px-3 sm:py-10"
     >
       <div className="flex min-w-0 items-center gap-3 sm:block">
         <div className="shrink-0 whitespace-nowrap text-sm font-semibold sm:px-3">经济学看板</div>
@@ -104,6 +114,22 @@ export function Sidebar() {
               </li>
             );
           })}
+
+          <li className="shrink-0 sm:mt-4 sm:border-t sm:border-zinc-200 sm:pt-4 dark:sm:border-zinc-800">
+            <Link
+              href={sourceHref}
+              aria-current={sourcesActive ? "page" : undefined}
+              className={`flex items-center gap-2 whitespace-nowrap rounded-md border px-3 py-2 text-sm transition-colors ${
+                sourcesActive
+                  ? "border-zinc-700 bg-zinc-700 text-white shadow-sm dark:border-zinc-300 dark:bg-zinc-300 dark:text-zinc-950"
+                  : "border-zinc-200 bg-zinc-100 text-zinc-700 hover:border-zinc-300 hover:bg-zinc-200 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700"
+              }`}
+              onClick={() => setExpansion({ pathname, region: null })}
+            >
+              <Database aria-hidden="true" className="size-3.5" />
+              数据来源与更新
+            </Link>
+          </li>
         </ul>
       </div>
 

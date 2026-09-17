@@ -21,8 +21,9 @@ export default async function ChinaMonetaryTransmissionPage() {
           </p>
         </div>
         <div className="text-right text-xs text-muted-foreground">
-          <div>最新市场数据：{analysis.as_of}</div>
-          <div>三项信号按各自频率更新</div>
+          <div>市场观察：{analysis.freshness?.market_observation_date ?? analysis.as_of}</div>
+          <div>政策利率核验：{analysis.freshness?.policy_rate_verified_through ?? "--"}</div>
+          <div>信用观察期：{analysis.freshness?.credit_observation_period ?? analysis.signals.find((signal) => signal.key === "credit_impulse")?.period ?? "--"}</div>
         </div>
       </div>
 

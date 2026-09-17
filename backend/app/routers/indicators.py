@@ -59,8 +59,8 @@ def _freshness(points: list[DataPoint], code: str) -> tuple[str, str]:
     """按指标自身发布频率判断数据是否明显滞后。"""
     if not points:
         return "missing", "等待数据更新"
-    if code == "GB_BOE":
-        # 英格兰银行利率历史只在决议改变利率时新增记录。
+    if get_indicator_catalog()[code].frequency == "event":
+        # 事件型政策利率历史只在决议改变利率时新增记录。
         return "event", "按决议更新"
 
     recent_dates = [point.date for point in points[-13:]]

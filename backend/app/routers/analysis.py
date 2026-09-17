@@ -10,7 +10,12 @@ from app.schemas import (
     ChinaCycleBacktestAttributionOut,
     ChinaCycleBacktestOut,
     ChinaCycleRegimeOut,
+    EUMacroOverviewOut,
+    JPMacroOverviewOut,
+    KRMacroOverviewOut,
     MonetaryTransmissionDashboardOut,
+    UKMacroOverviewOut,
+    USMacroOverviewOut,
 )
 from app.services.china_business_cycle import (
     DEFAULT_OUTPUT_MONTHS,
@@ -18,15 +23,76 @@ from app.services.china_business_cycle import (
     build_china_business_cycle_matrix,
 )
 from app.services.china_cycle_regime import build_china_cycle_regime
+from app.services.eu_macro_overview import build_eu_macro_overview
+from app.services.east_asia_macro_overview import (
+    build_japan_macro_overview,
+    build_korea_macro_overview,
+)
 from app.services.china_cycle_backtest import (
     DEFAULT_BACKTEST_MONTHS,
     MAX_BACKTEST_MONTHS,
     build_china_cycle_backtest,
     build_china_cycle_backtest_attribution,
 )
+from app.services.us_macro_overview import build_us_macro_overview
+from app.services.uk_macro_overview import build_uk_macro_overview
 
 
 router = APIRouter(prefix="/api/analysis", tags=["analysis"])
+
+
+@router.get(
+    "/kr/overview",
+    response_model=KRMacroOverviewOut,
+)
+def get_korea_macro_overview(db: Session = Depends(get_db)):
+    """Return a transparent current/final South Korea macro snapshot."""
+
+    return build_korea_macro_overview(db)
+
+
+@router.get(
+    "/jp/overview",
+    response_model=JPMacroOverviewOut,
+)
+def get_japan_macro_overview(db: Session = Depends(get_db)):
+    """Return a transparent current/final Japan macro snapshot."""
+
+    return build_japan_macro_overview(db)
+
+
+@router.get(
+    "/uk/overview",
+    response_model=UKMacroOverviewOut,
+)
+def get_uk_macro_overview(db: Session = Depends(get_db)):
+    """Return a transparent current/final UK macro snapshot."""
+
+    return build_uk_macro_overview(db)
+
+
+@router.get(
+    "/eu/overview",
+    response_model=EUMacroOverviewOut,
+)
+def get_eu_macro_overview(db: Session = Depends(get_db)):
+    """Return a transparent current/final euro-area (EA21) snapshot."""
+
+    return build_eu_macro_overview(db)
+
+
+@router.get(
+    "/us/overview",
+    response_model=USMacroOverviewOut,
+)
+def get_us_macro_overview(db: Session = Depends(get_db)):
+    """Return a transparent current/final US macro snapshot.
+
+    The response intentionally keeps separate observation periods and does not
+    claim a real-time recession probability while release vintages are absent.
+    """
+
+    return build_us_macro_overview(db)
 
 
 @router.get(

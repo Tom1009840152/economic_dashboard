@@ -49,8 +49,74 @@ async function apiFetch<T>(path: string): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-export function getIndicators(region?: string): Promise<IndicatorSummary[]> {
-  return apiFetch(region ? `/api/indicators?region=${region}` : "/api/indicators");
+export function getIndicators(region?: string, includeHidden = false): Promise<IndicatorSummary[]> {
+  const query = new URLSearchParams();
+  if (region) query.set("region", region);
+  if (includeHidden) query.set("include_hidden", "true");
+  const suffix = query.size ? `?${query}` : "";
+  return apiFetch(`/api/indicators${suffix}`);
+}
+
+export interface IndicatorCatalogEntry {
+  code: string;
+  name: string;
+  category: string;
+  region: string;
+  unit: string;
+  is_visible: boolean;
+  sort_order: number;
+  source: string;
+  frequency: "daily" | "weekly" | "monthly" | "quarterly" | "event";
+  seasonal_adjustment: string;
+  measure_type: string;
+  aggregation: string;
+  cumulative: boolean;
+  direction: string;
+  transform: string;
+  release_lag_months: number;
+  valid_min: number | null;
+  valid_max: number | null;
+  notes: string;
+  formula: string | null;
+  formula_version: string | null;
+  input_codes: string[] | null;
+}
+
+export function getIndicatorCatalog(region?: string): Promise<IndicatorCatalogEntry[]> {
+  const suffix = region ? `?${new URLSearchParams({ region })}` : "";
+  return apiFetch(`/api/indicator-catalog${suffix}`);
+}
+
+export interface RefreshResult {
+  indicator_code: string;
+  status: string;
+  row_count: number;
+  changed_count: number;
+  duration_ms: number;
+  started_at: string;
+  finished_at: string;
+  last_success_at: string | null;
+  source_verified_through: string | null;
+  error: string | null;
+  quality_issues: Array<Record<string, unknown>>;
+}
+
+export interface RefreshRun {
+  id: number;
+  trigger: string;
+  status: string;
+  started_at: string;
+  finished_at: string | null;
+  total_indicators: number;
+  success_count: number;
+  no_change_count: number;
+  failed_count: number;
+  error: string | null;
+  results: RefreshResult[];
+}
+
+export function getRefreshStatus(): Promise<RefreshRun | null> {
+  return apiFetch("/api/refresh/status");
 }
 
 export function getIndicatorHistory(code: string): Promise<IndicatorHistory> {
@@ -196,6 +262,301 @@ export function getUSEmployment(): Promise<InternationalEmploymentDashboard> {
   return getInternationalEmployment("US");
 }
 
+export type USMacroTone = "positive" | "neutral" | "caution" | "negative" | "unavailable";
+export type USMacroTrend = "up" | "down" | "flat" | "unavailable";
+export type USMacroConfidence = "high" | "medium" | "low" | "unavailable";
+
+export interface USMacroMetric {
+  key: string;
+  label: string;
+  value: number | null;
+  unit: string;
+  period: string | null;
+  frequency: "daily" | "monthly" | "quarterly" | "event" | "mixed";
+  freshness: "current" | "stale" | "missing";
+  trend: USMacroTrend;
+  reference_value: number | null;
+  reference_period: string | null;
+  interpretation: string;
+  formula: string;
+  source_codes: string[];
+}
+
+export interface USMacroPillar {
+  key: "growth" | "labour" | "inflation" | "financial_conditions" | "monetary_policy";
+  title: string;
+  state_key: string;
+  state_label: string;
+  tone: USMacroTone;
+  summary: string;
+  confidence: USMacroConfidence;
+  metrics: USMacroMetric[];
+}
+
+export interface USRecessionBreadth {
+  state_key: "limited" | "elevated" | "broad" | "unavailable";
+  state_label: string;
+  tone: USMacroTone;
+  active_signals: number;
+  total_signals: number;
+  triggers: string[];
+  offsets: string[];
+  summary: string;
+  methodology: string;
+}
+
+export interface USTransmissionStep {
+  key: string;
+  title: string;
+  state_label: string;
+  tone: USMacroTone;
+  detail: string;
+  periods: string[];
+}
+
+export interface USMacroOverviewDashboard {
+  region: "US";
+  country: string;
+  title: string;
+  status: "ok" | "partial" | "unavailable";
+  confidence: USMacroConfidence;
+  coverage: number;
+  realtime_ready: false;
+  tone: USMacroTone;
+  headline: string;
+  as_of: string | null;
+  freshness: {
+    market_observation_date: string | null;
+    monthly_observation_period: string | null;
+    quarterly_observation_period: string | null;
+    employment_observation_period: string | null;
+  };
+  methodology_version: string;
+  methodology_note: string;
+  pillars: USMacroPillar[];
+  recession_breadth: USRecessionBreadth;
+  transmission: USTransmissionStep[];
+  watch_items: string[];
+  data_source_path: "/data-sources/us";
+  warnings: string[];
+}
+
+export function getUSMacroOverview(): Promise<USMacroOverviewDashboard> {
+  return apiFetch("/api/analysis/us/overview");
+}
+
+export type EUMacroTone = USMacroTone;
+export type EUMacroTrend = USMacroTrend;
+export type EUMacroConfidence = USMacroConfidence;
+export type EUMacroMetric = USMacroMetric;
+
+export interface EUMacroPillar extends Omit<USMacroPillar, "key" | "metrics"> {
+  key: "growth" | "labour" | "inflation" | "financial_conditions" | "monetary_policy";
+  metrics: EUMacroMetric[];
+}
+
+export interface EUDownturnBreadth {
+  state_key: "limited" | "elevated" | "broad" | "unavailable";
+  state_label: string;
+  tone: EUMacroTone;
+  active_signals: number;
+  total_signals: number;
+  triggers: string[];
+  offsets: string[];
+  summary: string;
+  methodology: string;
+}
+
+export interface EUTransmissionStep extends Omit<USTransmissionStep, "tone"> {
+  tone: EUMacroTone;
+}
+
+export interface EUMacroOverviewDashboard {
+  region: "EU";
+  country: string;
+  title: string;
+  status: "ok" | "partial" | "unavailable";
+  confidence: EUMacroConfidence;
+  coverage: number;
+  realtime_ready: false;
+  tone: EUMacroTone;
+  headline: string;
+  as_of: string | null;
+  freshness: {
+    market_observation_date: string | null;
+    monthly_observation_period: string | null;
+    quarterly_observation_period: string | null;
+    employment_observation_period: string | null;
+  };
+  methodology_version: string;
+  methodology_note: string;
+  pillars: EUMacroPillar[];
+  downturn_breadth: EUDownturnBreadth;
+  transmission: EUTransmissionStep[];
+  watch_items: string[];
+  data_source_path: "/data-sources/eu";
+  warnings: string[];
+}
+
+export function getEUMacroOverview(): Promise<EUMacroOverviewDashboard> {
+  return apiFetch("/api/analysis/eu/overview");
+}
+
+export type UKMacroTone = USMacroTone;
+export type UKMacroTrend = USMacroTrend;
+export type UKMacroConfidence = USMacroConfidence;
+export type UKMacroMetric = USMacroMetric;
+
+export interface UKMacroPillar extends Omit<USMacroPillar, "key" | "metrics"> {
+  key: "growth" | "labour" | "inflation" | "financial_conditions" | "monetary_policy";
+  metrics: UKMacroMetric[];
+}
+
+export interface UKDownturnBreadth {
+  state_key: "limited" | "elevated" | "broad" | "unavailable";
+  state_label: string;
+  tone: UKMacroTone;
+  active_signals: number;
+  total_signals: number;
+  triggers: string[];
+  offsets: string[];
+  summary: string;
+  methodology: string;
+}
+
+export interface UKTransmissionStep extends Omit<USTransmissionStep, "tone"> {
+  tone: UKMacroTone;
+}
+
+export interface UKMacroOverviewDashboard {
+  region: "GB";
+  country: string;
+  title: string;
+  status: "ok" | "partial" | "unavailable";
+  confidence: UKMacroConfidence;
+  coverage: number;
+  realtime_ready: false;
+  tone: UKMacroTone;
+  headline: string;
+  as_of: string | null;
+  freshness: {
+    market_observation_date: string | null;
+    monthly_observation_period: string | null;
+    quarterly_observation_period: string | null;
+    employment_observation_period: string | null;
+  };
+  methodology_version: string;
+  methodology_note: string;
+  pillars: UKMacroPillar[];
+  downturn_breadth: UKDownturnBreadth;
+  transmission: UKTransmissionStep[];
+  watch_items: string[];
+  data_source_path: "/data-sources/uk";
+  warnings: string[];
+}
+
+export function getUKMacroOverview(): Promise<UKMacroOverviewDashboard> {
+  return apiFetch("/api/analysis/uk/overview");
+}
+
+export type JPMacroTone = USMacroTone;
+export type JPMacroTrend = USMacroTrend;
+export type JPMacroConfidence = USMacroConfidence;
+export type JPMacroMetric = USMacroMetric;
+
+export interface JPMacroPillar extends Omit<USMacroPillar, "key" | "metrics"> {
+  key: "growth" | "labour" | "inflation" | "financial_conditions" | "monetary_policy";
+  metrics: JPMacroMetric[];
+}
+
+export interface JPDownturnBreadth extends Omit<USRecessionBreadth, "tone"> {
+  tone: JPMacroTone;
+}
+
+export interface JPTransmissionStep extends Omit<USTransmissionStep, "tone"> {
+  tone: JPMacroTone;
+}
+
+export interface JPMacroOverviewDashboard {
+  region: "JP";
+  country: string;
+  title: string;
+  status: "ok" | "partial" | "unavailable";
+  confidence: JPMacroConfidence;
+  coverage: number;
+  realtime_ready: false;
+  tone: JPMacroTone;
+  headline: string;
+  as_of: string | null;
+  freshness: {
+    market_observation_date: string | null;
+    monthly_observation_period: string | null;
+    quarterly_observation_period: string | null;
+    employment_observation_period: string | null;
+  };
+  methodology_version: string;
+  methodology_note: string;
+  pillars: JPMacroPillar[];
+  downturn_breadth: JPDownturnBreadth;
+  transmission: JPTransmissionStep[];
+  watch_items: string[];
+  data_source_path: "/data-sources/jp";
+  warnings: string[];
+}
+
+export function getJPMacroOverview(): Promise<JPMacroOverviewDashboard> {
+  return apiFetch("/api/analysis/jp/overview");
+}
+
+export type KRMacroTone = USMacroTone;
+export type KRMacroTrend = USMacroTrend;
+export type KRMacroConfidence = USMacroConfidence;
+export type KRMacroMetric = USMacroMetric;
+
+export interface KRMacroPillar extends Omit<USMacroPillar, "key" | "metrics"> {
+  key: "growth" | "labour" | "inflation" | "financial_conditions" | "monetary_policy";
+  metrics: KRMacroMetric[];
+}
+
+export interface KRDownturnBreadth extends Omit<USRecessionBreadth, "tone"> {
+  tone: KRMacroTone;
+}
+
+export interface KRTransmissionStep extends Omit<USTransmissionStep, "tone"> {
+  tone: KRMacroTone;
+}
+
+export interface KRMacroOverviewDashboard {
+  region: "KR";
+  country: string;
+  title: string;
+  status: "ok" | "partial" | "unavailable";
+  confidence: KRMacroConfidence;
+  coverage: number;
+  realtime_ready: false;
+  tone: KRMacroTone;
+  headline: string;
+  as_of: string | null;
+  freshness: {
+    market_observation_date: string | null;
+    monthly_observation_period: string | null;
+    quarterly_observation_period: string | null;
+    employment_observation_period: string | null;
+  };
+  methodology_version: string;
+  methodology_note: string;
+  pillars: KRMacroPillar[];
+  downturn_breadth: KRDownturnBreadth;
+  transmission: KRTransmissionStep[];
+  watch_items: string[];
+  data_source_path: "/data-sources/kr";
+  warnings: string[];
+}
+
+export function getKRMacroOverview(): Promise<KRMacroOverviewDashboard> {
+  return apiFetch("/api/analysis/kr/overview");
+}
+
 export interface AnalysisPoint {
   period: string;
   value: number;
@@ -207,7 +568,10 @@ export interface AnalysisSeries {
   unit: string;
   points: AnalysisPoint[];
   maintenance?: string;
+  current_value?: number;
+  effective_date?: string;
   verified_through?: string;
+  catalog_updated_at?: string;
   source?: string;
   source_url?: string;
 }
@@ -232,7 +596,13 @@ export interface MonetaryTransmissionDashboard {
   status: string;
   tone: "positive" | "neutral" | "caution";
   summary: string;
+  /** @deprecated Use freshness.market_observation_date. */
   as_of: string;
+  freshness?: {
+    market_observation_date: string;
+    policy_rate_verified_through: string;
+    credit_observation_period: string;
+  };
   signals: MonetaryTransmissionSignal[];
   series: AnalysisSeries[];
   sources: EmploymentSource[];
@@ -547,7 +917,9 @@ export interface BusinessCycleInflation {
 
 export interface BusinessCycleRegimePoint {
   period: string;
+  /** Legacy display/backtest state; use current_phase for a present-tense interpretation. */
   phase: BusinessCyclePhase | null;
+  current_phase?: BusinessCyclePhase | null;
   phase_label: string;
   raw_phase: BusinessCyclePhase | null;
   phase_status: BusinessCyclePhaseStatus;
@@ -661,6 +1033,7 @@ export interface BusinessCycleMethodology {
   momentum_buffer: number;
   confirmation_months_with_leading: number;
   confirmation_months_without_leading: number;
+  current_phase_max_carry_months: number;
   phase_order: BusinessCyclePhase[];
   role_comparability: string;
   balanced_panel_months: number;

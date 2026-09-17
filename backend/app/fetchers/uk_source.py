@@ -92,6 +92,19 @@ def _ons_series(key: str) -> pd.DataFrame:
     )
 
 
+def _calendar_month_yoy(frame: pd.DataFrame) -> pd.DataFrame:
+    """Calculate YoY growth only when the same calendar month exists."""
+    out = frame[["date", "value"]].copy()
+    out["_period"] = pd.to_datetime(out["date"], errors="coerce").dt.to_period("M")
+    out["value"] = pd.to_numeric(out["value"], errors="coerce")
+    out = out.dropna(subset=["_period", "value"]).sort_values("date")
+    out = out.drop_duplicates("_period", keep="last")
+    values_by_period = out.set_index("_period")["value"]
+    out["_year_ago"] = (out["_period"] - 12).map(values_by_period)
+    out["value"] = (out["value"] / out["_year_ago"] - 1) * 100
+    return out.dropna(subset=["value"])[["date", "value"]].reset_index(drop=True)
+
+
 def fetch_uk_cpi() -> pd.DataFrame:
     """ONS CPI 12-month rate, not the EU HICP aggregate."""
     return _ons_series("cpi")
@@ -104,9 +117,7 @@ def fetch_uk_core_cpi() -> pd.DataFrame:
 
 def fetch_uk_industrial_production() -> pd.DataFrame:
     """ONS total production index (B-E), converted to year-on-year growth."""
-    out = _ons_series("industrial_production")
-    out["value"] = out["value"].pct_change(12) * 100
-    return out.dropna(subset=["value"]).reset_index(drop=True)
+    return _calendar_month_yoy(_ons_series("industrial_production"))
 
 
 def fetch_uk_gdp() -> pd.DataFrame:

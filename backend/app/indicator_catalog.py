@@ -142,6 +142,7 @@ _SOURCE_GROUPS: Mapping[str, frozenset[str]] = {
     "Eurostat/EC": frozenset({"EU_IP", "EU_CLI", "EU_GDP"}),
     "UK ONS": frozenset({"GB_CPI", "GB_CORE_CPI", "GB_IP", "GB_GDP"}),
     "Bank of England": frozenset({"GB_BOE"}),
+    "Bank of Korea": frozenset({"KR_BOK"}),
 }
 
 
@@ -161,7 +162,7 @@ _QUARTERLY_CODES = frozenset(
         "CN_FISCAL_SPEND_INTENSITY", "CN_FISCAL_IMPULSE_PROXY", "CN_ENTERPRISE_BOOM",
     }
 )
-_EVENT_CODES = frozenset({"GB_BOE"})
+_EVENT_CODES = frozenset({"GB_BOE", "KR_BOK"})
 _CUMULATIVE_YOY_CODES = frozenset(
     {
         "CN_FISCAL_GENERAL_SPEND_YOY",
@@ -254,6 +255,7 @@ _NOTES: Mapping[str, str] = {
     "JP_BOJ_ASSETS": "央行资产负债表规模，用于观察政策扩表，不是货币供应量。",
     "EU_ECB_ASSETS": "欧央行周度金融报表总资产，不是欧元区货币供应量。",
     "KR_RESERVES": "外汇储备不是货币供应量，只能作为外部缓冲指标。",
+    "KR_BOK": "韩国银行官方基准利率变更事件；官网末尾同利率当日延长点仅表示核验日期，不计作新决议。",
 }
 
 
@@ -287,7 +289,7 @@ def _frequency(code: str) -> str:
 
 def _seasonal_adjustment(code: str, category: str) -> str:
     if category in {"index", "forex", "commodity", "bond"} or code in {
-        "CN_HOG", "CN_REALESTATE", "CN_ENERGY", "US_FFR", "JP_BOJ", "EU_ECB", "GB_BOE",
+        "CN_HOG", "CN_REALESTATE", "CN_ENERGY", "US_FFR", "JP_BOJ", "EU_ECB", "GB_BOE", "KR_BOK",
         "JP_BOJ_ASSETS", "EU_ECB_ASSETS", "KR_RESERVES",
     }:
         return "not_applicable"
@@ -326,7 +328,7 @@ def _measure(code: str, category: str) -> str:
         return "change"
     if code.endswith("_INTENSITY") or code == "CN_RE_PRICE_RISING_SHARE":
         return "ratio"
-    if code in {"US_FFR", "JP_BOJ", "EU_ECB", "GB_BOE"}:
+    if code in {"US_FFR", "JP_BOJ", "EU_ECB", "GB_BOE", "KR_BOK"}:
         return "rate"
     if code == "CN_M1M2":
         return "spread"

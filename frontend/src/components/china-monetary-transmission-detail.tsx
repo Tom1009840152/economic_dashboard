@@ -199,9 +199,15 @@ export function ChinaMonetaryTransmissionDetail({
               {data.summary}
             </CardDescription>
           </div>
-          <Badge variant="outline" className={TONE_STYLES[data.tone]}>
-            最新市场数据 {data.as_of}
-          </Badge>
+          <div className="shrink-0 text-left sm:text-right">
+            <Badge variant="outline" className={TONE_STYLES[data.tone]}>
+              政策利率核验至 {data.freshness?.policy_rate_verified_through ?? "--"}
+            </Badge>
+            <div className="mt-2 text-xs leading-5 text-muted-foreground">
+              <div>市场观察：{data.freshness?.market_observation_date ?? data.as_of}</div>
+              <div>信用观察：{data.freshness?.credit_observation_period ?? credit.period}</div>
+            </div>
+          </div>
         </CardHeader>
         <CardContent>
           <div className="grid items-center gap-2 rounded-xl border bg-background/75 p-4 text-center sm:grid-cols-[1fr_auto_1fr_auto_1fr_auto_1fr]">

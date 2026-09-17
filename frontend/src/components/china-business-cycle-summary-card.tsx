@@ -33,7 +33,7 @@ const STATUS_LABELS: Record<BusinessCyclePhaseStatus, string> = {
   candidate: "候选 · 待连续确认",
   transition: "本月可判 · 切换观察",
   held_uncomparable: "本月不可判 · 沿用历史",
-  stale: "连续不可判 · 沿用历史",
+  stale: "连续不可判 · 当前判断已过期",
   insufficient: "本月不可判",
 };
 

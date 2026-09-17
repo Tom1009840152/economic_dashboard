@@ -10,7 +10,10 @@ from app.services.indicator_series import constrain_current_series
 
 router = APIRouter(prefix="/api", tags=["forecast"])
 
-EVENT_DRIVEN_POLICY_RATES = {"US_FFR", "JP_BOJ", "EU_ECB", "GB_BOE"}
+# JP_BOJ is an OECD/FRED monthly average of the <24-hour call/interbank
+# market rate.  It is not an event series and may use the normal monthly
+# forecast cadence.  GB_BOE and KR_BOK, by contrast, store actual decision events.
+EVENT_DRIVEN_POLICY_RATES = {"US_FFR", "EU_ECB", "GB_BOE", "KR_BOK"}
 
 
 @router.get("/indicators/{code}/forecast", response_model=ForecastOut)

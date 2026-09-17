@@ -27,6 +27,7 @@ import {
   absoluteAnchorQualifier,
   comparableMonthExplanation,
   contributionExplanation,
+  currentPhaseForDisplay,
   phaseAxisSummary,
   phasePlainHeadline,
   previousComparableMonth,
@@ -61,7 +62,7 @@ const STATUS_LABELS: Record<BusinessCyclePhaseStatus, string> = {
   candidate: "候选 · 待连续确认",
   transition: "本月可判 · 切换观察",
   held_uncomparable: "本月不可判 · 沿用历史",
-  stale: "连续不可判 · 沿用历史",
+  stale: "连续不可判 · 当前判断已过期",
   insufficient: "本月不可判",
 };
 
@@ -154,7 +155,7 @@ function phaseExplanation(latest: BusinessCycleRegimePoint): string {
       ? ` 当前诊断坐标落在${phaseName(latest.raw_phase)}，但不构成正式切换证据。`
       : "";
     return latest.confirmed_phase
-      ? `同步成分已连续多月不可比，模型暂不更新阶段；当前标签是最近一次有效判断。${diagnostic}`
+      ? `同步成分已连续多月不可比，当前阶段判断已经过期；最近一次确认仅作历史参考。${diagnostic}`
       : `同步成分已连续多月不可比，模型尚未形成正式阶段判断。${diagnostic}`;
   }
   if (latest.phase_status === "candidate" && latest.candidate_phase) {
@@ -427,9 +428,10 @@ export function ChinaBusinessCycleDetail({ data }: { data: BusinessCycleRegimeDa
   const candidateProgress = latest.required_confirmation_months == null
     ? null
     : Math.min(latest.candidate_streak / latest.required_confirmation_months, 1);
+  const currentPhase = currentPhaseForDisplay(latest);
   const breadth = latest.absolute_anchor.breadth;
   const relativeImprovementAbsoluteWeakness =
-    (latest.phase === "recovery" || latest.phase === "expansion") &&
+    (currentPhase === "recovery" || currentPhase === "expansion") &&
     latest.absolute_anchor.state === "contractionary";
   const previousComparable = previousComparableMonth(data.months, latest);
   const headline = regimeHeadline(latest, data.last_decision_period);

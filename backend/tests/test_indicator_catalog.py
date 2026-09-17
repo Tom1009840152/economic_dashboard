@@ -18,7 +18,7 @@ class IndicatorCatalogContractTests(unittest.TestCase):
         catalog = get_indicator_catalog()
         codes = {definition["code"] for definition in INDICATOR_DEFS}
 
-        self.assertEqual(len(INDICATOR_DEFS), 150)
+        self.assertEqual(len(INDICATOR_DEFS), 151)
         self.assertEqual(set(catalog), codes)
         self.assertEqual(len(catalog), len(codes))
 
@@ -64,6 +64,19 @@ class IndicatorCatalogContractTests(unittest.TestCase):
             self.assertTrue(catalog[code].cumulative)
             self.assertEqual(catalog[code].aggregation, "cumulative_ytd")
         self.assertEqual(catalog["EU_ECB"].aggregation, "end_of_period")
+        bok = catalog["KR_BOK"]
+        self.assertEqual(bok.source, "Bank of Korea")
+        self.assertEqual(bok.frequency, "event")
+        self.assertEqual(bok.seasonal_adjustment, "not_applicable")
+        self.assertEqual(bok.measure_type, "rate")
+        self.assertEqual(bok.aggregation, "end_of_period")
+        self.assertFalse(bok.cumulative)
+        self.assertEqual(bok.direction, "contextual")
+        self.assertEqual(bok.transform, "level")
+        self.assertEqual(bok.release_lag_months, 0)
+
+        kr_rows = indicator_catalog(region="KR")
+        self.assertIn("KR_BOK", {row["code"] for row in kr_rows})
 
     def test_catalog_api_payload_exposes_formula_and_modelling_fields(self) -> None:
         rows = indicator_catalog(region="CN")

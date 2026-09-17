@@ -6,8 +6,9 @@ bond 类是国债收益率，同一国家会有多个期限（2Y/5Y/10Y/30Y）+ 
 前端会把同一国家的 bond 指标合并成一张汇总卡，点进去用多线图一起看，
 不像其它指标那样每个单独一张卡——10年-2年利差是经典的衰退先行信号，值得多个期限放在一起看。
 
-韩国目前只有 KOSPI 指数和韩元汇率——akshare 没有免费的韩国 CPI/利率/GDP 接口，
-不是本项目故意漏掉的，日本的GDP同样因为没有免费接口而缺失。
+韩国已补充OECD核心CPI、工业生产、CLI、外汇储备和韩国银行官方基准利率事件历史，
+但总体CPI与GDP仍缺少稳定的持续更新接口；日本GDP同样缺失。缺口会在综合分析里保持为空，
+不用代理值代填。
 
 sort_order 决定看板展示顺序：index/commodity 按品类分组在前后，
 forex 组内按各经济体名义 GDP 排名排序（数据源为中国银行外汇牌价，
@@ -185,6 +186,7 @@ INDICATOR_DEFS = [
     {"code": "KR_IP", "name": "韩国工业生产同比", "category": "macro", "unit": "%", "sort_order": 121, "region": "KR"},
     {"code": "KR_CLI", "name": "韩国综合领先指标", "category": "macro", "unit": "点", "sort_order": 122, "region": "KR"},
     {"code": "KR_RESERVES", "name": "韩国外汇储备", "category": "macro", "unit": "百万美元", "sort_order": 123, "region": "KR"},
+    {"code": "KR_BOK", "name": "韩国银行基准利率", "category": "macro", "unit": "%", "sort_order": 124, "region": "KR"},
 ]
 
 # Keep database-sized source/frequency fields in sync with the richer modelling

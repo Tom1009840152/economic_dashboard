@@ -91,6 +91,24 @@ def _eurostat_series(dataset: str, params: dict[str, str], date_format: str) -> 
     return out.dropna().sort_values("date").reset_index(drop=True)
 
 
+def _calendar_month_yoy(frame: pd.DataFrame) -> pd.DataFrame:
+    """Calculate YoY growth only when the same calendar month exists.
+
+    A positional ``pct_change(12)`` silently compares against a 13-month-old
+    observation when one month is missing from the source history.  Indexing by
+    calendar month makes that gap explicit instead.
+    """
+    out = frame[["date", "value"]].copy()
+    out["_period"] = pd.to_datetime(out["date"], errors="coerce").dt.to_period("M")
+    out["value"] = pd.to_numeric(out["value"], errors="coerce")
+    out = out.dropna(subset=["_period", "value"]).sort_values("date")
+    out = out.drop_duplicates("_period", keep="last")
+    values_by_period = out.set_index("_period")["value"]
+    out["_year_ago"] = (out["_period"] - 12).map(values_by_period)
+    out["value"] = (out["value"] / out["_year_ago"] - 1) * 100
+    return out.dropna(subset=["value"])[["date", "value"]].reset_index(drop=True)
+
+
 def fetch_eu_industrial_production() -> pd.DataFrame:
     """EA21 industrial production index, SA/WDA, converted to year-on-year."""
     out = _eurostat_series(
@@ -104,8 +122,7 @@ def fetch_eu_industrial_production() -> pd.DataFrame:
         },
         "%Y-%m",
     )
-    out["value"] = out["value"].pct_change(12) * 100
-    return out.dropna().reset_index(drop=True)
+    return _calendar_month_yoy(out)
 
 
 def fetch_eu_economic_sentiment() -> pd.DataFrame:

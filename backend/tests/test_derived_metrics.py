@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.db import Base
 from app.fetchers import china_monetary_transmission as transmission
 from app.models import DataPoint, Indicator
+from app.schemas import MonetaryTransmissionDashboardOut
 from app.services.derived_metrics import (
     DERIVED_METRIC_SPECS,
     PBOC_7D_REVERSE_REPO,
@@ -123,14 +124,14 @@ class DerivedMetricTests(unittest.TestCase):
 
     def test_policy_schedule_is_transparent_and_applied_at_month_end(self) -> None:
         periods = pd.PeriodIndex(
-            ["2024-06", "2024-07", "2024-09", "2025-05", "2026-01"],
+            ["2024-06", "2024-07", "2024-09", "2025-05", "2026-08", "2026-09"],
             freq="M",
         )
         result = policy_rate_for_periods(periods)
-        self.assertEqual(result.iloc[:4].tolist(), [1.8, 1.7, 1.5, 1.4])
-        self.assertTrue(pd.isna(result.iloc[4]))
+        self.assertEqual(result.iloc[:5].tolist(), [1.8, 1.7, 1.5, 1.4, 1.4])
+        self.assertTrue(pd.isna(result.iloc[5]))
         self.assertEqual(PBOC_7D_REVERSE_REPO.maintenance, "manual")
-        self.assertEqual(PBOC_7D_REVERSE_REPO.verified_through, dt.date(2025, 12, 26))
+        self.assertEqual(PBOC_7D_REVERSE_REPO.verified_through, dt.date(2026, 9, 17))
         self.assertTrue(PBOC_7D_REVERSE_REPO.source_url.startswith("https://www.pbc.gov.cn/"))
 
 
@@ -223,6 +224,73 @@ class MonetaryTransmissionStoredSeriesTests(unittest.TestCase):
         self.assertAlmostEqual(float(fdr007.iloc[0]), 1.76)
         self.assertAlmostEqual(float(policy_rate.iloc[0]), 1.75)
         self.assertEqual(last_day, "2024-07-23")
+
+    def test_dashboard_keeps_market_policy_and_credit_watermarks_separate(self) -> None:
+        core_cpi = pd.Series(
+            [0.4, 0.5, 0.6],
+            index=pd.PeriodIndex(["2025-10", "2025-11", "2025-12"], freq="M"),
+            dtype="float64",
+        )
+        fdr007 = pd.Series(
+            [1.45, 1.40],
+            index=pd.PeriodIndex(["2025-12", "2026-09"], freq="M"),
+            dtype="float64",
+        )
+        policy_for_liquidity = pd.Series(
+            [1.40, 1.40],
+            index=fdr007.index,
+            dtype="float64",
+        )
+        credit_ratio = pd.Series(
+            [24.0],
+            index=pd.PeriodIndex(["2026-08"], freq="M"),
+            dtype="float64",
+        )
+        credit_impulse = pd.Series(
+            [0.75],
+            index=credit_ratio.index,
+            dtype="float64",
+        )
+        original_cache = transmission._cache
+        transmission._cache = None
+        try:
+            with (
+                patch.object(transmission, "_database_signature", return_value=()),
+                patch.object(transmission, "_database_series", return_value=core_cpi),
+                patch.object(
+                    transmission,
+                    "_fetch_fdr007",
+                    return_value=(fdr007, policy_for_liquidity, "2026-09-16"),
+                ),
+                patch.object(
+                    transmission,
+                    "_credit_metrics_from_database",
+                    return_value=(credit_ratio, credit_impulse, "stored"),
+                ),
+            ):
+                result = transmission.fetch_china_monetary_transmission(object())
+        finally:
+            transmission._cache = original_cache
+
+        self.assertEqual(result["as_of"], "2026-09-16")
+        self.assertEqual(
+            result["freshness"],
+            {
+                "market_observation_date": "2026-09-16",
+                "policy_rate_verified_through": "2026-09-17",
+                "credit_observation_period": "2026-08",
+            },
+        )
+        periods = {signal["key"]: signal["period"] for signal in result["signals"]}
+        self.assertEqual(periods["real_policy_rate"], "2025-12")
+        self.assertEqual(periods["liquidity_gap"], "2026-09")
+        self.assertEqual(periods["credit_impulse"], "2026-08")
+        self.assertEqual(result["status"], "宽货币正向信用传导")
+        policy_series = next(series for series in result["series"] if series["key"] == "policy_rate")
+        self.assertEqual(policy_series["current_value"], 1.4)
+        self.assertEqual(policy_series["effective_date"], "2025-05-08")
+        self.assertEqual(policy_series["catalog_updated_at"], "2026-09-17")
+        MonetaryTransmissionDashboardOut.model_validate(result)
 
 
 if __name__ == "__main__":

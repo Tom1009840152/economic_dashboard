@@ -21,7 +21,7 @@ from app.services.china_business_cycle import (
 )
 
 
-METHODOLOGY_VERSION = "1.1.0"
+METHODOLOGY_VERSION = "1.1.1"
 LEVEL_NEUTRAL = 100.0
 LEVEL_BUFFER = 1.5
 MOMENTUM_BUFFER = 1.5
@@ -29,6 +29,7 @@ SMOOTHING_MONTHS = 3
 MOMENTUM_COMPARISON_MONTHS = 3
 CONFIRMATION_WITH_LEADING = 2
 CONFIRMATION_WITHOUT_LEADING = 3
+CURRENT_PHASE_MAX_CARRY_MONTHS = 1
 INFLATION_MOMENTUM_BUFFER = 0.2
 ROLE_MIN_COVERAGE = 0.65
 ROLE_HIGH_COVERAGE = 0.85
@@ -763,6 +764,19 @@ def _advance_tracker(
     # confirmation, an ineligible month must remain unclassified instead of
     # leaking raw_phase into the headline.
     phase = tracker.confirmed_phase or tracker.candidate_phase
+    # ``phase`` remains the historical/display state used by published
+    # backtests. ``current_phase`` answers the narrower product question:
+    # whether that confirmed state is still a current interpretation. One
+    # missing comparable month gets a grace period; a stale run does not.
+    current_phase = (
+        tracker.confirmed_phase
+        if tracker.confirmed_phase is not None
+        and (
+            decision_eligible
+            or tracker.undecidable_streak <= CURRENT_PHASE_MAX_CARRY_MONTHS
+        )
+        else None
+    )
     duration = (
         _month_distance(period, tracker.confirmed_since) + 1
         if tracker.confirmed_phase and tracker.confirmed_since
@@ -770,6 +784,7 @@ def _advance_tracker(
     )
     return {
         "phase": phase,
+        "current_phase": current_phase,
         "phase_status": status,
         "phase_basis": _phase_basis(status),
         "confirmed": tracker.confirmed_phase is not None,
@@ -1136,28 +1151,44 @@ def _drivers(month: dict, positive: bool, limit: int = 20) -> list[dict]:
 
 
 def _summary(
-    phase: Phase | None,
+    current_phase: Phase | None,
     status: str,
     candidate: Phase | None,
     raw_phase: Phase | None,
     anchor: dict,
+    *,
+    confirmed_phase: Phase | None,
 ) -> str:
-    if phase is None:
-        return "相对增长周期所需的同成分水平与动能不足，暂不判定阶段。"
-    phase_text = PHASE_LABELS[phase]
-    if status == "transition" and candidate:
-        base = f"当前确认的相对增长周期仍为{phase_text}，正在观察向{PHASE_LABELS[candidate]}切换。"
-    elif status == "candidate":
-        base = f"{phase_text}是尚待连续月份确认的相对增长周期候选。"
-    elif status in {"held_uncomparable", "stale"}:
-        base = f"相对增长周期暂沿用{phase_text}，但近期成分不可比，阶段没有切换。"
-        if raw_phase is not None and raw_phase != phase:
+    if status == "stale":
+        base = (
+            f"当前相对增长阶段不可判断。最近一次确认阶段为{PHASE_LABELS[confirmed_phase]}，仅作历史参考。"
+            if confirmed_phase
+            else "当前相对增长阶段不可判断，且尚无历史确认阶段。"
+        )
+        if raw_phase is not None and raw_phase != confirmed_phase:
             base += (
                 f"当前诊断坐标落在{PHASE_LABELS[raw_phase]}，"
                 "仅作方向提示，不构成正式切换证据。"
             )
+    elif status == "held_uncomparable" and current_phase:
+        base = (
+            f"本月口径不可比，相对增长阶段暂时沿用{PHASE_LABELS[current_phase]}一次；"
+            "本月不形成新判断。"
+        )
+        if raw_phase is not None and raw_phase != current_phase:
+            base += (
+                f"当前诊断坐标落在{PHASE_LABELS[raw_phase]}，"
+                "仅作方向提示，不构成正式切换证据。"
+            )
+    elif status == "candidate" and candidate:
+        base = f"{PHASE_LABELS[candidate]}是尚待连续月份确认的相对增长周期候选。"
+    elif current_phase is None:
+        base = "相对增长周期所需的同成分水平与动能不足，暂不判定阶段。"
+    elif status == "transition" and candidate:
+        phase_text = PHASE_LABELS[current_phase]
+        base = f"当前确认的相对增长周期仍为{phase_text}，正在观察向{PHASE_LABELS[candidate]}切换。"
     else:
-        base = f"当前确认的相对增长周期处于{phase_text}。"
+        base = f"当前确认的相对增长周期处于{PHASE_LABELS[current_phase]}。"
     anchor_text = {
         "expansionary": "绝对荣枯锚整体位于扩张侧。",
         "contractionary": "绝对荣枯锚整体位于收缩侧。",
@@ -1368,7 +1399,7 @@ def _build_regime_from_matrix(
             if include_explanations
             else None
         )
-        anchor = _absolute_anchor(source_months, index, state["phase"])
+        anchor = _absolute_anchor(source_months, index, state["current_phase"])
         recent_two = bool(
             index >= 2
             and all(
@@ -1391,17 +1422,18 @@ def _build_regime_from_matrix(
             undecidable_streak=state["undecidable_streak"],
         )
         summary = _summary(
-            state["phase"],
+            state["current_phase"],
             state["phase_status"],
             state["candidate_phase"],
             raw,
             anchor,
+            confirmed_phase=state["confirmed_phase"],
         )
         outlook = _outlook(
             lead_direction,
             state["leading_confirmation"],
             candidate_phase=state["candidate_phase"],
-            confirmed_phase=state["confirmed_phase"],
+            confirmed_phase=state["current_phase"],
         )
         computed.append(
             {
@@ -1471,7 +1503,7 @@ def _build_regime_from_matrix(
                 "summary": summary,
                 "outlook": outlook,
                 "triggers": _triggers(
-                    phase=state["phase"],
+                    phase=state["current_phase"],
                     candidate=state["candidate_phase"],
                     candidate_streak=state["candidate_streak"],
                     required=state["required_confirmation_months"],
@@ -1506,7 +1538,7 @@ def _build_regime_from_matrix(
             "level_gap": row["level_gap"],
             "momentum_3m": row["momentum_3m"],
             "diagnostic_momentum_3m": row["diagnostic_momentum_3m"],
-            "phase": row["phase"],
+            "phase": row["current_phase"],
             "phase_status": row["phase_status"],
             "comparable": row["coincident_comparable"],
         }
@@ -1523,8 +1555,10 @@ def _build_regime_from_matrix(
     ]
     if latest and latest["absolute_anchor"]["conflict"]:
         warnings.append("最新相对周期阶段与绝对荣枯锚冲突，置信度已下调。")
-    if latest and latest["phase_status"] in {"held_uncomparable", "stale"}:
-        warnings.append("最新月份成分不可比，阶段仅沿用上次确认结果。")
+    if latest and latest["phase_status"] == "held_uncomparable":
+        warnings.append("最新月份成分不可比，当前阶段仅暂时沿用上次确认结果一次。")
+    elif latest and latest["phase_status"] == "stale":
+        warnings.append("最新月份已连续至少两个月不可判，当前阶段判断已过期；旧阶段仅作历史参考。")
     return {
         "region": "CN",
         "country": "中国",
@@ -1541,6 +1575,7 @@ def _build_regime_from_matrix(
             "相邻象限可双向切换，领先同向需连续2个可决策月；对角跨越或领先未确认需3个月，且不回填。"
             "领先方向只按共同面板LM3判断；共同篮子变化会立即清空未确认候选。"
             "A5b按同一有效权重逐项分解水平缺口和动能，并执行严格加总校验。"
+            "current_phase最多跨一个不可判月；连续至少两个月不可判时置空，旧phase只作历史兼容。"
         ),
         "methodology": _methodology(),
         "change_conditions": _change_conditions(),
@@ -1555,13 +1590,15 @@ def _build_regime_from_matrix(
 
 def _timeline(months: list[dict], as_of: str | None) -> list[dict]:
     spans = []
+    active_span: int | None = None
     for month in months:
         if as_of is not None and month["period"] > as_of:
             continue
-        phase = month.get("confirmed_phase")
+        phase = month.get("current_phase")
         if phase is None:
+            active_span = None
             continue
-        if not spans or spans[-1]["phase"] != phase:
+        if active_span is None or spans[active_span]["phase"] != phase:
             spans.append(
                 {
                     "phase": phase,
@@ -1572,12 +1609,21 @@ def _timeline(months: list[dict], as_of: str | None) -> list[dict]:
                     "ongoing": False,
                 }
             )
+            active_span = len(spans) - 1
         else:
-            spans[-1]["end_period"] = month["period"]
-            spans[-1]["duration_months"] = _month_distance(
-                month["period"], spans[-1]["start_period"]
+            spans[active_span]["end_period"] = month["period"]
+            spans[active_span]["duration_months"] = _month_distance(
+                month["period"], spans[active_span]["start_period"]
             ) + 1
-    if spans and as_of and spans[-1]["end_period"] >= as_of:
+    latest_current_phase = next(
+        (
+            month.get("current_phase")
+            for month in reversed(months)
+            if as_of is None or month["period"] <= as_of
+        ),
+        None,
+    )
+    if spans and as_of and latest_current_phase is not None and spans[-1]["end_period"] >= as_of:
         spans[-1]["end_period"] = as_of
         spans[-1]["duration_months"] = _month_distance(as_of, spans[-1]["start_period"]) + 1
         spans[-1]["ongoing"] = True
@@ -1596,6 +1642,7 @@ def _methodology() -> dict:
         "momentum_buffer": MOMENTUM_BUFFER,
         "confirmation_months_with_leading": CONFIRMATION_WITH_LEADING,
         "confirmation_months_without_leading": CONFIRMATION_WITHOUT_LEADING,
+        "current_phase_max_carry_months": CURRENT_PHASE_MAX_CARRY_MONTHS,
         "phase_order": list(PHASES),
         "role_comparability": "rolling six-month common-signal panel with fixed normalized weights",
         "balanced_panel_months": BALANCED_PANEL_MONTHS,
@@ -1621,6 +1668,7 @@ def _change_conditions() -> list[str]:
         "领先方向与候选阶段一致时需连续2个可决策月，否则需连续3个月。",
         "相邻象限允许双向切换；若两个轴同时翻转到对角阶段，保留真实候选但至少连续3个月确认。",
         "成分不可比或换篮子月立即清空未确认候选；下一可决策月从第1个月重新累计，也不会给出确定切换日期。",
+        "首个连续不可判月最多暂时沿用一次当前阶段；从第2个月起 current_phase 置空，旧 phase 仅保留用于历史展示与回测兼容。",
     ]
 
 

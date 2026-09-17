@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import UTC, date, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -17,6 +17,14 @@ from app.models import RefreshResult, RefreshRun
 router = APIRouter(prefix="/api/refresh", tags=["refresh"])
 
 
+def _as_utc(value: datetime | None) -> datetime | None:
+    """The database stores refresh timestamps as naive UTC; expose that fact."""
+
+    if value is None or value.tzinfo is not None:
+        return value
+    return value.replace(tzinfo=UTC)
+
+
 class RefreshResultOut(BaseModel):
     indicator_code: str
     status: str
@@ -26,6 +34,7 @@ class RefreshResultOut(BaseModel):
     started_at: datetime
     finished_at: datetime
     last_success_at: datetime | None = None
+    source_verified_through: date | None = None
     error: str | None = None
     quality_issues: list[dict]
 
@@ -65,9 +74,10 @@ def _result_out(result: RefreshResult) -> RefreshResultOut:
         row_count=result.row_count,
         changed_count=result.changed_count,
         duration_ms=result.duration_ms,
-        started_at=result.started_at,
-        finished_at=result.finished_at,
-        last_success_at=result.last_success_at,
+        started_at=_as_utc(result.started_at),
+        finished_at=_as_utc(result.finished_at),
+        last_success_at=_as_utc(result.last_success_at),
+        source_verified_through=result.source_verified_through,
         error=result.error,
         quality_issues=issues,
     )
@@ -78,8 +88,8 @@ def _run_out(run: RefreshRun) -> RefreshRunOut:
         id=run.id,
         trigger=run.trigger,
         status=run.status,
-        started_at=run.started_at,
-        finished_at=run.finished_at,
+        started_at=_as_utc(run.started_at),
+        finished_at=_as_utc(run.finished_at),
         total_indicators=run.total_indicators,
         success_count=run.success_count,
         no_change_count=run.no_change_count,

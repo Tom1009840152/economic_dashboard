@@ -55,13 +55,14 @@ export const COUNTRY_SECTIONS: Array<{
 ];
 
 const DATA_SECTIONS = COUNTRY_SECTIONS.filter((section) => section.slug !== "analysis");
+const ANALYSIS_REGIONS = new Set<CountryRegion>(["cn", "us", "jp", "eu", "uk", "kr"]);
 
 export function sectionsForRegion(region: CountryRegion) {
-  return region === "cn" ? COUNTRY_SECTIONS : DATA_SECTIONS;
+  return ANALYSIS_REGIONS.has(region) ? COUNTRY_SECTIONS : DATA_SECTIONS;
 }
 
 export function defaultSectionForRegion(region: CountryRegion): CountrySectionSlug {
-  return region === "cn" ? "analysis" : "growth";
+  return ANALYSIS_REGIONS.has(region) ? "analysis" : "growth";
 }
 
 const SPECIAL_INDICATOR_REGIONS: Record<string, CountryRegion> = {
@@ -107,7 +108,7 @@ export function countrySectionForIndicator(
   if (code === "US_NFP") return { region, section: "people" };
   if (
     code === "CN_TSF" ||
-    /_(?:FFR|BOJ|BOJ_ASSETS|ECB|ECB_ASSETS|BOE|M3)$/.test(code) ||
+    /_(?:FFR|BOJ|BOJ_ASSETS|ECB|ECB_ASSETS|BOE|BOK|M3)$/.test(code) ||
     /_(?:M0|M1|M2|BASE)(?:_|$)/.test(code) ||
     /_(?:2Y|5Y|10Y|30Y|10Y2Y)$/.test(code)
   ) {
@@ -145,7 +146,10 @@ export function countrySectionForPath(
         : "monetary",
     };
   }
-  if (pathname.startsWith("/analysis/cn/")) return { region: "cn", section: "analysis" };
+  const analysisMatch = pathname.match(/^\/analysis\/(cn|us|jp|eu|uk|kr)\//);
+  if (analysisMatch) {
+    return { region: analysisMatch[1] as CountryRegion, section: "analysis" };
+  }
   if (pathname.startsWith("/topics/cny-jpy")) return { region: "jp", section: "markets" };
 
   const indicatorMatch = pathname.match(/^\/indicators\/([^/]+)/);

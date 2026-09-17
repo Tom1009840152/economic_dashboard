@@ -152,10 +152,10 @@ PBOC_7D_REVERSE_REPO = PolicyRateSchedule(
     source_name="中国人民银行公开市场业务交易公告",
     source_url=(
         "https://www.pbc.gov.cn/zhengcehuobisi/125207/125213/125431/125475/"
-        "2025122608571540479/index.html"
+        "2026091708554047079/index.html"
     ),
-    verified_through=date(2025, 12, 26),
-    catalog_updated_at=date(2026, 9, 13),
+    verified_through=date(2026, 9, 17),
+    catalog_updated_at=date(2026, 9, 17),
     changes=(
         PolicyRateChange(
             effective_date=date(2024, 1, 1),

@@ -288,6 +288,30 @@ def _error_text(exc: BaseException, limit: int = 4000) -> str:
     return f"{type(exc).__name__}: {exc}"[:limit]
 
 
+def _source_verified_through(frame: pd.DataFrame) -> date | None:
+    """Validate an optional source-side verification watermark from a fetcher."""
+
+    raw = frame.attrs.get("verified_through")
+    if raw is None:
+        return None
+    try:
+        verified = _optional_date(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("source verified_through is not a valid date") from exc
+    if verified is None:
+        raise ValueError("source verified_through is empty")
+    if verified > date.today():
+        raise ValueError("source verified_through is in the future")
+    observed_dates = [
+        parsed
+        for value in frame.get("date", [])
+        if (parsed := _optional_date(value)) is not None
+    ]
+    if observed_dates and verified < max(observed_dates):
+        raise ValueError("source verified_through precedes the latest observation")
+    return verified
+
+
 def _record_refresh_result(
     db: Session,
     *,
@@ -300,6 +324,7 @@ def _record_refresh_result(
     started_at: datetime,
     finished_at: datetime,
     previous_success_at: datetime | None,
+    source_verified_through: date | None = None,
     error: str | None = None,
     quality_report: QualityReport | None = None,
 ) -> None:
@@ -315,6 +340,7 @@ def _record_refresh_result(
             started_at=started_at,
             finished_at=finished_at,
             last_success_at=last_success_at,
+            source_verified_through=source_verified_through,
             error=error,
             quality_issues=quality_report.issues_json() if quality_report else None,
         )
@@ -356,6 +382,7 @@ def refresh_all_indicators(
         previous = _last_success(db, code)
         try:
             frame = fetcher()
+            source_verified_through = _source_verified_through(frame)
             report = validate_indicator_frame(
                 db,
                 code,
@@ -366,6 +393,7 @@ def refresh_all_indicators(
         except Exception as exc:
             frame = None
             report = None
+            source_verified_through = None
             error = exc
         fetch_duration_ms = round((time.perf_counter() - started_clock) * 1000)
         attempts[code] = {
@@ -375,6 +403,7 @@ def refresh_all_indicators(
             "started_at": started_at,
             "fetch_duration_ms": fetch_duration_ms,
             "previous_success_at": previous.last_success_at if previous else None,
+            "source_verified_through": source_verified_through,
         }
 
     # This check must see all three frames together; it catches a known upstream
@@ -436,6 +465,11 @@ def refresh_all_indicators(
                 started_at=attempt["started_at"],
                 finished_at=finished_at,
                 previous_success_at=attempt["previous_success_at"],
+                source_verified_through=(
+                    attempt["source_verified_through"]
+                    if status in {"success", "no_change"}
+                    else None
+                ),
                 error=error_message,
                 quality_report=report,
             )
