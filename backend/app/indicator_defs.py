@@ -131,6 +131,17 @@ INDICATOR_DEFS = [
     {"code": "CN_CONSUMER_SATISFACTION", "name": "消费者满意指数", "category": "cycle_input", "unit": "点", "source": "eastmoney", "frequency": "monthly", "is_visible": False, "sort_order": 261, "region": "CN"},
     {"code": "CN_CONSUMER_EXPECTATIONS", "name": "消费者预期指数", "category": "cycle_input", "unit": "点", "source": "eastmoney", "frequency": "monthly", "is_visible": False, "sort_order": 262, "region": "CN"},
     {"code": "CN_ENTERPRISE_BOOM", "name": "企业景气指数", "category": "cycle_input", "unit": "点", "source": "eastmoney", "frequency": "quarterly", "is_visible": False, "sort_order": 263, "region": "CN"},
+    # 自研辅助观察指标第一组：PortWatch 集装箱航运脉冲。这里先保存官方30日均值同比
+    # 分量并保留抓取vintage，不急于合成总指数；shipment仅等于集装箱进出口合计，不能
+    # 误称为全部海运货量。专属观测站负责把数量、咽喉通行和未来运价层分开展示。
+    {"code": "PW_WLD_CNTR_SHIP_30D_YOY", "name": "全球集装箱装卸量30日均值同比", "category": "alternative_input", "unit": "%", "source": "IMF PortWatch", "frequency": "daily", "is_visible": False, "sort_order": 300, "region": "GLOBAL"},
+    {"code": "PW_WLD_CNTR_CALLS_30D_YOY", "name": "全球集装箱船靠港30日均值同比", "category": "alternative_input", "unit": "%", "source": "IMF PortWatch", "frequency": "daily", "is_visible": False, "sort_order": 301, "region": "GLOBAL"},
+    {"code": "PW_WLD_CNTR_IMPORT_30D_YOY", "name": "全球集装箱进口到港30日均值同比", "category": "alternative_input", "unit": "%", "source": "IMF PortWatch", "frequency": "daily", "is_visible": False, "sort_order": 302, "region": "GLOBAL"},
+    {"code": "PW_WLD_CNTR_EXPORT_30D_YOY", "name": "全球集装箱出口装船30日均值同比", "category": "alternative_input", "unit": "%", "source": "IMF PortWatch", "frequency": "daily", "is_visible": False, "sort_order": 303, "region": "GLOBAL"},
+    {"code": "PW_CHN_CNTR_SHIP_30D_YOY", "name": "中国集装箱装卸量30日均值同比", "category": "alternative_input", "unit": "%", "source": "IMF PortWatch", "frequency": "daily", "is_visible": False, "sort_order": 304, "region": "CN"},
+    {"code": "PW_CHN_CNTR_CALLS_30D_YOY", "name": "中国集装箱船靠港30日均值同比", "category": "alternative_input", "unit": "%", "source": "IMF PortWatch", "frequency": "daily", "is_visible": False, "sort_order": 305, "region": "CN"},
+    {"code": "PW_CHN_CNTR_IMPORT_30D_YOY", "name": "中国集装箱进口到港30日均值同比", "category": "alternative_input", "unit": "%", "source": "IMF PortWatch", "frequency": "daily", "is_visible": False, "sort_order": 306, "region": "CN"},
+    {"code": "PW_CHN_CNTR_EXPORT_30D_YOY", "name": "中国集装箱出口装船30日均值同比", "category": "alternative_input", "unit": "%", "source": "IMF PortWatch", "frequency": "daily", "is_visible": False, "sort_order": 307, "region": "CN"},
     {"code": "US_CPI", "name": "美国CPI同比", "category": "macro", "unit": "%", "sort_order": 70, "region": "US"},
     {"code": "US_CORE_CPI", "name": "美国核心CPI同比", "category": "macro", "unit": "%", "sort_order": 71, "region": "US"},
     {"code": "US_IP", "name": "美国工业生产同比", "category": "macro", "unit": "%", "sort_order": 72, "region": "US"},

@@ -1372,3 +1372,139 @@ export function getChinaBusinessCycleBacktestAttribution(
   const query = new URLSearchParams({ period });
   return apiFetch(`/api/analysis/cn/business-cycle/backtest/attribution?${query}`);
 }
+
+export type MaritimeMetricState = "stronger" | "steady" | "weaker" | "unavailable";
+export type MaritimeChokepointState = "above" | "normal" | "below" | "unavailable";
+export type MaritimeLayerStatus = "available" | "pilot" | "planned";
+
+export interface MaritimeMetric {
+  key: string;
+  label: string;
+  value: number | null;
+  unit: string;
+  comparison_value: number | null;
+  yoy_pct: number | null;
+  state: MaritimeMetricState;
+  coverage: number;
+  interpretation: string;
+}
+
+export interface MaritimeTrendPoint {
+  date: string;
+  world_flow_yoy: number | null;
+  country_exports_yoy: number | null;
+  country_inputs_yoy: number | null;
+}
+
+export interface MaritimeCountryOption {
+  code: string;
+  name: string;
+  kind: "country" | "region";
+}
+
+export interface MaritimeVesselMix {
+  key: string;
+  label: string;
+  current_daily_mn_t: number | null;
+  yoy_pct: number | null;
+  share_pct: number | null;
+}
+
+export interface MaritimeChokepoint {
+  key: string;
+  name: string;
+  current_daily_calls: number | null;
+  current_daily_capacity_mn_t: number | null;
+  yoy_pct: number | null;
+  coverage: number;
+  state: MaritimeChokepointState;
+}
+
+export interface MaritimeLayer {
+  key: "quantity" | "congestion" | "price";
+  title: string;
+  status: MaritimeLayerStatus;
+  detail: string;
+}
+
+export interface MaritimeSource {
+  name: string;
+  url: string;
+  description: string;
+  update_frequency: string;
+  access_level: string;
+}
+
+export interface MaritimeObservatoryDashboard {
+  title: string;
+  status: "ok" | "partial" | "unavailable";
+  as_of: string | null;
+  source_history_start: string | null;
+  trend_start: string | null;
+  freshness: "current" | "stale" | "missing";
+  window_days: number;
+  comparison_days: number;
+  methodology_version: string;
+  realtime_ready: false;
+  selected_country_code: string;
+  selected_country_name: string;
+  available_countries: MaritimeCountryOption[];
+  headline: string;
+  metrics: MaritimeMetric[];
+  trend: MaritimeTrendPoint[];
+  vessel_mix: MaritimeVesselMix[];
+  chokepoints: MaritimeChokepoint[];
+  layers: MaritimeLayer[];
+  sources: MaritimeSource[];
+  warnings: string[];
+}
+
+export function getMaritimeObservatory(
+  country = "CHN",
+): Promise<MaritimeObservatoryDashboard> {
+  const query = new URLSearchParams({ country });
+  return apiFetch(`/api/observatory/maritime?${query}`);
+}
+
+export interface MaritimeComparisonPoint {
+  date: string;
+  container_yoy: number | null;
+  exports_yoy: number | null;
+  inputs_yoy: number | null;
+}
+
+export interface MaritimeGlobalTrendPoint {
+  date: string;
+  container_yoy: number | null;
+}
+
+export interface MaritimeComparisonSeries {
+  code: string;
+  name: string;
+  kind: "country" | "region";
+  latest_container_yoy: number | null;
+  latest_exports_yoy: number | null;
+  latest_inputs_yoy: number | null;
+  points: MaritimeComparisonPoint[];
+}
+
+export interface MaritimeComparisonDashboard {
+  status: "ok" | "partial";
+  as_of: string;
+  source_history_start: string;
+  trend_start: string | null;
+  freshness: "current" | "stale" | "missing";
+  window_days: number;
+  comparison_days: number;
+  methodology_version: string;
+  global_trend: MaritimeGlobalTrendPoint[];
+  series: MaritimeComparisonSeries[];
+  warnings: string[];
+}
+
+export function getMaritimeComparison(
+  geographies: string[],
+): Promise<MaritimeComparisonDashboard> {
+  const query = new URLSearchParams({ geographies: geographies.join(",") });
+  return apiFetch(`/api/observatory/maritime/comparison?${query}`);
+}

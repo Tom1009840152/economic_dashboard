@@ -18,7 +18,8 @@ class IndicatorCatalogContractTests(unittest.TestCase):
         catalog = get_indicator_catalog()
         codes = {definition["code"] for definition in INDICATOR_DEFS}
 
-        self.assertEqual(len(INDICATOR_DEFS), 151)
+        self.assertEqual(len(INDICATOR_DEFS), 159)
+        self.assertEqual(len(INDICATOR_DEFS), len(codes))
         self.assertEqual(set(catalog), codes)
         self.assertEqual(len(catalog), len(codes))
 
@@ -50,6 +51,23 @@ class IndicatorCatalogContractTests(unittest.TestCase):
         self.assertIn("结构断点", catalog["US_M1_ABS"].notes)
         self.assertIn("不是货币供应量", catalog["KR_RESERVES"].notes)
         self.assertIn("并不准确", catalog["US_GDP"].notes)
+
+    def test_portwatch_pulses_remain_contextual_before_validation(self) -> None:
+        catalog = get_indicator_catalog()
+        codes = {
+            code for code in catalog if code.startswith("PW_")
+        }
+
+        self.assertEqual(len(codes), 8)
+        for code in codes:
+            with self.subTest(code=code):
+                entry = catalog[code]
+                self.assertEqual(entry.source, "IMF PortWatch")
+                self.assertEqual(entry.frequency, "daily")
+                self.assertEqual(entry.measure_type, "yoy")
+                self.assertEqual(entry.transform, "yoy")
+                self.assertEqual(entry.direction, "contextual")
+                self.assertEqual((entry.valid_min, entry.valid_max), (-100.0, 1000.0))
 
     def test_representative_economic_semantics_are_not_just_enum_valid(self) -> None:
         catalog = get_indicator_catalog()

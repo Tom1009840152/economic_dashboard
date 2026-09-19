@@ -13,6 +13,7 @@ from app.routers import (
     forecast,
     forex,
     indicators,
+    observatory,
     population,
     refresh_status,
 )
@@ -38,6 +39,7 @@ app.include_router(employment.router)
 app.include_router(analysis.router)
 app.include_router(as_of.router)
 app.include_router(refresh_status.router)
+app.include_router(observatory.router)
 
 
 @app.on_event("startup")

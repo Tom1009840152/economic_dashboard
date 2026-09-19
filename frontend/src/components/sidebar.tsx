@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState } from "react";
-import { ChevronDown, Database } from "lucide-react";
+import { ChevronDown, Database, Ship } from "lucide-react";
 import {
   COUNTRY_REGIONS,
   countrySectionForPath,
@@ -18,6 +18,7 @@ export function Sidebar() {
   const sourceRegionMatch = pathname.match(/^\/data-sources\/(cn|us|jp|eu|uk|kr|global)$/);
   const sourceRegion = sourceRegionMatch?.[1] as DataSourceRegion | undefined;
   const sourcesActive = sourceRegion !== undefined || pathname === "/data-sources";
+  const maritimeActive = pathname === "/observatory/maritime";
   const activeContext = countrySectionForPath(pathname);
   const sourceHrefRegion = sourceRegion
     ?? activeContext?.region
@@ -116,6 +117,22 @@ export function Sidebar() {
           })}
 
           <li className="shrink-0 sm:mt-4 sm:border-t sm:border-zinc-200 sm:pt-4 dark:sm:border-zinc-800">
+            <Link
+              href="/observatory/maritime"
+              aria-current={maritimeActive ? "page" : undefined}
+              className={`flex items-center gap-2 whitespace-nowrap rounded-md border px-3 py-2 text-sm transition-colors ${
+                maritimeActive
+                  ? "border-sky-800 bg-sky-800 text-white shadow-sm dark:border-sky-300 dark:bg-sky-300 dark:text-sky-950"
+                  : "border-sky-200 bg-sky-50 text-sky-800 hover:border-sky-300 hover:bg-sky-100 dark:border-sky-900 dark:bg-sky-950/50 dark:text-sky-200 dark:hover:bg-sky-900/70"
+              }`}
+              onClick={() => setExpansion({ pathname, region: null })}
+            >
+              <Ship aria-hidden="true" className="size-3.5" />
+              全球海运观察
+            </Link>
+          </li>
+
+          <li className="shrink-0 sm:mt-1">
             <Link
               href={sourceHref}
               aria-current={sourcesActive ? "page" : undefined}

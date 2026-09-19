@@ -171,6 +171,16 @@ export const SOURCE_REGISTRY: SourceRegistryEntry[] = [
     caveat: "国际数据库可能晚于各国首次发布，并会随来源修订历史值。",
   },
   {
+    key: "IMF PortWatch",
+    label: "IMF PortWatch",
+    institution: "国际货币基金组织 / UN Global Platform",
+    kind: "international",
+    url: "https://portwatch.imf.org/pages/trade-monitor",
+    access: "公开网页与ArcGIS聚合接口；本项目按public_limited管理",
+    description: "覆盖日度集装箱靠港、估算进出口吨位及主要咽喉水道通行，用于全球海运观察站的高频方向判断。",
+    caveat: "AIS与吃水估算不是海关全口径；受覆盖、船舶分类、转运和历史修订影响。商业再利用或批量再分发前仍需核实IMF与底层第三方数据条款。",
+  },
+  {
     key: "FRED",
     label: "FRED",
     institution: "Federal Reserve Bank of St. Louis",

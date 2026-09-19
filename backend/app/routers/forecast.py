@@ -30,6 +30,11 @@ def get_forecast(
             status_code=422,
             detail="event-driven policy rates are not suitable for mechanical ARIMA forecasts",
         )
+    if code.startswith("PW_"):
+        raise HTTPException(
+            status_code=422,
+            detail="rolling PortWatch pulses are observation signals, not suitable for mechanical ARIMA forecasts",
+        )
 
     query = select(DataPoint).where(DataPoint.indicator_code == code)
     query = constrain_current_series(query, code).order_by(DataPoint.date)

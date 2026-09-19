@@ -559,6 +559,129 @@ class KRMacroOverviewOut(BaseModel):
     warnings: list[str]
 
 
+MaritimeStatus = Literal["ok", "partial", "unavailable"]
+MaritimeFreshness = Literal["current", "stale", "missing"]
+MaritimeSignalState = Literal["stronger", "steady", "weaker", "unavailable"]
+
+
+class MaritimeMetricOut(BaseModel):
+    key: str
+    label: str
+    value: float | None = None
+    unit: str
+    comparison_value: float | None = None
+    yoy_pct: float | None = None
+    state: MaritimeSignalState
+    coverage: float
+    interpretation: str
+
+
+class MaritimeTrendPointOut(BaseModel):
+    date: str
+    world_flow_yoy: float | None = None
+    country_exports_yoy: float | None = None
+    country_inputs_yoy: float | None = None
+
+
+class MaritimeCountryOptionOut(BaseModel):
+    code: str
+    name: str
+    kind: Literal["country", "region"]
+
+
+class MaritimeVesselMixOut(BaseModel):
+    key: str
+    label: str
+    current_daily_mn_t: float | None = None
+    yoy_pct: float | None = None
+    share_pct: float | None = None
+
+
+class MaritimeChokepointOut(BaseModel):
+    key: str
+    name: str
+    current_daily_calls: float | None = None
+    current_daily_capacity_mn_t: float | None = None
+    yoy_pct: float | None = None
+    coverage: float
+    state: Literal["above", "normal", "below", "unavailable"]
+
+
+class MaritimeEvidenceLayerOut(BaseModel):
+    key: Literal["quantity", "congestion", "price"]
+    title: str
+    status: Literal["available", "pilot", "planned"]
+    detail: str
+
+
+class MaritimeSourceOut(BaseModel):
+    name: str
+    url: str
+    description: str
+    update_frequency: str
+    access_level: str
+
+
+class MaritimeObservatoryOut(BaseModel):
+    title: str
+    status: MaritimeStatus
+    as_of: str | None = None
+    source_history_start: str | None = None
+    trend_start: str | None = None
+    freshness: MaritimeFreshness
+    window_days: int
+    comparison_days: int
+    methodology_version: str
+    realtime_ready: Literal[False]
+    selected_country_code: str
+    selected_country_name: str
+    available_countries: list[MaritimeCountryOptionOut]
+    headline: str
+    metrics: list[MaritimeMetricOut]
+    trend: list[MaritimeTrendPointOut]
+    vessel_mix: list[MaritimeVesselMixOut]
+    chokepoints: list[MaritimeChokepointOut]
+    layers: list[MaritimeEvidenceLayerOut]
+    sources: list[MaritimeSourceOut]
+    warnings: list[str]
+
+
+class MaritimeComparisonPointOut(BaseModel):
+    date: str
+    container_yoy: float | None = None
+    exports_yoy: float | None = None
+    inputs_yoy: float | None = None
+
+
+class MaritimeGlobalTrendPointOut(BaseModel):
+    date: str
+    container_yoy: float | None = None
+
+
+class MaritimeComparisonSeriesOut(BaseModel):
+    code: str
+    name: str
+    kind: Literal["country", "region"]
+    latest_container_yoy: float | None = None
+    latest_exports_yoy: float | None = None
+    latest_inputs_yoy: float | None = None
+    points: list[MaritimeComparisonPointOut]
+
+
+class MaritimeComparisonOut(BaseModel):
+    status: Literal["ok", "partial"]
+    as_of: str
+    source_history_start: str
+    trend_start: str | None = None
+    freshness: MaritimeFreshness
+    window_days: int
+    comparison_days: int
+    methodology_version: str
+    global_trend: list[MaritimeGlobalTrendPointOut]
+    series: list[MaritimeComparisonSeriesOut]
+    warnings: list[str]
+
+
 class AnalysisPointOut(BaseModel):
     period: str
     value: float

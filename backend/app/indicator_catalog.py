@@ -143,6 +143,18 @@ _SOURCE_GROUPS: Mapping[str, frozenset[str]] = {
     "UK ONS": frozenset({"GB_CPI", "GB_CORE_CPI", "GB_IP", "GB_GDP"}),
     "Bank of England": frozenset({"GB_BOE"}),
     "Bank of Korea": frozenset({"KR_BOK"}),
+    "IMF PortWatch": frozenset(
+        {
+            "PW_WLD_CNTR_SHIP_30D_YOY",
+            "PW_WLD_CNTR_CALLS_30D_YOY",
+            "PW_WLD_CNTR_IMPORT_30D_YOY",
+            "PW_WLD_CNTR_EXPORT_30D_YOY",
+            "PW_CHN_CNTR_SHIP_30D_YOY",
+            "PW_CHN_CNTR_CALLS_30D_YOY",
+            "PW_CHN_CNTR_IMPORT_30D_YOY",
+            "PW_CHN_CNTR_EXPORT_30D_YOY",
+        }
+    ),
 }
 
 
@@ -153,6 +165,10 @@ _DAILY_CODES = frozenset(
         "CHFCNY", "SEKCNY", "THBCNY", "SGDCNY", "NOKCNY", "CN_2Y", "CN_5Y",
         "CN_10Y", "CN_30Y", "CN_10Y2Y", "US_2Y", "US_5Y", "US_10Y", "US_30Y",
         "US_10Y2Y",
+        "PW_WLD_CNTR_SHIP_30D_YOY", "PW_WLD_CNTR_CALLS_30D_YOY",
+        "PW_WLD_CNTR_IMPORT_30D_YOY", "PW_WLD_CNTR_EXPORT_30D_YOY",
+        "PW_CHN_CNTR_SHIP_30D_YOY", "PW_CHN_CNTR_CALLS_30D_YOY",
+        "PW_CHN_CNTR_IMPORT_30D_YOY", "PW_CHN_CNTR_EXPORT_30D_YOY",
     }
 )
 _WEEKLY_CODES = frozenset({"CN_HOG", "EU_ECB_ASSETS"})
@@ -256,6 +272,14 @@ _NOTES: Mapping[str, str] = {
     "EU_ECB_ASSETS": "欧央行周度金融报表总资产，不是欧元区货币供应量。",
     "KR_RESERVES": "外汇储备不是货币供应量，只能作为外部缓冲指标。",
     "KR_BOK": "韩国银行官方基准利率变更事件；官网末尾同利率当日延长点仅表示核验日期，不计作新决议。",
+    "PW_WLD_CNTR_SHIP_30D_YOY": "PortWatch的shipment等于集装箱进口与出口估算吨位之和；不是全部海运货量，也不是海关贸易额。",
+    "PW_WLD_CNTR_CALLS_30D_YOY": "基于AIS识别的全球集装箱船靠港30日均值同比；AIS覆盖、港口边界和船舶分类会影响读数。",
+    "PW_WLD_CNTR_IMPORT_30D_YOY": "基于AIS与船舶吃水估算的集装箱进口到港吨位；不是海关清关量。",
+    "PW_WLD_CNTR_EXPORT_30D_YOY": "基于AIS与船舶吃水估算的集装箱出口装船吨位；不是海关出口额。",
+    "PW_CHN_CNTR_SHIP_30D_YOY": "中国港口集装箱进口与出口估算吨位之和的30日均值同比；不是全部中国海运货量。",
+    "PW_CHN_CNTR_CALLS_30D_YOY": "基于AIS识别的中国港口集装箱船靠港30日均值同比；转运和港口覆盖可能造成偏差。",
+    "PW_CHN_CNTR_IMPORT_30D_YOY": "中国港口集装箱进口到港估算吨位30日均值同比；不能替代海关进口统计。",
+    "PW_CHN_CNTR_EXPORT_30D_YOY": "中国港口集装箱出口装船估算吨位30日均值同比；用于高频方向观察，不替代海关出口统计。",
 }
 
 

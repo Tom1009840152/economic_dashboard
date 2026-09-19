@@ -26,6 +26,17 @@ class EventPolicyRateRouteTests(unittest.TestCase):
         self.assertEqual(caught.exception.status_code, 422)
         self.assertIn("event-driven", caught.exception.detail)
 
+    def test_portwatch_rolling_pulse_is_not_mechanically_forecast(self) -> None:
+        with self.assertRaises(HTTPException) as caught:
+            get_forecast(
+                "PW_WLD_CNTR_SHIP_30D_YOY",
+                horizon=None,
+                db=_IndicatorOnlySession(),
+            )
+
+        self.assertEqual(caught.exception.status_code, 422)
+        self.assertIn("observation signals", caught.exception.detail)
+
 
 if __name__ == "__main__":
     unittest.main()
